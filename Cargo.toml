@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["kernel"]
+
+[profile.release]
+opt-level = 3
+debug = true
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+overflow-checks = false
+
+[profile.dev]
+opt-level = 1
+debug = true
+panic = "abort"
+overflow-checks = true

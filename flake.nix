@@ -36,6 +36,9 @@
               "rust-src"
               "rust-analyzer"
             ];
+            targets = [
+              "riscv64gc-unknown-none-elf"
+            ];
           })
         ];
 
@@ -50,9 +53,21 @@
             ]
             ++ (with pkgs; [
               qemu
+              ninja
+              cpio
             ]);
 
-          shellHook = "";
+          shellHook = ''
+            # Avoid macOS host's BSD ar/ranlib leaking into the seL4 elfloader
+            # rebuild step that we drive via ninja in tools/pack-image.sh.
+            unset AR AS CC CXX LD NM OBJCOPY OBJDUMP RANLIB READELF SIZE STRINGS STRIP
+            unset HOST_CC HOST_CXX BUILD_CC
+            unset CFLAGS CXXFLAGS LDFLAGS CPPFLAGS
+
+            # OpenSBI's Makefile uses `greadlink` (Homebrew naming). Nix's
+            # coreutils ships `readlink`, so route the var through.
+            export READLINK=readlink
+          '';
         };
       }
     );
