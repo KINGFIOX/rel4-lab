@@ -33,6 +33,7 @@ const _: () = {
 };
 
 /// Register name → index in `UserContext.regs`.
+#[allow(dead_code)]
 pub mod reg {
     pub const RA: usize = 1;
     pub const SP: usize = 2;

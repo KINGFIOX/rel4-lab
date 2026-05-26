@@ -23,16 +23,19 @@ use crate::arch::riscv64::sv39::{
 /// not mapped by the elfloader**; it gets set up by us later in M3+. For
 /// boot-time use the `kpptr_to_paddr` / `paddr_to_kpptr` helpers below.
 #[inline]
+#[allow(dead_code)]
 pub const fn pptr_to_paddr(vaddr: usize) -> usize {
     vaddr - PPTR_BASE + PADDR_BASE
 }
 
 #[inline]
+#[allow(dead_code)]
 pub const fn paddr_to_pptr(paddr: usize) -> usize {
     paddr - PADDR_BASE + PPTR_BASE
 }
 
 #[inline]
+#[allow(dead_code)]
 pub const fn is_kernel_vaddr(va: usize) -> bool {
     va >= PPTR_BASE && va < PPTR_TOP
 }
@@ -89,6 +92,7 @@ pub fn alloc_pt_page() -> *mut PageTable {
 /// its boot PT inside its own image (low PA region) which is _not_ in our
 /// kernel ELF window nor in the PSpace window, so this returns the raw
 /// physical address — callers that want to read it must arrange a mapping.
+#[allow(dead_code)]
 pub fn current_root_pt_paddr() -> usize {
     let satp = csr::satp();
     (satp & ((1usize << 44) - 1)) << RISCV_PG_SHIFT

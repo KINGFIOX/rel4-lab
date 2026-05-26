@@ -4,6 +4,8 @@
 //! Pulled from `build-riscv64/kernel/gen_config/kernel/gen_config.h` and
 //! `kernel/libsel4/sel4_arch_include/riscv64/sel4/sel4_arch/constants.h`.
 
+#![allow(dead_code)]
+
 // ---- General kernel config ------------------------------------------------
 
 pub const WORD_SIZE_BITS: usize = 6; // log2(64)
