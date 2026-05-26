@@ -124,6 +124,9 @@ fn handle_syscall(uc: &mut UserContext) {
         syscall::SYS_YIELD => {
             // Single-thread for M2: yield is a no-op.
         }
+        syscall::SYS_CALL => {
+            crate::api::syscall::do_call(uc);
+        }
         n if syscall::is_known(n) => {
             crate::println!(
                 "syscall {} not implemented yet (a0={:#x}, a1={:#x})",

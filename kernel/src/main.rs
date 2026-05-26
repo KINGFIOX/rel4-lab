@@ -19,9 +19,11 @@ extern crate core;
 mod print;
 
 mod abi;
+mod api;
 mod arch;
 mod kernel;
 mod machine;
+mod object;
 
 pub use arch::riscv64::boot::_start;
 pub use arch::riscv64::boot::init_kernel;
