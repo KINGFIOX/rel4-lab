@@ -52,6 +52,52 @@ pub fn install_initial_cap(cnode: &mut [Cte], i: usize, cap: Cap) {
     cnode[i].mdb = MdbNode::NULL;
 }
 
+/// Insert `new_cte` (already populated with cap + initial MDB) right
+/// after `parent` in the CDT doubly-linked list. Both pointers must be
+/// non-null and not equal.
+pub unsafe fn mdb_insert_after(parent: *mut Cte, new_cte: *mut Cte) {
+    debug_assert!(!parent.is_null() && !new_cte.is_null() && parent != new_cte);
+    unsafe {
+        let parent_next = (*parent).mdb.next();
+        (*new_cte).mdb.set_prev(parent as u64);
+        (*new_cte).mdb.set_next(parent_next);
+        (*parent).mdb.set_next(new_cte as u64);
+        if parent_next != 0 {
+            let next = parent_next as *mut Cte;
+            (*next).mdb.set_prev(new_cte as u64);
+        }
+    }
+}
+
+/// Unlink `cte` from its CDT siblings. Leaves the slot otherwise intact.
+pub unsafe fn mdb_unlink(cte: *mut Cte) {
+    debug_assert!(!cte.is_null());
+    unsafe {
+        let prev = (*cte).mdb.prev();
+        let next = (*cte).mdb.next();
+        if prev != 0 {
+            let p = prev as *mut Cte;
+            (*p).mdb.set_next(next);
+        }
+        if next != 0 {
+            let n = next as *mut Cte;
+            (*n).mdb.set_prev(prev);
+        }
+        (*cte).mdb = MdbNode::NULL;
+    }
+}
+
+/// Does `cte` have any CDT children, i.e. anything whose prev points to it?
+pub unsafe fn mdb_has_children(cte: *mut Cte) -> bool {
+    debug_assert!(!cte.is_null());
+    let next = unsafe { (*cte).mdb.next() };
+    if next == 0 {
+        return false;
+    }
+    let n = next as *mut Cte;
+    unsafe { (*n).mdb.prev() == cte as u64 }
+}
+
 /// Zero a freshly allocated CNode.
 pub unsafe fn zero_cnode(base: *mut u8, radix: usize) {
     unsafe { ptr::write_bytes(base, 0, cnode_bytes(radix)) };

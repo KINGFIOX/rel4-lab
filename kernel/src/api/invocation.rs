@@ -38,18 +38,17 @@ mod obj {
 /// we actually handle.
 mod label {
     pub const UNTYPED_RETYPE: u64 = 1;
-    // CNode (relative offsets within the enum; the absolute numbers vary
-    // depending on whether `KERNEL_MCS` is set — we follow the non-MCS
-    // ordering from the build we target).
-    pub const CNODE_REVOKE: u64 = 24;
-    pub const CNODE_DELETE: u64 = 25;
-    pub const CNODE_CANCEL_BADGED_SENDS: u64 = 26;
-    pub const CNODE_COPY: u64 = 27;
-    pub const CNODE_MINT: u64 = 28;
-    pub const CNODE_MOVE: u64 = 29;
-    pub const CNODE_MUTATE: u64 = 30;
-    pub const CNODE_ROTATE: u64 = 31;
-    pub const CNODE_SAVE_CALLER: u64 = 32;
+    // Non-MCS ordering from `libsel4/include/sel4/invocation.h`. The
+    // TCB block occupies labels 2..=16; CNode ops begin at 17.
+    pub const CNODE_REVOKE: u64 = 17;
+    pub const CNODE_DELETE: u64 = 18;
+    pub const CNODE_CANCEL_BADGED_SENDS: u64 = 19;
+    pub const CNODE_COPY: u64 = 20;
+    pub const CNODE_MINT: u64 = 21;
+    pub const CNODE_MOVE: u64 = 22;
+    pub const CNODE_MUTATE: u64 = 23;
+    pub const CNODE_ROTATE: u64 = 24;
+    pub const CNODE_SAVE_CALLER: u64 = 25;
 }
 
 /// Helper: compute log2 of the in-memory bytes of an object given its
@@ -345,25 +344,275 @@ pub fn handle_page_table(
     }
 }
 
+/// Convert a kernel-VA in either the kernel-ELF window or the PSpace
+/// window back to its physical address. Frame caps minted from regular
+/// untypeds carry kernel-ELF VAs; device frame caps carry PSpace VAs.
 #[inline]
 fn kva_to_pa(kva: u64) -> u64 {
-    use crate::abi::constants::{KERNEL_ELF_BASE, PHYS_BASE_RAW};
-    kva - (KERNEL_ELF_BASE as u64) + (PHYS_BASE_RAW as u64)
+    use crate::abi::constants::{KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE};
+    if kva >= (KERNEL_ELF_BASE as u64) {
+        kva - (KERNEL_ELF_BASE as u64) + (PHYS_BASE_RAW as u64)
+    } else {
+        // PSpace window: KVA = PPTR_BASE + (pa - PADDR_BASE)
+        kva - (PPTR_BASE as u64) + (PADDR_BASE as u64)
+    }
 }
 
-/// CNode operations (Copy/Mint/Move/etc.). Not yet implemented; we just
-/// signal Unsupported so the rootserver can fall back / abort cleanly
-/// rather than reading garbage.
+/// CNode operations: Revoke/Delete/Copy/Mint/Move/Mutate/Rotate.
+///
+/// `_cap` (the looked-up `_service`) is the destination CSpace root; the
+/// extra-caps[0] slot in the IPC buffer holds the source CSpace root.
+/// Both must be CNode caps. For two-arg ops (Revoke/Delete) only the
+/// destination is used.
 pub fn handle_cnode(
-    _thread: &Thread,
+    thread: &Thread,
     _src_slot: *mut Cte,
-    _cap: Cap,
+    dest_root_cap: Cap,
     label_id: u64,
-    _length: u64,
-    _uc: &mut UserContext,
+    length: u64,
+    uc: &mut UserContext,
 ) -> Result<(), SyscallError> {
-    crate::println!("  CNode op: label={} (unsupported)", label_id);
-    Err(SyscallError::Unsupported)
+    match label_id {
+        label::CNODE_REVOKE => cnode_op_revoke(dest_root_cap, length, uc),
+        label::CNODE_DELETE => cnode_op_delete(dest_root_cap, length, uc),
+        label::CNODE_COPY => cnode_op_copy_or_mint(thread, dest_root_cap, length, uc, false),
+        label::CNODE_MINT => cnode_op_copy_or_mint(thread, dest_root_cap, length, uc, true),
+        label::CNODE_MOVE => cnode_op_move_or_mutate(thread, dest_root_cap, length, uc, false),
+        label::CNODE_MUTATE => cnode_op_move_or_mutate(thread, dest_root_cap, length, uc, true),
+        label::CNODE_CANCEL_BADGED_SENDS => {
+            // No EP/Notif IPC yet (M3.6) — treat as success no-op.
+            Ok(())
+        }
+        _ => {
+            crate::println!("  CNode op: label={} (unsupported)", label_id);
+            Err(SyscallError::IllegalOperation)
+        }
+    }
+}
+
+/// Read message-register `mr_i` for `i ≥ 4` from the IPC buffer (mr0..3
+/// live in `uc.regs[a2..a5]`). Returns 0 if the IPC buffer isn't mapped.
+fn read_mr(thread: &Thread, uc: &UserContext, i: usize) -> u64 {
+    match i {
+        0 => uc.regs[reg::A2],
+        1 => uc.regs[reg::A3],
+        2 => uc.regs[reg::A4],
+        3 => uc.regs[reg::A5],
+        _ if !thread.ipc_buffer_kva.is_null() => unsafe {
+            *thread.ipc_buffer_kva.add(1 + i)
+        },
+        _ => 0,
+    }
+}
+
+fn cnode_op_revoke(
+    dest_root_cap: Cap,
+    length: u64,
+    uc: &UserContext,
+) -> Result<(), SyscallError> {
+    if length < 2 {
+        return Err(SyscallError::TruncatedMessage);
+    }
+    let index = uc.regs[reg::A2];
+    let depth = uc.regs[reg::A3] as u32 & 0xff;
+    let slot = resolve_slot(dest_root_cap, index, depth)?;
+    revoke_descendants(slot);
+    Ok(())
+}
+
+fn cnode_op_delete(
+    dest_root_cap: Cap,
+    length: u64,
+    uc: &UserContext,
+) -> Result<(), SyscallError> {
+    if length < 2 {
+        return Err(SyscallError::TruncatedMessage);
+    }
+    let index = uc.regs[reg::A2];
+    let depth = uc.regs[reg::A3] as u32 & 0xff;
+    let slot = resolve_slot(dest_root_cap, index, depth)?;
+    delete_slot(slot)?;
+    Ok(())
+}
+
+fn cnode_op_copy_or_mint(
+    thread: &Thread,
+    dest_root_cap: Cap,
+    length: u64,
+    uc: &UserContext,
+    is_mint: bool,
+) -> Result<(), SyscallError> {
+    if length < if is_mint { 6 } else { 5 } {
+        return Err(SyscallError::TruncatedMessage);
+    }
+    let dest_index = uc.regs[reg::A2];
+    let dest_depth = uc.regs[reg::A3] as u32 & 0xff;
+    let src_index = uc.regs[reg::A4];
+    let src_depth = uc.regs[reg::A5] as u32 & 0xff;
+    let _rights = read_mr(thread, uc, 4);
+    let badge = if is_mint { read_mr(thread, uc, 5) } else { 0 };
+
+    let src_root_cptr = read_extra_cap(thread, 0);
+    let (src_root_cap, _) = cspace::lookup_cap(thread, src_root_cptr)
+        .map_err(|_| SyscallError::InvalidCapability)?;
+
+    let dest = resolve_slot(dest_root_cap, dest_index, dest_depth)?;
+    let src = resolve_slot(src_root_cap, src_index, src_depth)?;
+
+    unsafe {
+        if !(*dest).cap.is_null() {
+            return Err(SyscallError::DeleteFirst);
+        }
+        if (*src).cap.is_null() {
+            return Err(SyscallError::IllegalOperation);
+        }
+        let mut new_cap = (*src).cap;
+        if is_mint {
+            new_cap = apply_badge(new_cap, badge);
+        }
+        (*dest).cap = new_cap;
+        // Both Copy and Mint produce derivable children; we just record
+        // the link so future Revoke/Delete walks find them.
+        (*dest).mdb = crate::object::mdb::MdbNode::NULL;
+        crate::object::cnode::mdb_insert_after(src, dest);
+    }
+    Ok(())
+}
+
+fn cnode_op_move_or_mutate(
+    thread: &Thread,
+    dest_root_cap: Cap,
+    length: u64,
+    uc: &UserContext,
+    is_mutate: bool,
+) -> Result<(), SyscallError> {
+    if length < if is_mutate { 5 } else { 4 } {
+        return Err(SyscallError::TruncatedMessage);
+    }
+    let dest_index = uc.regs[reg::A2];
+    let dest_depth = uc.regs[reg::A3] as u32 & 0xff;
+    let src_index = uc.regs[reg::A4];
+    let src_depth = uc.regs[reg::A5] as u32 & 0xff;
+    let badge = if is_mutate { read_mr(thread, uc, 4) } else { 0 };
+
+    let src_root_cptr = read_extra_cap(thread, 0);
+    let (src_root_cap, _) = cspace::lookup_cap(thread, src_root_cptr)
+        .map_err(|_| SyscallError::InvalidCapability)?;
+
+    let dest = resolve_slot(dest_root_cap, dest_index, dest_depth)?;
+    let src = resolve_slot(src_root_cap, src_index, src_depth)?;
+
+    unsafe {
+        if !(*dest).cap.is_null() {
+            return Err(SyscallError::DeleteFirst);
+        }
+        if (*src).cap.is_null() {
+            return Err(SyscallError::IllegalOperation);
+        }
+        let mut moved = (*src).cap;
+        if is_mutate {
+            moved = apply_badge(moved, badge);
+        }
+        let mut moved_mdb = (*src).mdb;
+        crate::object::cnode::mdb_unlink(src);
+        (*src).cap = Cap::null();
+        (*dest).cap = moved;
+        // Preserve MDB linkage so Revoke still works through the move.
+        moved_mdb = moved_mdb; // (already moved)
+        (*dest).mdb = moved_mdb;
+        // Re-thread the doubly linked list around the new location.
+        let prev = (*dest).mdb.prev();
+        let next = (*dest).mdb.next();
+        if prev != 0 {
+            let p = prev as *mut Cte;
+            (*p).mdb.set_next(dest as u64);
+        }
+        if next != 0 {
+            let n = next as *mut Cte;
+            (*n).mdb.set_prev(dest as u64);
+        }
+    }
+    Ok(())
+}
+
+/// Resolve `(index, depth)` to a `Cte*` via the given CNode-root cap.
+fn resolve_slot(root_cap: Cap, index: u64, depth: u32) -> Result<*mut Cte, SyscallError> {
+    if root_cap.tag() != Some(CapTag::CNode) {
+        return Err(SyscallError::InvalidCapability);
+    }
+    let depth = if depth == 0 { cspace::WORD_BITS } else { depth };
+    if depth > cspace::WORD_BITS {
+        return Err(SyscallError::RangeError);
+    }
+    let r = cspace::lookup_slot_in(root_cap, index, depth)
+        .map_err(|_| SyscallError::InvalidCapability)?;
+    if r.bits_remaining != 0 {
+        return Err(SyscallError::RangeError);
+    }
+    Ok(r.slot)
+}
+
+/// Apply a badge / guard to a cap when minting/mutating. Currently
+/// supported: badging Endpoint/Notification caps, and rewriting the
+/// guard on CNode caps. Other types are returned unchanged because the
+/// allocman path frequently mints "frame caps with rights" — for M3 we
+/// don't enforce rights yet, so the cap is just duplicated.
+fn apply_badge(cap: Cap, badge: u64) -> Cap {
+    match cap.tag() {
+        Some(CapTag::Endpoint) | Some(CapTag::Notification) => {
+            // Badge lives in words[1] for EP/Notification.
+            let mut out = cap;
+            out.words[1] = badge;
+            out
+        }
+        Some(CapTag::CNode) => {
+            // CNodeCapData: low 6 bits = guard_size, high 58 = guard.
+            let guard_size = badge & 0x3F;
+            let guard = badge >> 6;
+            Cap::new_cnode(cap.cnode_ptr(), cap.cnode_radix(), guard, guard_size)
+        }
+        _ => cap,
+    }
+}
+
+/// Empty a slot, freeing the resources behind its cap if necessary. For
+/// M3.4 we don't yet zero out the object's backing memory (that's a
+/// Revoke responsibility) — we just clear the slot and unlink from CDT.
+fn delete_slot(slot: *mut Cte) -> Result<(), SyscallError> {
+    unsafe {
+        if (*slot).cap.is_null() {
+            return Ok(());
+        }
+        if crate::object::cnode::mdb_has_children(slot) {
+            return Err(SyscallError::RevokeFirst);
+        }
+        crate::object::cnode::mdb_unlink(slot);
+        (*slot).cap = Cap::null();
+    }
+    Ok(())
+}
+
+/// Walk the CDT descendants of `cte` and clear them. The C kernel does
+/// this recursively with preemption points; we just iterate the linked
+/// list once since our single-thread model has no preemption.
+fn revoke_descendants(cte: *mut Cte) {
+    unsafe {
+        // Walk forward until we hit a sibling/parent (i.e. an MDB node
+        // whose prev is not `cte` itself).
+        let parent = cte;
+        loop {
+            let next = (*parent).mdb.next();
+            if next == 0 {
+                break;
+            }
+            let child = next as *mut Cte;
+            if (*child).mdb.prev() != parent as u64 {
+                break;
+            }
+            crate::object::cnode::mdb_unlink(child);
+            (*child).cap = Cap::null();
+        }
+    }
 }
 
 /// Helper: read mr4 / mr5 from the IPC buffer. The IPC buffer's `msg`

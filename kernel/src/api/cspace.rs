@@ -26,6 +26,9 @@ use crate::api::thread::Thread;
 use crate::object::cap::{Cap, CapTag};
 use crate::object::cnode::Cte;
 
+/// Maximum bits in a CPtr (= `seL4_WordBits`).
+pub const WORD_BITS: u32 = 64;
+
 #[derive(Copy, Clone, Debug)]
 pub enum LookupError {
     /// Guard bits in the CPtr didn't match the CNode cap's guard.
@@ -47,11 +50,10 @@ pub struct LookupResult {
     pub bits_remaining: u32,
 }
 
-/// Walk the thread's CSpace to resolve `cptr` to a slot pointer. Uses the
-/// standard seL4 algorithm but assumes a single root CNode for now.
+/// Walk the thread's CSpace to resolve `cptr` to a slot pointer.
 ///
 /// `depth_limit` is the number of bits of the CPtr that must be consumed.
-/// Pass `seL4_WordBits = 64` for normal lookups; smaller values support
+/// Pass `WORD_BITS = 64` for normal lookups; smaller values support
 /// the partial-CNode-walk operations used by `CNode_Copy` & friends.
 pub fn lookup_slot(
     thread: &Thread,
@@ -59,39 +61,22 @@ pub fn lookup_slot(
     depth_limit: u32,
 ) -> Result<LookupResult, LookupError> {
     debug_assert!(!thread.cspace_root.is_null(), "no CSpace installed");
-
-    // Single-CNode walk: peel off the top `guard_bits` of the CPtr (must
-    // equal the cap's guard) and then `radix` bits as the slot index.
-    let total = thread.cspace_guard_bits + thread.cspace_radix;
-    if depth_limit < total {
-        return Err(LookupError::DepthMismatch);
-    }
-
-    let cptr_top = cptr >> (depth_limit - total);
-    let guard_mask = if thread.cspace_guard_bits == 0 {
-        0
-    } else {
-        (1u64 << thread.cspace_guard_bits) - 1
-    };
-    let guard_value = (cptr_top >> thread.cspace_radix) & guard_mask;
-    if guard_value != (thread.cspace_guard & guard_mask) {
-        return Err(LookupError::GuardMismatch);
-    }
-    let radix_mask = (1u64 << thread.cspace_radix) - 1;
-    let idx = cptr_top & radix_mask;
-    let slot = unsafe { thread.cspace_root.add(idx as usize) };
-    Ok(LookupResult {
-        slot,
-        bits_remaining: depth_limit - total,
-    })
+    let root_cap = Cap::new_cnode(
+        thread.cspace_root as u64,
+        thread.cspace_radix as u64,
+        thread.cspace_guard,
+        thread.cspace_guard_bits as u64,
+    );
+    lookup_slot_in(root_cap, cptr, depth_limit)
 }
 
-/// Convenience: resolve `cptr` and return the cap stored in the slot.
+/// Convenience: resolve `cptr` through the thread's CSpace and return the
+/// cap stored in the final slot, plus a pointer to the slot itself.
 pub fn lookup_cap(
     thread: &Thread,
     cptr: u64,
 ) -> Result<(Cap, *mut Cte), LookupError> {
-    let r = lookup_slot(thread, cptr, 64)?;
+    let r = lookup_slot(thread, cptr, WORD_BITS)?;
     let cap = unsafe { (*r.slot).cap };
     Ok((cap, r.slot))
 }
@@ -104,5 +89,55 @@ pub fn lookup_cap_of(thread: &Thread, cptr: u64, want: CapTag) -> Option<(Cap, *
         Some((cap, slot))
     } else {
         None
+    }
+}
+
+/// Walk a CSpace whose root is the given CNode `cap`, resolving `cptr`
+/// using `depth_limit` bits. Supports nested CNode walks (a slot
+/// containing another CNode cap consumes more bits) but does not
+/// recurse into non-CNode caps.
+pub fn lookup_slot_in(
+    mut cap: Cap,
+    mut cptr: u64,
+    mut depth_limit: u32,
+) -> Result<LookupResult, LookupError> {
+    loop {
+        if cap.tag() != Some(CapTag::CNode) {
+            return Err(LookupError::DepthMismatch);
+        }
+        let radix = cap.cnode_radix() as u32;
+        let guard_bits = cap.cnode_guard_size() as u32;
+        let guard = cap.cnode_guard();
+        let total = radix + guard_bits;
+        if depth_limit < total {
+            return Err(LookupError::DepthMismatch);
+        }
+
+        // Top of the CPtr after the depth window: peel `total` bits.
+        let cptr_top = cptr >> (depth_limit - total);
+        let guard_mask = if guard_bits == 0 { 0 } else { (1u64 << guard_bits) - 1 };
+        if ((cptr_top >> radix) & guard_mask) != (guard & guard_mask) {
+            return Err(LookupError::GuardMismatch);
+        }
+        let radix_mask = (1u64 << radix) - 1;
+        let idx = cptr_top & radix_mask;
+        let cnode_base = cap.cnode_ptr() as *mut Cte;
+        let slot = unsafe { cnode_base.add(idx as usize) };
+
+        let remaining = depth_limit - total;
+        if remaining == 0 {
+            return Ok(LookupResult { slot, bits_remaining: 0 });
+        }
+
+        // More bits to resolve — descend through the slot's cap if it's
+        // another CNode, otherwise stop here.
+        let next_cap = unsafe { (*slot).cap };
+        if next_cap.tag() != Some(CapTag::CNode) {
+            return Ok(LookupResult { slot, bits_remaining: remaining });
+        }
+        // Strip the bits we just consumed and recurse.
+        cptr &= (1u64 << (depth_limit - total)) - 1;
+        depth_limit -= total;
+        cap = next_cap;
     }
 }

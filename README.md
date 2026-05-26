@@ -12,10 +12,23 @@ binary boots unmodified on top of it.
 | M1 | M-mode standalone boot, NS16550 UART banner via `qemu -bios none -kernel` | ✅ Done |
 | M2.1 | S-mode boot under the seL4 C elfloader, SBI console, prints kernel banner | ✅ Done |
 | M2.2 | `tools/pack-image.sh` re-packs the official image; sel4test-driver enters U-mode and prints via `seL4_DebugPutChar` | ✅ Done |
-| M3   | CSpace / CTE / MDB, capability ops, TCBs, Endpoints, VSpace `Map/Unmap`, Untyped `Retype` | 🚧 In progress |
-| M4   | PLIC IRQs, SBI timer / preemption, debug breakpoints, full sel4test pass | ⏳ Not started |
+| M3.1 | `cap_t` + `mdb_node_t` + `cte_t`, root CNode with 16 fixed initial caps, untyped enumeration into BootInfo | ✅ Done |
+| M3.2 | `seL4_Call` slow path: CSpace lookup, extra-cap reading from IPCBuffer, error encoding | ✅ Done |
+| M3.3 | `Untyped_Retype` (Untyped/CNode/Frame/PageTable/TCB/EP/Notification), `RISCVPage_Map`, `RISCVPageTable_Map` — driver bootstraps allocman + serial server and prints `seL4 Test` banner | ✅ Done |
+| M3.4 | CNode `Copy/Mint/Move/Mutate/Delete/Revoke` + MDB CDT linkage | ✅ Done |
+| M3.5 | PSpace window (8 × 1 GiB megapages), 3 GiB RAM as untypeds, QEMU MMIO as device untypeds, `seL4_DebugCapIdentify` returns real cap tags — `sel4test-driver` now starts the test suite and runs tests 0..16 | ✅ Done |
+| M3.6 | TCB objects + context switching + round-robin scheduler | 🚧 Next |
+| M3.7 | Endpoint/Notification slow-path Send/Recv/Call/Reply/ReplyRecv, IPC msg + cap transfer | ⏳ Pending |
+| M3.8 | VSpace full: ASIDPool/Control, Unmap, mapped tracking, SFENCE | ⏳ Pending |
+| M3.9 | Faults → fault-endpoint forwarding | ⏳ Pending |
+| M4   | DTB parsing, PLIC IRQs, SBI timer / preemption, debug breakpoints, full sel4test pass | ⏳ Not started |
 
-A live run of M2.2 (truncated, full output is reproducible via `make run`):
+A live run of M3.5 (truncated; the kernel boots, hands control to the
+rootserver in U-mode, the rootserver's `allocman` carves up untyped
+memory via dozens of `Untyped_Retype` calls, maps frames via
+`RISCVPage_Map`, brings up the serial server, prints the seL4 Test
+banner, runs through the `vka_alloc_untyped` size-probe, and then
+starts the test suite running test cases 0..16):
 
 ```text
 ELF-loader started on (HART 0) (NODES 1)
@@ -32,15 +45,27 @@ microkernel: Rust kernel booted (S-mode, Sv39)
   hart_id=0 core_id=0 dtb=0x80325000 (5227 bytes)
   user image: pa=[0x80327000..0x8072d000], pv_offset=0x80317000, entry=0x1c6cc
 microkernel: bringing up rootserver
-  root PT at VA 0xffffffff80204000 PA 0x80204000
-  mapped user image VA [0x10000..0x416000) ...
-  satp <- 0x8000100000080204
+  root PT at VA 0xffffffff80205000 PA 0x80205000
+  root CNode: 16 initial caps, 6 untyped (slots 16..22), 8170 slots free
+  bootinfo: ipc@0x7ffff000 cnode_bits=13 untyped=[16..22) (6 caps)
+  satp <- 0x8000100000080205
   entering user mode at 0x1c6cc
   --- transferring control to rootserver ---
+  Untyped_Retype: type=0 size=20 ...   <-- driver splits the 64 MiB pool
+  ...
+  Page_Map: vaddr=0x10002000 frame_kva=0xffffffc082012000 ...
 
-Warning: using printf before serial is set up. This only works as your
-printf is backed by seL4_Debug_PutChar()
-vka_alloc_object_at_maybe_dev@object.h:57 ...   <-- M3 work starts here
+seL4 Test
+=========
+
+vka_alloc_object_at_maybe_dev@object.h:57 Failed to allocate object of size 2147483648, error 1
+... (driver size-probe loop counts down from 2 GiB) ...
+Starting test suite sel4test
+Starting test 0: Test that there are tests
+Starting test 1: SYSCALL0000
+Starting test 2: SYSCALL0001
+...
+Starting test 16: BIND0001                                   <-- M3.6 (TCB/sched) needed
 ```
 
 ## Repository layout
@@ -74,9 +99,19 @@ microkernel/
 │       ├── machine/
 │       │   ├── console.rs     # SBI-backed putc
 │       │   └── uart.rs        # NS16550 (M1 only)
-│       └── kernel/
-│           ├── boot.rs        # bringup_rootserver
-│           └── bootmem.rs     # bump page allocator
+│       ├── kernel/
+│       │   ├── boot.rs        # bringup_rootserver
+│       │   └── bootmem.rs     # bump page allocator
+│       ├── object/
+│       │   ├── cap.rs         # cap_t bit layouts (Untyped/CNode/Frame/PT/...)
+│       │   ├── mdb.rs         # mdb_node_t
+│       │   ├── cnode.rs       # Cte + cnode_at / install_initial_cap
+│       │   └── untyped.rs     # free-range splitter, untyped cap factory
+│       └── api/
+│           ├── thread.rs      # rootserver thread record (CSpace/VSpace/IPCBuf)
+│           ├── cspace.rs      # single-level CSpace lookup (CPtr → Cte*)
+│           ├── syscall.rs     # seL4_Call dispatch + error reply encoding
+│           └── invocation.rs  # Untyped_Retype, Page_Map, PageTable_Map, ...
 └── tools/
     ├── pack-image.sh      # rebuild Rust kernel + ninja repackage + emit image
     └── simulate.sh        # qemu wrapper (standalone or packed image)

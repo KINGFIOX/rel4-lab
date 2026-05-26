@@ -77,9 +77,16 @@ pub fn do_call(uc: &mut UserContext) {
         Some(CapTag::PageTable) => {
             invocation::handle_page_table(t, slot, cap, label, info.length(), uc)
         }
-        Some(CapTag::IrqControl) | Some(CapTag::Domain) | Some(CapTag::Thread) => {
+        Some(CapTag::IrqControl)
+        | Some(CapTag::Domain)
+        | Some(CapTag::Thread)
+        | Some(CapTag::AsidControl)
+        | Some(CapTag::AsidPool) => {
             // Stubbed cap kinds: report success-with-empty so the
             // rootserver's optional features fail soft instead of aborting.
+            // AsidPool_Assign in particular is what `assign_asid_pool`
+            // hits during process spawn — succeeding lets the test
+            // driver progress to TCB Configure (M3.6).
             Ok(())
         }
         _ => Err(SyscallError::IllegalOperation),

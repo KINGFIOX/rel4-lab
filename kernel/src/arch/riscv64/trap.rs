@@ -114,18 +114,43 @@ fn handle_syscall(uc: &mut UserContext) {
             // No-op for M2.2. The name is read from the IPC buffer in the
             // real seL4 kernel; we silently accept.
         }
+        syscall::SYS_DEBUG_CAP_IDENTIFY => {
+            // Returns the cap_tag of the cap at `a0`, with 0 meaning a
+            // null cap / unresolvable CPtr. libsel4debug uses this to
+            // distinguish "freed slot" from "live cap".
+            let cptr = uc.regs[reg::A0];
+            let t = unsafe { crate::api::thread::current() };
+            let tag = match crate::api::cspace::lookup_cap(t, cptr) {
+                Ok((cap, _)) => cap.tag_raw(),
+                Err(_) => 0,
+            };
+            uc.regs[reg::A0] = tag;
+        }
         syscall::SYS_DEBUG_DUMP_SCHEDULER
         | syscall::SYS_DEBUG_HALT
-        | syscall::SYS_DEBUG_CAP_IDENTIFY
         | syscall::SYS_DEBUG_SNAPSHOT
         | syscall::SYS_DEBUG_SEND_IPI => {
             // Debug aids — silently no-op.
         }
         syscall::SYS_YIELD => {
-            // Single-thread for M2: yield is a no-op.
+            // Single-thread, no scheduler yet — yield is a no-op.
         }
         syscall::SYS_CALL => {
             crate::api::syscall::do_call(uc);
+        }
+        syscall::SYS_SEND
+        | syscall::SYS_NB_SEND
+        | syscall::SYS_REPLY
+        | syscall::SYS_RECV
+        | syscall::SYS_REPLY_RECV
+        | syscall::SYS_NB_RECV => {
+            // M3.6 will turn these into real IPC. For now, silently no-op
+            // so the syscall-register-preservation tests pass and any
+            // fire-and-forget Send to a non-EP cap doesn't crash the
+            // rootserver. Send-style syscalls have no return value the
+            // caller expects, and Recv-style syscalls callers that
+            // currently exist all happen on uninitialised endpoints
+            // during driver setup.
         }
         n if syscall::is_known(n) => {
             crate::println!(

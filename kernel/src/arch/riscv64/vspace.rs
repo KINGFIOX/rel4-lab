@@ -61,7 +61,7 @@ pub const fn paddr_to_kpptr(paddr: usize) -> usize {
 // distinct from the rootserver-visible "untyped" memory and is only used
 // by the kernel itself.
 
-const BOOT_PT_POOL_PAGES: usize = 16;
+const BOOT_PT_POOL_PAGES: usize = 64;
 
 #[repr(C, align(4096))]
 struct BootPtPool {
@@ -167,21 +167,37 @@ pub fn user_flags(read: bool, write: bool, exec: bool) -> u64 {
     f
 }
 
-/// Build a fresh root Sv39 page table with the kernel ELF window installed
-/// as a single 1 GiB megapage at L2[510] (VA 0xFFFFFFFF8000_0000 →
-/// PA 0x80000000, R/W/X, supervisor, global).
+/// Build a fresh root Sv39 page table with kernel + PSpace mappings:
 ///
-/// All other entries start invalid; user mappings are added later via
-/// `map_user_4k`.
+///   • Kernel ELF window at L2[510] (single 1 GiB megapage,
+///     VA `KERNEL_ELF_BASE` → PA 0x8000_0000, R/W/X kernel-only).
+///   • PSpace window covering PA [0, 4 GiB) via L2[256..260] (four
+///     1 GiB megapages, R/W kernel-only). The PSpace VA for PA `p` is
+///     `PPTR_BASE + p`; we use it as the `capPtr` encoding for both
+///     regular and device untyped/frame caps.
+///
+/// User mappings (≤ L2[255]) are filled in later via `map_user_4k`.
 pub fn make_boot_root_pt() -> *mut PageTable {
     let root = alloc_pt_page();
-    // L2 index for kernel ELF window: bits 38..30 of KERNEL_ELF_BASE.
+    let kernel_flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_G | PTE_A | PTE_D;
+    let pspace_flags = PTE_V | PTE_R | PTE_W | PTE_G | PTE_A | PTE_D;
+
     let kernel_l2_index = pt_index(KERNEL_ELF_BASE, 2);
-    // 1 GiB megapage covering PA [0x80000000, 0xC0000000).
     let kernel_pa = 0x8000_0000u64;
-    let flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_G | PTE_A | PTE_D;
     unsafe {
-        (*root).entries[kernel_l2_index] = Pte::leaf(kernel_pa, flags);
+        (*root).entries[kernel_l2_index] = Pte::leaf(kernel_pa, kernel_flags);
+    }
+
+    // PSpace: map PA [0, 8 GiB) at PSpace VAs 0xFFFFFFC0_00000000 ..
+    // 0xFFFFFFC2_00000000 (i.e. L2[256..264]). Eight 1 GiB megapages
+    // gives us comfortable headroom over QEMU virt's typical 3–4 GiB
+    // RAM range while still using only one extra 8-byte PTE per GiB.
+    let pspace_base_l2 = pt_index(crate::abi::constants::PPTR_BASE, 2);
+    for i in 0..8 {
+        let pa = (i as u64) * (1u64 << 30);
+        unsafe {
+            (*root).entries[pspace_base_l2 + i] = Pte::leaf(pa, pspace_flags);
+        }
     }
     root
 }

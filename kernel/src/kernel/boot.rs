@@ -61,13 +61,29 @@ pub static mut ROOTSERVER_CONTEXT: UserContext = UserContext {
     _reserved: 0,
 };
 
-/// Translate a kernel-ELF-window virtual address to a physical address.
-/// Provided here so we can pass it to other modules without exposing the
-/// raw arithmetic.
+/// Translate a kernel VA (either the kernel-ELF window or the PSpace
+/// window) back to its physical address. Caps minted from RAM untypeds
+/// use PSpace VAs; kernel-internal allocations (root CNode, IPC buffer,
+/// stack) live in the boot pool inside the kernel ELF window.
 #[inline]
 fn kva_to_pa(kva: u64) -> u64 {
-    use crate::abi::constants::PHYS_BASE_RAW;
-    kva - (KERNEL_ELF_BASE as u64) + (PHYS_BASE_RAW as u64)
+    use crate::abi::constants::{PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE};
+    if kva >= (KERNEL_ELF_BASE as u64) {
+        kva - (KERNEL_ELF_BASE as u64) + (PHYS_BASE_RAW as u64)
+    } else {
+        kva - (PPTR_BASE as u64) + (PADDR_BASE as u64)
+    }
+}
+
+/// Translate a physical address into the PSpace-window VA used as the
+/// capability pointer for *device* untyped/frame caps. We don't actually
+/// map PSpace in the page table — the kernel never dereferences device
+/// memory directly — but we use the VA encoding so caps look identical
+/// to what the C kernel would emit.
+#[inline]
+fn pa_to_pspace_va(pa: u64) -> u64 {
+    use crate::abi::constants::{PADDR_BASE, PPTR_BASE};
+    pa + (PPTR_BASE as u64) - (PADDR_BASE as u64)
 }
 
 /// Bootstrap the user environment and drop into U-mode.
@@ -144,19 +160,37 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         bi_slot::CAP_DOMAIN as usize,
         Cap::new_domain(),
     );
+    install_initial_cap(
+        cnode,
+        bi_slot::CAP_ASID_CONTROL as usize,
+        Cap::new_asid_control(),
+    );
+    // Initial-thread ASID pool: we don't model the full ASID allocator
+    // yet, but the rootserver only needs the cap to exist and accept
+    // `ASIDPool_Assign` invocations for spawning child VSpaces. Use a
+    // zero base / null pool pointer placeholder.
+    install_initial_cap(
+        cnode,
+        bi_slot::CAP_INIT_THREAD_ASID_POOL as usize,
+        Cap::new_asid_pool(0, 0),
+    );
 
     // --- Free memory enumeration → untyped caps --------------------------
     //
-    // For M3 we keep this dumb: take a hardcoded 64 MiB region above the
-    // rootserver image and let the splitter chop it into naturally-aligned
-    // power-of-two chunks. The DTB-driven layout discovery is M4 work.
-    const FREE_RAM_BASE_PA: u64 = 0x8100_0000;
-    const FREE_RAM_BYTES: u64 = 64 * 1024 * 1024;
+    // The rootserver image occupies PA [0x80328000..0x8072e000] (about 4
+    // MiB right after our kernel image). Beyond the elfloader's reported
+    // user_pend we hand out everything up to the top of QEMU virt's 3 GiB
+    // RAM (PA 0x14000_0000). `capPtr` is encoded as the PSpace VA so the
+    // 1 GiB megapages we just installed map back to the right PA.
+    //
+    // We bump the rounded-up free base by an extra 32 MiB safety margin
+    // to keep clear of the elfloader's CPIO data (located in PA region
+    // 0x8100_0000+ before it copies the kernel/rootserver out).
+    const FREE_RAM_BASE_PA: u64 = 0x8200_0000; // 2 MiB aligned, after rootserver + elfloader staging
+    const RAM_TOP_PA: u64 = 0x1_4000_0000;     // QEMU virt -m 3072 → 3 GiB
     let free_range = FreeRange {
-        // capPtr encodes a kernel-window VA. Use the kernel ELF window
-        // since the elfloader-set megapage already covers PA up to 0xC0000000.
-        start_kva: (KERNEL_ELF_BASE as u64) + (FREE_RAM_BASE_PA - 0x8000_0000),
-        size: FREE_RAM_BYTES,
+        start_kva: pa_to_pspace_va(FREE_RAM_BASE_PA),
+        size: RAM_TOP_PA - FREE_RAM_BASE_PA,
     };
 
     let mut next_slot = bi_slot::NUM_INITIAL_CAPS as usize;
@@ -190,7 +224,50 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         next_slot += 1;
         bi_untyped_count += 1;
     }
+
+    // --- Device untypeds (QEMU virt MMIO) --------------------------------
+    //
+    // The QEMU `virt` board lays out MMIO in [0, 0x80000000) and DRAM
+    // starting at 0x80000000. Cover the entire MMIO range with naturally
+    // aligned device untypeds so sel4test's "device frame" allocations can
+    // pull memory from it.
+    //
+    // We use PSpace VAs for `capPtr` (sign-extended) — they're never
+    // dereferenced by the kernel (device pages aren't readable from the
+    // S-mode kernel without an explicit mapping) but they match the
+    // encoding the C kernel emits.
+    const DEVICE_PA_BASE: u64 = 0x0;
+    const DEVICE_PA_TOP: u64 = 0x8000_0000; // exclusive
+    let device_range = FreeRange {
+        start_kva: pa_to_pspace_va(DEVICE_PA_BASE),
+        size: DEVICE_PA_TOP - DEVICE_PA_BASE,
+    };
+    let device_start_slot = next_slot;
+    for (base_kva, bits) in UntypedChunks::new(device_range) {
+        if next_slot >= cnode.len() || bi_untyped_count >= MAX_NUM_BOOTINFO_UNTYPED_CAPS {
+            break;
+        }
+        let cap = make_untyped_cap(base_kva, bits, true);
+        install_initial_cap(cnode, next_slot, cap);
+        // For device caps, paddr = kva - PPTR_BASE.
+        let pa = base_kva - (crate::abi::constants::PPTR_BASE as u64);
+        untyped_list_local[bi_untyped_count] = UntypedDesc {
+            paddr: pa,
+            size_bits: bits,
+            is_device: 1,
+            _padding: [0; 6],
+        };
+        next_slot += 1;
+        bi_untyped_count += 1;
+    }
+    let device_end_slot = next_slot;
     let untyped_end_slot = next_slot;
+    crate::println!(
+        "  device untyped: slots {}..{} ({} caps)",
+        device_start_slot,
+        device_end_slot,
+        device_end_slot - device_start_slot,
+    );
     crate::println!(
         "  root CNode: {} initial caps, {} untyped (slots {}..{}), {} slots free",
         bi_slot::NUM_INITIAL_CAPS,

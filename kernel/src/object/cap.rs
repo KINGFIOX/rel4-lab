@@ -224,6 +224,23 @@ impl Cap {
         c
     }
 
+    #[inline]
+    pub const fn new_asid_control() -> Cap {
+        let mut c = Cap::null();
+        c.words[0] = (CapTag::AsidControl as u64) << 59;
+        c
+    }
+
+    #[inline]
+    pub const fn new_asid_pool(base: u64, ptr: u64) -> Cap {
+        // words[0]: [tag:59..64] [capASIDBase:43..59] [capASIDPool:0..38, shifted left by 2]
+        let mut c = Cap::null();
+        c.words[0] = ((CapTag::AsidPool as u64) << 59)
+            | ((base & 0xFFFF) << 43)
+            | ((ptr_low(ptr) >> 2) & 0x1F_FFFF_FFFF);
+        c
+    }
+
     // ---- Frame cap (RISC-V 4K/Mega/Giga) ----------------------------------
     //
     // words[0]: [tag:59..64] [capFSize:57..59] [capFVMRights:55..57]
