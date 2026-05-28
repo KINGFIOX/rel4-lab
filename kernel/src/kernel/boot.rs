@@ -397,6 +397,9 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         (*t).priority = 255;
         (*t).mcp = 255;
         tcb::set_current(t);
+        // Seed the scheduler's runqueue with the rootserver, so
+        // `schedule()` always has a runnable TCB to return.
+        tcb::enqueue(t);
     }
 
     crate::println!("  entering user mode at {:#x}", args.user_ventry);

@@ -75,17 +75,17 @@ trap_entry:
     sd      t0, 33*8(sp)
 
     // a0 = pointer to UserContext (== current sp).
-    // Stash it in s0 (callee-saved) so we have it back after the call.
     mv      a0, sp
-    mv      s0, sp
 
     // Swap to the kernel stack. Single kernel stack for now; see linker.ld.
     la      sp, __stack_top
 
     call    handle_trap_rust
 
-    // Return to user.
-    mv      a0, s0
+    // handle_trap_rust returns the UserContext pointer of the TCB to
+    // resume in a0 — usually the same TCB that trapped, but the
+    // scheduler may have swapped to a different one. restore_user_context
+    // takes a0 as its argument.
     j       restore_user_context
 
     .globl restore_user_context

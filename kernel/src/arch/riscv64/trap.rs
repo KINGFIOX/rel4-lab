@@ -67,8 +67,15 @@ mod scause_code {
 
 /// Rust trap dispatcher, called from `trap_entry` once user registers are
 /// saved into the supplied `UserContext`.
+///
+/// Returns the `UserContext*` of the TCB the kernel wants to resume on
+/// the next `sret`. The asm trampoline takes the return value (in a0)
+/// straight into `restore_user_context`. By default we re-resume the
+/// trapping TCB; the scheduler may override this when a higher-priority
+/// TCB has become runnable (or the current one has blocked / been
+/// suspended).
 #[unsafe(no_mangle)]
-pub extern "C" fn handle_trap_rust(uc: &mut UserContext) {
+pub extern "C" fn handle_trap_rust(uc: &mut UserContext) -> *mut UserContext {
     let cause = csr::scause();
     let stval = csr::stval();
 
@@ -95,6 +102,28 @@ pub extern "C" fn handle_trap_rust(uc: &mut UserContext) {
             park_current_thread();
         }
     }
+
+    kernel_exit(uc)
+}
+
+/// Pick the next TCB to run and return the `UserContext*` to restore.
+///
+/// Today every priority bin except #255 (the rootserver) is empty in
+/// the steady state, so this short-circuits to the trapping TCB. The
+/// hook exists so a future `TCB_Resume(higher-prio child)` will land
+/// the new thread on `sret` without further plumbing.
+#[inline]
+fn kernel_exit(uc: &mut UserContext) -> *mut UserContext {
+    let cur = crate::object::tcb::current();
+    let next = crate::object::tcb::schedule();
+    if !next.is_null() && next != cur {
+        crate::object::tcb::set_current(next);
+        // Future: swap satp + flush TLB here when next has a different
+        // VSpace than cur. We don't run multi-VSpace threads yet, so
+        // skip — every TCB shares the rootserver's PT.
+        return unsafe { &raw mut (*next).context };
+    }
+    uc as *mut UserContext
 }
 
 /// Park the current (only) user thread: spin in S-mode with interrupts
@@ -150,7 +179,16 @@ fn handle_syscall(uc: &mut UserContext) {
             // Debug aids — silently no-op.
         }
         syscall::SYS_YIELD => {
-            // Single-thread, no scheduler yet — yield is a no-op.
+            // Surrender the CPU to any same-priority peer in the
+            // runqueue. With only the rootserver in its priority bin
+            // this is a no-op (rotate of a singleton); once child TCBs
+            // are queued at the same priority it round-robins them.
+            unsafe {
+                let cur = crate::object::tcb::current();
+                if !cur.is_null() {
+                    crate::object::tcb::rotate_to_tail(cur);
+                }
+            }
         }
         syscall::SYS_CALL => {
             crate::api::syscall::do_call(uc);

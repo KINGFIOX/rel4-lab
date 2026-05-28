@@ -33,7 +33,8 @@ those.
 | M4.1 | Recycle PT pages on `unmap_user_4k` — empty L1/L0 tables go straight back onto `BOOT_PT_FREELIST`, so the 128-page static pool sustains the whole 116-test sweep. | ✅ Done |
 | M4.2a | `Tcb` struct + per-Untyped-Retype slab init + dedicated `handle_thread()` for all 15 non-MCS `TCB_*` labels (Configure/SetSpace/SetIPCBuffer/SetPriority/SetMCPriority/SetSchedParams/WriteRegisters/ReadRegisters/CopyRegisters/Suspend/Resume/BindNotification/UnbindNotification/SetTLSBase/SetFlags). Data is parsed, validated, and persisted into the TCB slab. | ✅ Done |
 | M4.2b | Rootserver runs out of a real `Tcb` (`ROOTSERVER_TCB` in BSS); `CAP_INIT_THREAD_TCB` installed; `tcb::CURRENT_TCB` tracked. `restore_user_context` now restores from `current_tcb()->context`, so any `seL4_TCB_*` write against the rootserver TCB (`SetTLSBase`, future `WriteRegisters`, …) takes effect on next sret. | ✅ Done |
-| M4.2c | Per-priority ready queue + `schedule()` + context-switch path on `TCB_Resume` / `TCB_Suspend` / `Yield` / blocking IPC (unlocks `SCHED_*`, `THREADS00xx`, and most `IPC00xx` upstream-disabled tests). | ⏳ Pending |
+| M4.2c | 256-bin per-priority ready queue (`RUNQUEUES` + 4-word `READY_BITMAP` for O(1) "highest set priority" scan), `enqueue/dequeue/schedule()` primitives, `kernel_exit()` hook called from every trap return. `TCB_Resume`/`Suspend` move the TCB in/out of the queue; `TCB_WriteRegisters(resume_target=1)` (the real "start helper" call) hits the same path. `seL4_Yield` rotates within the priority bin. Trampoline now takes the next TCB's `UserContext*` straight out of `handle_trap_rust`'s return value. Verified live: every test in the 116-suite enqueues a helper TCB at priority 254 (rootserver is 255, still wins `schedule()`), so behaviour is unchanged until M4.2d wakes those helpers via blocking IPC. | ✅ Done |
+| M4.2d | Real Endpoint Send/Recv state machine: blocked-sender / blocked-receiver lists, IPC message + extra-cap transfer on rendezvous, schedule on every block/unblock. This is what finally hands the CPU to the queued helper TCBs and unlocks `SCHED_*`, `THREADS00xx`, `IPC0009+`. | ⏳ Pending |
 | M4.3 | Faults → fault-endpoint forwarding | ⏳ Pending |
 | M4.4 | PLIC IRQ chain, SBI timer + preemption, debug breakpoints (unlocks the 51 disabled tests) | ⏳ Pending |
 
@@ -201,23 +202,28 @@ QEMU virt
 With the full sel4test suite passing, the remaining work is about real
 multi-process plumbing and unlocking the upstream-disabled tests:
 
-1. **Scheduler + context-switch (M4.2c).** The trap path now restores
-   from `tcb::current()->context`, and every `Tcb` carries the data a
-   scheduler needs (priority, mcp, state, queue links). What's missing
-   is the runqueue itself: a 256-bin per-priority list, a `schedule()`
-   that picks the head of the highest non-empty bin, and `TCB_Resume`
-   / `TCB_Suspend` / `Yield` / blocking IPC actually moving TCBs in and
-   out of those bins (plus a satp swap on context-switch). Unlocks the
-   `SCHED_*`, `THREADS00xx`, `IPC0009+` upstream-disabled tests.
-2. **VSpace cap finalisation.** Tracked PTEs in user VSpaces should be
+1. **Real Endpoint IPC (M4.2d).** The runqueue from M4.2c already has
+   helper TCBs in it at priority 254, but the rootserver (priority 255)
+   never actually yields — `seL4_Recv` is still the M3.6 stub that
+   fabricates a `(badge=0, msg=0)` result instead of blocking on the
+   endpoint. Wiring real Send/Recv state (sender / receiver wait lists
+   on each `Endpoint`, rendezvous copy of MRs + extra caps, schedule on
+   every block/unblock) is what finally hands the CPU to those queued
+   helpers and unlocks `SCHED_*` / `THREADS00xx` / `IPC0009+`.
+2. **Multi-VSpace context switch.** Once helpers actually run, the
+   scheduler will need to swap `satp` (and flush the TLB) on every
+   cross-VSpace switch. The infrastructure for that is staged in
+   `kernel_exit()` — just a missing `csr::set_satp(...) + sfence.vma`
+   when `current != next`.
+3. **VSpace cap finalisation.** Tracked PTEs in user VSpaces should be
    torn down when an Untyped is Revoked through a `PageTable`/`Thread`
    cap; today we lean on the `frame_mapped_asid` shortcut for Frame
    caps but ignore PageTable caps.
-3. **Fault forwarding.** vm_fault / cap_fault / user_exception currently
+4. **Fault forwarding.** vm_fault / cap_fault / user_exception currently
    just park the offending thread. Forward them to the fault endpoint so
    the driver can inspect failures and recover.
-4. **PLIC + SBI timer.** Wire `seL4_IRQControl_Get`,
+5. **PLIC + SBI timer.** Wire `seL4_IRQControl_Get`,
    `seL4_IRQHandler_{Set,Ack,Clear}Notification`, and the SBI timer ECALL
    so that interrupt and preemption tests can run.
-5. **Hardware breakpoints / debug exceptions.** Required by the
+6. **Hardware breakpoints / debug exceptions.** Required by the
    `BREAKPOINT_*` group still disabled in `kernel_all_pp_prune.c`.

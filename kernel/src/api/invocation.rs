@@ -607,21 +607,45 @@ pub fn handle_thread(
                     (*tcb_ptr).context.regs[reg::RA] = uc.regs[reg::A5];
                 }
             }
-            // Remaining regs come from the IPC buffer (mr4..).
-            // RISC-V `seL4_UserContext` layout (after pc, ra) is:
-            //   sp, gp, tp, s0..s11 (12), a0..a7 (8), t0..t6 (7)
-            // which is exactly the GPR order we save in our `regs[]`
-            // *after* re-mapping s0..s11/a0..a7/t0..t6 to their canonical
-            // x-numbered slots.
-            //
-            // For the M3-pending iteration we still gate WriteRegisters
-            // on "are we ever going to enter this TCB?" — we are not,
-            // since no scheduler has been wired yet — so writing the
-            // tail of the regs array is a *correctness* concern only
-            // when context-switch lands. For now we stop after pc/ra
-            // (which is what virtually every spawn helper marshals via
-            // mr2/mr3), and leave mr4+ for the M4 patch.
-            let _ = resume_target;
+            // Remaining regs (mr4..) live in the IPC buffer. The RISC-V
+            // `seL4_UserContext` layout starting at offset 2 is:
+            //   sp(2), gp(3), tp(4), s0..s11(8..9, 18..27),
+            //   a0..a7(10..17), t0..t6(5..7, 28..31)
+            // Mirror that into our `regs[x]` slots.
+            const X_INDEX: [usize; 32] = [
+                /* 0 pc, 1 ra (handled above) */ 0, 0,
+                /* 2 sp */ reg::SP,
+                /* 3 gp */ reg::GP,
+                /* 4 tp */ reg::TP,
+                /* 5..16 s0..s11 */ 8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+                /* 17..24 a0..a7 */ reg::A0, reg::A1, reg::A2, reg::A3,
+                                    reg::A4, reg::A5, reg::A6, reg::A7,
+                /* 25..31 t0..t6 */ reg::T0, 6, 7, 28, 29, 30, 31,
+            ];
+            if length >= 5 && count >= 3 {
+                let mr_count = ((length - 1) as usize).min(count as usize).min(34);
+                if !thread.ipc_buffer_kva.is_null() {
+                    for i in 4..mr_count {
+                        let mr_val =
+                            unsafe { *thread.ipc_buffer_kva.add(1 + i) };
+                        let target_idx = X_INDEX[i];
+                        if target_idx != 0 {
+                            unsafe {
+                                (*tcb_ptr).context.regs[target_idx] = mr_val;
+                            }
+                        }
+                    }
+                }
+            }
+            // `resume_target = 1` means "also start (or restart) this
+            // TCB", per `decodeWriteRegisters` in
+            // `kernel/src/object/tcb.c`. This is the dominant codepath
+            // for `sel4utils_start_thread` / `sel4test_run_test`: the
+            // helper-spawn sequence is Configure + SetPriority +
+            // WriteRegisters(resume=1), with no separate `seL4_TCB_Resume`.
+            if resume_target {
+                unsafe { crate::object::tcb::resume(tcb_ptr) };
+            }
             Ok(())
         }
 

@@ -17,6 +17,7 @@
 
 #![allow(dead_code)]
 
+use core::cell::UnsafeCell;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
@@ -37,6 +38,162 @@ pub fn current() -> *mut Tcb {
 #[inline]
 pub fn set_current(tcb: *mut Tcb) -> *mut Tcb {
     CURRENT_TCB.swap(tcb, Ordering::AcqRel)
+}
+
+// ---- Ready-queue runqueues ------------------------------------------------
+//
+// `CONFIG_NUM_PRIORITIES = 256` per `kernel/include/configurations/gen_config.h`.
+// One doubly-linked list per priority, all backed by `Tcb.queue_{next,prev}`
+// (stored as raw u64 ptrs because `Tcb` lives in user-controlled memory
+// and we want the field offsets to stay byte-identical across the C ↔ Rust
+// boundary).
+//
+// Single-hart, no preemption ⇒ no concurrency, so plain `UnsafeCell` is
+// safe behind the kernel's "interrupts off during trap" guarantee.
+
+pub const NUM_PRIORITIES: usize = 256;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct Queue {
+    head: *mut Tcb,
+    tail: *mut Tcb,
+}
+
+#[repr(transparent)]
+struct QueueCell(UnsafeCell<Queue>);
+unsafe impl Sync for QueueCell {}
+
+static RUNQUEUES: [QueueCell; NUM_PRIORITIES] = {
+    const EMPTY: QueueCell = QueueCell(UnsafeCell::new(Queue {
+        head: null_mut(),
+        tail: null_mut(),
+    }));
+    [EMPTY; NUM_PRIORITIES]
+};
+
+/// Per-priority "any ready TCB?" summary. We keep a 256-bit bitmap in 4
+/// u64 words; `schedule()` does a constant-time scan from highest to
+/// lowest priority by walking from word 3 down to word 0.
+static READY_BITMAP: [core::sync::atomic::AtomicU64; 4] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+];
+
+#[inline]
+fn rq(prio: usize) -> *mut Queue {
+    debug_assert!(prio < NUM_PRIORITIES);
+    RUNQUEUES[prio].0.get()
+}
+
+#[inline]
+fn set_ready_bit(prio: usize) {
+    READY_BITMAP[prio / 64].fetch_or(1u64 << (prio % 64), Ordering::AcqRel);
+}
+
+#[inline]
+fn clear_ready_bit(prio: usize) {
+    READY_BITMAP[prio / 64].fetch_and(!(1u64 << (prio % 64)), Ordering::AcqRel);
+}
+
+/// Append `tcb` to the tail of its priority's queue. No-op if already
+/// linked (i.e. `queue_next` or `queue_prev` non-zero, or `head == tcb`).
+pub unsafe fn enqueue(tcb: *mut Tcb) {
+    if tcb.is_null() {
+        return;
+    }
+    let prio = unsafe { (*tcb).priority as usize };
+    let q = rq(prio);
+    let tcb_u = tcb as u64;
+    unsafe {
+        // Already on a queue?
+        if (*tcb).queue_next != 0 || (*tcb).queue_prev != 0 || (*q).head == tcb {
+            return;
+        }
+        (*tcb).queue_next = 0;
+        (*tcb).queue_prev = (*q).tail as u64;
+        if (*q).tail.is_null() {
+            (*q).head = tcb;
+        } else {
+            (*((*q).tail)).queue_next = tcb_u;
+        }
+        (*q).tail = tcb;
+    }
+    set_ready_bit(prio);
+}
+
+/// Unlink `tcb` from its priority's queue. No-op if not currently linked.
+pub unsafe fn dequeue(tcb: *mut Tcb) {
+    if tcb.is_null() {
+        return;
+    }
+    let prio = unsafe { (*tcb).priority as usize };
+    let q = rq(prio);
+    unsafe {
+        let prev = (*tcb).queue_prev as *mut Tcb;
+        let next = (*tcb).queue_next as *mut Tcb;
+        let was_linked = !prev.is_null() || !next.is_null() || (*q).head == tcb;
+        if !was_linked {
+            return;
+        }
+        if !prev.is_null() {
+            (*prev).queue_next = next as u64;
+        } else {
+            (*q).head = next;
+        }
+        if !next.is_null() {
+            (*next).queue_prev = prev as u64;
+        } else {
+            (*q).tail = prev;
+        }
+        (*tcb).queue_next = 0;
+        (*tcb).queue_prev = 0;
+
+        if (*q).head.is_null() {
+            clear_ready_bit(prio);
+        }
+    }
+}
+
+/// Move `tcb` to the tail of its own priority's queue. Used by
+/// `seL4_Yield` to surrender the CPU to a same-priority peer.
+pub unsafe fn rotate_to_tail(tcb: *mut Tcb) {
+    if tcb.is_null() {
+        return;
+    }
+    let prio = unsafe { (*tcb).priority as usize };
+    let q = rq(prio);
+    unsafe {
+        if (*q).head == tcb && (*q).tail == tcb {
+            return; // singleton, nothing to do
+        }
+        dequeue(tcb);
+        enqueue(tcb);
+    }
+}
+
+/// Pick the highest-priority ready TCB, or `null` if all queues empty.
+///
+/// O(1) on the 256 priorities: scan the 4-word ready bitmap from MSB
+/// down, then `head` of the first bin we find.
+pub fn schedule() -> *mut Tcb {
+    for word_idx in (0..4).rev() {
+        let bits = READY_BITMAP[word_idx].load(Ordering::Acquire);
+        if bits == 0 {
+            continue;
+        }
+        // Highest set bit in `bits` ⇒ highest priority in this word.
+        let bit = 63 - bits.leading_zeros() as usize;
+        let prio = word_idx * 64 + bit;
+        let q = rq(prio);
+        let head = unsafe { (*q).head };
+        if !head.is_null() {
+            return head;
+        }
+    }
+    null_mut()
 }
 
 pub const TCB_NAME_LEN: usize = 32;
@@ -172,13 +329,15 @@ pub unsafe fn init(tcb_kva: u64) {
     }
 }
 
-/// Per-invocation primitives. They never block / never schedule — they
-/// just update the data the future scheduler will key off.
+/// Per-invocation primitives. They mark the TCB runnable / non-runnable
+/// and update the global ready-queue accordingly. The actual CPU swap
+/// happens at the next `kernel_exit()` boundary (top of `restore_user_context`).
 pub unsafe fn suspend(tcb: *mut Tcb) {
     if tcb.is_null() {
         return;
     }
     unsafe {
+        dequeue(tcb);
         (*tcb).state = ThreadState::Inactive as u8;
     }
 }
@@ -188,7 +347,8 @@ pub unsafe fn resume(tcb: *mut Tcb) {
         return;
     }
     unsafe {
-        (*tcb).state = ThreadState::Restart as u8;
+        (*tcb).state = ThreadState::Running as u8;
+        enqueue(tcb);
     }
 }
 
@@ -257,6 +417,9 @@ pub unsafe fn finalize(tcb: *mut Tcb) {
         return;
     }
     unsafe {
+        // Remove the TCB from the ready queue first, so the scheduler
+        // can't pick a Tcb whose backing slab is about to be recycled.
+        dequeue(tcb);
         (*tcb).bound_notification = 0;
         (*tcb).queue_next = 0;
         (*tcb).queue_prev = 0;
