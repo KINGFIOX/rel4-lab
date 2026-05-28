@@ -15,13 +15,14 @@ use crate::abi::constants::{
     SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
 };
 use crate::arch::riscv64::sv39::{PAGE_SIZE, PageTable};
-use crate::arch::riscv64::trap::{install_trap_vector, restore_user_context, UserContext};
+use crate::arch::riscv64::trap::{install_trap_vector, restore_user_context};
 use crate::arch::riscv64::vspace::{
     kpptr_to_paddr, make_boot_root_pt, map_user_4k, satp_for, switch_satp, user_flags,
 };
 use crate::kernel::bootmem;
 use crate::object::cap::Cap;
 use crate::object::cnode::{cnode_at, cnode_bytes, install_initial_cap};
+use crate::object::tcb::{self, Tcb};
 use crate::object::untyped::{make_untyped_cap, FreeRange, UntypedChunks};
 
 /// Where we place the user IPC buffer in the user's virtual address space.
@@ -51,15 +52,14 @@ pub struct BootArgs {
     pub core_id: usize,
 }
 
-/// Static storage for the rootserver's `UserContext`. Saved by `trap_entry`
-/// when the user thread traps; restored by `restore_user_context`.
+/// Static storage for the rootserver thread's TCB. The first field is a
+/// `UserContext`, and `Tcb` is `#[repr(C)]`, so `&ROOTSERVER_TCB` and
+/// `&ROOTSERVER_TCB.context` alias the same address — this is how
+/// `restore_user_context(&ROOTSERVER_TCB.context)` keeps working while
+/// also letting `seL4_TCB_*` invocations against `CAP_INIT_THREAD_TCB`
+/// land in the same struct.
 #[unsafe(no_mangle)]
-pub static mut ROOTSERVER_CONTEXT: UserContext = UserContext {
-    regs: [0; 32],
-    pc: 0,
-    sstatus: 0,
-    _reserved: 0,
-};
+pub static mut ROOTSERVER_TCB: Tcb = Tcb::zero();
 
 /// Translate a kernel VA (either the kernel-ELF window or the PSpace
 /// window) back to its physical address. Caps minted from RAM untypeds
@@ -144,6 +144,11 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     // For M3.1, several of these are "presence stubs" — caps exist with
     // the right tag, but the kernel doesn't honour any invocation on them
     // yet. That's fine for the driver's bootinfo parse and allocator init.
+    install_initial_cap(
+        cnode,
+        bi_slot::CAP_INIT_THREAD_TCB as usize,
+        Cap::new_thread(&raw const ROOTSERVER_TCB as u64),
+    );
     install_initial_cap(
         cnode,
         bi_slot::CAP_INIT_THREAD_CNODE as usize,
@@ -380,18 +385,24 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     unsafe { switch_satp(satp) };
 
     unsafe {
-        let uc = &raw mut ROOTSERVER_CONTEXT;
-        (*uc).pc = args.user_ventry as u64;
-        // sstatus: SPIE=1 (bit 5), SUM=1 (bit 18), SPP=0
-        (*uc).sstatus = (1 << 5) | (1 << 18);
-        (*uc).regs[10] = USER_BOOTINFO_VA as u64; // a0 = bootinfo
-        (*uc).regs[2] = USER_STACK_TOP as u64;    // sp
+        let t = &raw mut ROOTSERVER_TCB;
+        // sstatus: SPIE=1 (bit 5, sret re-enables interrupts),
+        //          SUM=1  (bit 18, kernel can touch user memory),
+        //          SPP=0  (sret enters U-mode).
+        (*t).context.pc = args.user_ventry as u64;
+        (*t).context.sstatus = (1 << 5) | (1 << 18);
+        (*t).context.regs[10] = USER_BOOTINFO_VA as u64; // a0 = bootinfo
+        (*t).context.regs[2] = USER_STACK_TOP as u64;    // sp
+        (*t).state = crate::object::tcb::ThreadState::Running as u8;
+        (*t).priority = 255;
+        (*t).mcp = 255;
+        tcb::set_current(t);
     }
 
     crate::println!("  entering user mode at {:#x}", args.user_ventry);
     crate::println!("  --- transferring control to rootserver ---");
     unsafe {
-        let uc = &raw mut ROOTSERVER_CONTEXT;
+        let uc = &raw mut (*&raw mut ROOTSERVER_TCB).context;
         restore_user_context(uc);
     }
 }

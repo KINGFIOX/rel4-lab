@@ -18,9 +18,26 @@
 #![allow(dead_code)]
 
 use core::ptr::null_mut;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::arch::riscv64::trap::UserContext;
 use crate::object::cap::Cap;
+
+/// Pointer to the currently-scheduled TCB. Set at boot to the rootserver
+/// TCB and updated whenever the scheduler swaps threads. Always read via
+/// the accessors below to keep memory ordering consistent.
+static CURRENT_TCB: AtomicPtr<Tcb> = AtomicPtr::new(null_mut());
+
+#[inline]
+pub fn current() -> *mut Tcb {
+    CURRENT_TCB.load(Ordering::Acquire)
+}
+
+/// Replace `CURRENT_TCB`. Returns the previous pointer.
+#[inline]
+pub fn set_current(tcb: *mut Tcb) -> *mut Tcb {
+    CURRENT_TCB.swap(tcb, Ordering::AcqRel)
+}
 
 pub const TCB_NAME_LEN: usize = 32;
 
@@ -93,6 +110,38 @@ pub struct Tcb {
 const _: () = {
     assert!(core::mem::size_of::<Tcb>() <= 1024);
 };
+
+impl Tcb {
+    /// All-zero TCB constructor for static / BSS use (the rootserver TCB
+    /// is created this way; user-allocated TCBs go through `init` after
+    /// `Untyped_Retype` zeroes their slab).
+    pub const fn zero() -> Self {
+        Tcb {
+            context: UserContext {
+                regs: [0; 32],
+                pc: 0,
+                sstatus: 0,
+                _reserved: 0,
+            },
+            state: 0,
+            priority: 0,
+            mcp: 0,
+            domain: 0,
+            flags: 0,
+            cspace_cap: Cap::null(),
+            vspace_cap: Cap::null(),
+            ipc_buffer_cap: Cap::null(),
+            ipc_buffer_uva: 0,
+            ipc_buffer_kva: 0,
+            fault_ep_cptr: 0,
+            bound_notification: 0,
+            queue_next: 0,
+            queue_prev: 0,
+            waiting_on: 0,
+            name: [0; TCB_NAME_LEN],
+        }
+    }
+}
 
 /// Reborrow a Thread cap as a `*mut Tcb`. Returns `null_mut()` for a
 /// null cap. Caller guarantees the underlying memory has not been
