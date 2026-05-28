@@ -13,6 +13,7 @@
 pub mod asid;
 pub mod cap;
 pub mod cnode;
+pub mod endpoint;
 pub mod mdb;
 pub mod notification;
 pub mod tcb;

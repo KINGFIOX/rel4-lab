@@ -233,11 +233,14 @@ pub fn handle_untyped(
             .ok_or(SyscallError::IllegalOperation)?;
         // Per-object init hook. For TCBs we stamp the `Tcb` struct
         // skeleton onto the freshly zeroed slab so that subsequent
-        // TCB_* invocations have a real place to land data.
-        if new_type == obj::TCB {
-            unsafe {
-                crate::object::tcb::init(obj_base);
-            }
+        // TCB_* invocations have a real place to land data. Endpoints
+        // are also stamped — though `Untyped_Retype` zeroed the slab
+        // already, going through `endpoint::init` keeps the layout
+        // contract explicit at the one place objects come to life.
+        match new_type {
+            obj::TCB => unsafe { crate::object::tcb::init(obj_base) },
+            obj::ENDPOINT => unsafe { crate::object::endpoint::init(obj_base) },
+            _ => {}
         }
         // Mirrors `isCapRevocable(newCap, srcCap)` from
         // `kernel/src/object/objecttype.c`. For arch caps (Frame /
@@ -608,10 +611,12 @@ pub fn handle_thread(
                 }
             }
             // Remaining regs (mr4..) live in the IPC buffer. The RISC-V
-            // `seL4_UserContext` layout starting at offset 2 is:
-            //   sp(2), gp(3), tp(4), s0..s11(8..9, 18..27),
-            //   a0..a7(10..17), t0..t6(5..7, 28..31)
-            // Mirror that into our `regs[x]` slots.
+            // `seL4_UserContext` layout, indexed by *seL4_UserContext
+            // field number* (= MR index − 2), is:
+            //   0:pc, 1:ra, 2:sp, 3:gp, 4:tp,
+            //   5..16:s0..s11, 17..24:a0..a7, 25..31:t0..t6
+            // We use 0 for the entries that are handled separately
+            // (pc / ra) or land in the unused x0 slot.
             const X_INDEX: [usize; 32] = [
                 /* 0 pc, 1 ra (handled above) */ 0, 0,
                 /* 2 sp */ reg::SP,
@@ -625,10 +630,13 @@ pub fn handle_thread(
             if length >= 5 && count >= 3 {
                 let mr_count = ((length - 1) as usize).min(count as usize).min(34);
                 if !thread.ipc_buffer_kva.is_null() {
+                    // mr_i for i=4..mr_count holds frameRegister/gpRegister
+                    // value at slot (i-2) of seL4_UserContext.
                     for i in 4..mr_count {
                         let mr_val =
                             unsafe { *thread.ipc_buffer_kva.add(1 + i) };
-                        let target_idx = X_INDEX[i];
+                        let ctx_idx = i - 2;
+                        let target_idx = X_INDEX[ctx_idx];
                         if target_idx != 0 {
                             unsafe {
                                 (*tcb_ptr).context.regs[target_idx] = mr_val;
@@ -1061,6 +1069,21 @@ fn finalize_cap(cap: &mut Cap) {
             if p != 0 && is_pspace_kva(p) {
                 unsafe {
                     crate::object::tcb::finalize(p as *mut crate::object::tcb::Tcb);
+                }
+            }
+        }
+        Some(CapTag::Endpoint) => {
+            // Wake every TCB blocked on this Endpoint. Without this a
+            // cap Revoke would orphan senders / receivers — they'd be
+            // dequeued from the runqueue, marked Blocked, and never
+            // reachable again because the EP's storage is recycled by
+            // the parent Untyped on the next Retype.
+            let p = cap.endpoint_ptr();
+            if p != 0 && is_pspace_kva(p) {
+                unsafe {
+                    crate::object::endpoint::finalize(
+                        p as *mut crate::object::endpoint::Endpoint,
+                    );
                 }
             }
         }

@@ -197,15 +197,16 @@ fn handle_syscall(uc: &mut UserContext) {
             crate::api::syscall::do_send(uc, false);
         }
         syscall::SYS_REPLY => {
-            // M3.6 will turn Reply into real IPC. For now, no-op.
+            // Reply is stubbed alongside Send/Recv (see syscall.rs).
+            // No-op until the full IPC path is re-enabled.
         }
         syscall::SYS_RECV | syscall::SYS_NB_RECV => {
             let blocking = sysno == syscall::SYS_RECV;
             crate::api::syscall::do_recv(uc, blocking);
         }
         syscall::SYS_REPLY_RECV => {
-            // Treat as Recv for now (Reply portion is a no-op until we
-            // have a real reply cap path).
+            // ReplyRecv = Reply + Recv; with Reply stubbed, treat as
+            // a plain Recv on the supplied EP cap.
             crate::api::syscall::do_recv(uc, true);
         }
         n if syscall::is_known(n) => {

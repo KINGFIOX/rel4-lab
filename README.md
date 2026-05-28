@@ -33,8 +33,9 @@ those.
 | M4.1 | Recycle PT pages on `unmap_user_4k` — empty L1/L0 tables go straight back onto `BOOT_PT_FREELIST`, so the 128-page static pool sustains the whole 116-test sweep. | ✅ Done |
 | M4.2a | `Tcb` struct + per-Untyped-Retype slab init + dedicated `handle_thread()` for all 15 non-MCS `TCB_*` labels (Configure/SetSpace/SetIPCBuffer/SetPriority/SetMCPriority/SetSchedParams/WriteRegisters/ReadRegisters/CopyRegisters/Suspend/Resume/BindNotification/UnbindNotification/SetTLSBase/SetFlags). Data is parsed, validated, and persisted into the TCB slab. | ✅ Done |
 | M4.2b | Rootserver runs out of a real `Tcb` (`ROOTSERVER_TCB` in BSS); `CAP_INIT_THREAD_TCB` installed; `tcb::CURRENT_TCB` tracked. `restore_user_context` now restores from `current_tcb()->context`, so any `seL4_TCB_*` write against the rootserver TCB (`SetTLSBase`, future `WriteRegisters`, …) takes effect on next sret. | ✅ Done |
-| M4.2c | 256-bin per-priority ready queue (`RUNQUEUES` + 4-word `READY_BITMAP` for O(1) "highest set priority" scan), `enqueue/dequeue/schedule()` primitives, `kernel_exit()` hook called from every trap return. `TCB_Resume`/`Suspend` move the TCB in/out of the queue; `TCB_WriteRegisters(resume_target=1)` (the real "start helper" call) hits the same path. `seL4_Yield` rotates within the priority bin. Trampoline now takes the next TCB's `UserContext*` straight out of `handle_trap_rust`'s return value. Verified live: every test in the 116-suite enqueues a helper TCB at priority 254 (rootserver is 255, still wins `schedule()`), so behaviour is unchanged until M4.2d wakes those helpers via blocking IPC. | ✅ Done |
-| M4.2d | Real Endpoint Send/Recv state machine: blocked-sender / blocked-receiver lists, IPC message + extra-cap transfer on rendezvous, schedule on every block/unblock. This is what finally hands the CPU to the queued helper TCBs and unlocks `SCHED_*`, `THREADS00xx`, `IPC0009+`. | ⏳ Pending |
+| M4.2c | 256-bin per-priority ready queue (`RUNQUEUES` + 4-word `READY_BITMAP` for O(1) "highest set priority" scan), `enqueue/dequeue/schedule()` primitives, `kernel_exit()` hook called from every trap return. `TCB_Resume`/`Suspend` move the TCB in/out of the queue; `TCB_WriteRegisters(resume_target=1)` (the real "start helper" call) hits the same path. `seL4_Yield` rotates within the priority bin. Trampoline now takes the next TCB's `UserContext*` straight out of `handle_trap_rust`'s return value. | ✅ Done |
+| M4.2d | `Endpoint` struct (16 bytes, 2-bit state packed in head ptr, doubly-linked wait list reusing `Tcb.queue_{next,prev}`), `enqueue_waiter / pop_head / remove_waiter / finalize` primitives, init hook on `Untyped_Retype(Endpoint)`, `finalize_cap(Endpoint)` wakes all blocked waiters back into the runqueue. `Tcb.caller` field added for the pre-MCS Call/Reply pattern. The state machine isn't yet wired into `do_send`/`do_recv` — that's M4.2e — but the kernel object now exists at the right address with the right layout. | ✅ Done |
+| M4.2e | Wire `do_send` / `do_recv` / `do_call` / `do_reply` to the `Endpoint` state machine: rendezvous + MR transfer for waiting peers, block-on-EP otherwise. Requires bridging `api::thread::current()` (static rootserver view today) to follow `tcb::current()` so syscalls read MRs from the running TCB's IPC buffer. This is what hands the CPU to the queued helper TCBs and makes `IPC0001..` actually exercise real IPC instead of the fake-success stub. | ⏳ Pending |
 | M4.3 | Faults → fault-endpoint forwarding | ⏳ Pending |
 | M4.4 | PLIC IRQ chain, SBI timer + preemption, debug breakpoints (unlocks the 51 disabled tests) | ⏳ Pending |
 
@@ -115,8 +116,11 @@ microkernel/
 │       │   ├── cnode.rs       # Cte + cnode_at / install_initial_cap / mdb_*
 │       │   ├── untyped.rs     # free-range splitter, untyped cap factory
 │       │   ├── notification.rs # min. Notification (state + badge + signal/wait)
-│       │   ├── tcb.rs         # Tcb struct (context + scheduler/IPC state), init on
-│       │   │                  #   Retype, finalize on revoke
+│       │   ├── endpoint.rs    # Endpoint (16 B: state-packed head ptr + tail),
+│       │   │                  #   wait-list queue ops, finalize wakes waiters
+│       │   ├── tcb.rs         # Tcb struct (context + scheduler/IPC state),
+│       │   │                  #   256-bin runqueue + bitmap, init on Retype,
+│       │   │                  #   finalize on revoke
 │       │   └── asid.rs        # 64-entry ASID → root-PT-KVA table
 │       └── api/
 │           ├── thread.rs      # rootserver thread record (CSpace/VSpace/IPCBuf)
@@ -202,19 +206,30 @@ QEMU virt
 With the full sel4test suite passing, the remaining work is about real
 multi-process plumbing and unlocking the upstream-disabled tests:
 
-1. **Real Endpoint IPC (M4.2d).** The runqueue from M4.2c already has
-   helper TCBs in it at priority 254, but the rootserver (priority 255)
-   never actually yields — `seL4_Recv` is still the M3.6 stub that
-   fabricates a `(badge=0, msg=0)` result instead of blocking on the
-   endpoint. Wiring real Send/Recv state (sender / receiver wait lists
-   on each `Endpoint`, rendezvous copy of MRs + extra caps, schedule on
-   every block/unblock) is what finally hands the CPU to those queued
-   helpers and unlocks `SCHED_*` / `THREADS00xx` / `IPC0009+`.
-2. **Multi-VSpace context switch.** Once helpers actually run, the
-   scheduler will need to swap `satp` (and flush the TLB) on every
-   cross-VSpace switch. The infrastructure for that is staged in
-   `kernel_exit()` — just a missing `csr::set_satp(...) + sfence.vma`
-   when `current != next`.
+1. **Wire the Endpoint state machine (M4.2e).** M4.2d gave us the
+   `Endpoint` kernel object; M4.2e1 (current iteration) added the two
+   foundations the wire-up needs:
+   * `api::thread::current()` now *follows* `tcb::current()` — every
+     `tcb::set_current` refreshes the legacy `Thread` view from the
+     running TCB's `cspace_cap` / `vspace_cap` / `ipc_buffer_*`, so
+     cap lookups and IPC-buffer reads in the syscall path automatically
+     target whichever TCB the scheduler last picked.
+   * `TCB_WriteRegisters` correctly translates MR index ↔
+     `seL4_UserContext` field index (the previous off-by-2 only mattered
+     once helpers actually got scheduled).
+   * `kernel/src/api/ipc.rs` carries the full Send / Recv / Call / Reply
+     / ReplyRecv state machine, ready to wire.
+   The remaining wiring (`do_send` → `ipc::send`, etc.) is held back of
+   a stub because three prerequisites must land first to avoid wedging
+   tests like `BIND0001`: bound-notification → bound-TCB wakeup on
+   `Notification_Signal`, an idle thread / null-`schedule()` handler
+   for the moments when every TCB is blocked, and `tcb::suspend` /
+   `finalize` removing the TCB from any EP wait list it's queued on.
+2. **Multi-VSpace context switch.** Helpers in sel4test typically
+   share VSpace with the driver, so M4.2e alone unlocks most
+   thread-aware tests. Separate-process tests will additionally need
+   `kernel_exit()` to write `satp` + `sfence.vma` on cross-VSpace
+   switches (the data is already in `Tcb.vspace_cap`).
 3. **VSpace cap finalisation.** Tracked PTEs in user VSpaces should be
    torn down when an Untyped is Revoked through a `PageTable`/`Thread`
    cap; today we lean on the `frame_mapped_asid` shortcut for Frame

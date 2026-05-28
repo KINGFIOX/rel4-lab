@@ -34,10 +34,15 @@ pub fn current() -> *mut Tcb {
     CURRENT_TCB.load(Ordering::Acquire)
 }
 
-/// Replace `CURRENT_TCB`. Returns the previous pointer.
+/// Replace `CURRENT_TCB`. Returns the previous pointer. Also refreshes
+/// the legacy `api::thread::CURRENT` view so cap lookups and IPC
+/// accesses in the syscall slow path follow whichever TCB the
+/// scheduler last picked.
 #[inline]
 pub fn set_current(tcb: *mut Tcb) -> *mut Tcb {
-    CURRENT_TCB.swap(tcb, Ordering::AcqRel)
+    let prev = CURRENT_TCB.swap(tcb, Ordering::AcqRel);
+    unsafe { crate::api::thread::refresh_from_tcb(tcb) };
+    prev
 }
 
 // ---- Ready-queue runqueues ------------------------------------------------
@@ -257,6 +262,22 @@ pub struct Tcb {
     /// KVA), if any. Used to dequeue on cancel / destroy.
     pub waiting_on: u64,
 
+    /// "Implicit reply target" used by the pre-MCS Call/Reply pattern.
+    /// When a sender's `seL4_Call` rendezvous with a receiver, the
+    /// receiver records the sender's TCB KVA here so its subsequent
+    /// `seL4_Reply` knows who to wake. 0 means "no caller".
+    pub caller: u64,
+
+    /// Badge from the cap used to Send / Call. Stashed when a sender
+    /// blocks on an Endpoint so the eventual receiver can read it back
+    /// without re-walking the sender's CSpace.
+    pub sender_badge: u64,
+    /// `1` iff the queued-up Send was originally a `seL4_Call`. The
+    /// receiver consults this on rendezvous to decide whether to put
+    /// the sender into `BlockedOnReply` (Call) or wake it directly
+    /// (plain Send).
+    pub sender_is_call: u8,
+
     /// Debug name, populated by `seL4_DebugNameThread`. NUL-padded.
     pub name: [u8; TCB_NAME_LEN],
 }
@@ -295,6 +316,9 @@ impl Tcb {
             queue_next: 0,
             queue_prev: 0,
             waiting_on: 0,
+            caller: 0,
+            sender_badge: 0,
+            sender_is_call: 0,
             name: [0; TCB_NAME_LEN],
         }
     }

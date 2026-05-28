@@ -1,10 +1,11 @@
-//! "Current thread" placeholder.
+//! "Current thread" view used by the syscall slow path.
 //!
-//! In a full implementation this would be a `TCB` with scheduler state,
-//! priority, fault endpoint, etc. For M3.1 we only need the bits that
-//! the syscall slow path consults: CSpace root, VSpace root, IPC buffer.
-//! There is one such thread (the rootserver), so this is just a static
-//! singleton.
+//! Historically a static singleton always describing the rootserver.
+//! Since M4.2c every thread runs out of a real `Tcb`; this struct is
+//! now a thin cache that's refreshed from `tcb::current()` on every
+//! context switch (see `refresh_from_tcb` below). Cap lookups and IPC
+//! buffer access via this struct therefore follow whichever TCB the
+//! scheduler last picked.
 
 #![allow(dead_code)]
 
@@ -13,6 +14,7 @@ use core::ptr::null_mut;
 
 use crate::object::cap::Cap;
 use crate::object::cnode::Cte;
+use crate::object::tcb::Tcb;
 
 pub struct Thread {
     /// Pointer to the array of `Cte` that backs the thread's root CNode.
@@ -71,7 +73,9 @@ pub unsafe fn current() -> &'static mut Thread {
 
 /// Helper: install the rootserver thread state. Called once from
 /// `bringup_rootserver` after the root CNode is built and BootInfo is
-/// laid down.
+/// laid down. The state is mirrored into `ROOTSERVER_TCB` by the
+/// caller, so a later `refresh_from_tcb(&ROOTSERVER_TCB)` reproduces
+/// exactly what we set here.
 pub fn install_rootserver(
     cspace_root: *mut Cte,
     cspace_radix: u32,
@@ -90,4 +94,44 @@ pub fn install_rootserver(
         vspace_root_kva,
     };
     unsafe { set_current(t) };
+}
+
+/// Refresh the static `Thread` from `tcb`'s cap roots. Called by
+/// `tcb::set_current` whenever the scheduler swaps the running thread,
+/// so every subsequent `thread::current()` reads the right CSpace +
+/// IPC-buffer for cap lookups inside the syscall path.
+///
+/// For TCBs whose `cspace_cap` is still null (e.g. a freshly retyped
+/// helper before `TCB_Configure` has fired) this is a no-op — keeping
+/// the previous `Thread` keeps the rootserver's view as a safe
+/// fallback.
+pub unsafe fn refresh_from_tcb(tcb: *const Tcb) {
+    if tcb.is_null() {
+        return;
+    }
+    let cspace_cap = unsafe { (*tcb).cspace_cap };
+    let vspace_cap = unsafe { (*tcb).vspace_cap };
+    if cspace_cap.is_null() {
+        return;
+    }
+    let radix = cspace_cap.cnode_radix();
+    let cnode_ptr = cspace_cap.cnode_ptr();
+    let guard_bits = cspace_cap.cnode_guard_size();
+    let guard = cspace_cap.cnode_guard();
+    let ipc_kva = unsafe { (*tcb).ipc_buffer_kva };
+    let ipc_uva = unsafe { (*tcb).ipc_buffer_uva };
+    let new = Thread {
+        cspace_root: cnode_ptr as *mut Cte,
+        cspace_radix: radix as u32,
+        cspace_guard_bits: guard_bits as u32,
+        cspace_guard: guard,
+        ipc_buffer_kva: if ipc_kva != 0 {
+            ipc_kva as *mut u64
+        } else {
+            null_mut()
+        },
+        ipc_buffer_uva: ipc_uva,
+        vspace_root_kva: vspace_cap.page_table_base_ptr(),
+    };
+    unsafe { set_current(new) };
 }

@@ -340,6 +340,21 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         USER_IPC_BUFFER_VA as u64,
         root_pt as u64,
     );
+    // Mirror the same data into ROOTSERVER_TCB so that helper TCBs
+    // and the rootserver speak the same Cap-of-CSpace / VSpace / IPC
+    // language. Once thread::current() learns to follow tcb::current()
+    // (in this iteration), every cap-lookup and IPC-buffer access in
+    // the syscall path will draw from these fields.
+    unsafe {
+        let rs = &raw mut ROOTSERVER_TCB;
+        (*rs).cspace_cap = cnode_cap_for_thread;
+        (*rs).vspace_cap = Cap::new_page_table(root_pt as u64);
+        (*rs).ipc_buffer_uva = USER_IPC_BUFFER_VA as u64;
+        (*rs).ipc_buffer_kva = ipc_kva as u64;
+        // The IPC-buffer Frame cap isn't required by `do_recv`'s MR
+        // synthesis (which walks via `ipc_buffer_kva`), so we leave
+        // ipc_buffer_cap as `null` for the rootserver.
+    }
 
     // --- Populate BootInfo -----------------------------------------------
     let bi = bi_kva as *mut BootInfo;

@@ -80,6 +80,15 @@ pub fn do_call(uc: &mut UserContext) {
         Some(CapTag::Thread) => {
             invocation::handle_thread(t, slot, cap, label, info.length(), uc)
         }
+        Some(CapTag::Endpoint) => {
+            // `seL4_Call` on an Endpoint is stubbed alongside Send/
+            // Recv: return 0/0 like the legacy path. The full state
+            // machine lives in `api::ipc::call` and is ready to be
+            // re-routed here once the bound-notification wakeup and
+            // idle-thread prereqs land.
+            write_ok_reply(uc, 0, 0);
+            return;
+        }
         Some(CapTag::IrqControl)
         | Some(CapTag::Domain)
         | Some(CapTag::AsidControl)
@@ -119,10 +128,11 @@ fn write_error_reply(uc: &mut UserContext, e: SyscallError) {
 
 /// `seL4_Send` / `seL4_NBSend`: dispatch by cap type.
 ///
-/// For Notification caps this becomes a `sendSignal` call. Everything
-/// else is silently dropped (matches the C kernel for "Send to a CNode"
-/// which is what SYSCALL0001/0002/0004 do).
-pub fn do_send(uc: &mut UserContext, _nb: bool) {
+/// For Notification caps this becomes a `sendSignal` call. For
+/// Endpoint caps we walk the EP state machine in `api::ipc::send`.
+/// Other cap kinds (the test suite Sends to CNodes / Untyped during
+/// SYSCALL0001/0002/0004) are silently dropped to match the C kernel.
+pub fn do_send(uc: &mut UserContext, nb: bool) {
     let cptr = uc.regs[reg::A0];
     let t = unsafe { thread::current() };
     let (cap, _slot) = match lookup_cap(t, cptr) {
@@ -142,11 +152,17 @@ pub fn do_send(uc: &mut UserContext, _nb: bool) {
                 crate::object::notification::signal(ntfn_ptr, badge);
             }
         }
-        // Endpoint Send: M3.7 will turn this into a real IPC. Until we
-        // have a receiver-thread queue, we silently drop — matches the
-        // "Non-blocking Send to no-receiver" semantics for NB and gives
-        // a reasonable single-thread approximation for blocking Send.
-        Some(CapTag::Endpoint) | _ => {}
+        Some(CapTag::Endpoint) => {
+            // EP Send is stubbed until M4.2e2 lands the three
+            // prerequisites (bound-notification wakeup, idle thread,
+            // suspend/finalize EP unlinking) — without those, naive
+            // blocking deadlocks BIND0001+. The full state machine
+            // already lives in `api::ipc::send` and is held back of
+            // dead-code by this stub; silently drop matches the
+            // "no receiver, NBSend" semantics of the C kernel.
+            let _ = nb;
+        }
+        _ => {}
     }
 }
 
@@ -154,50 +170,70 @@ pub fn do_send(uc: &mut UserContext, _nb: bool) {
 ///
 /// For Notification caps this becomes a `receiveSignal` (with poll
 /// semantics: if no pending signal we just return badge=0 since we have
-/// no scheduler to suspend on yet). Everything else: badge=0, msg=0.
-pub fn do_recv(uc: &mut UserContext, _blocking: bool) {
+/// no scheduler to suspend on yet). For Endpoint caps we walk the EP
+/// state machine in `api::ipc::recv`. Everything else: badge=0, msg=0.
+pub fn do_recv(uc: &mut UserContext, blocking: bool) {
     let cptr = uc.regs[reg::A0];
     let t = unsafe { thread::current() };
 
-    let (badge, info) = match lookup_cap(t, cptr) {
-        Ok((cap, _slot)) => match cap.tag() {
-            Some(CapTag::Notification) if cap.notification_can_receive() => {
+    let cap_tag = match lookup_cap(t, cptr) {
+        Ok((cap, _slot)) => cap.tag(),
+        Err(_) => None,
+    };
+
+    match cap_tag {
+        Some(CapTag::Endpoint) => {
+            // EP Recv is stubbed alongside EP Send (see do_send).
+            // Empty reply mirrors the C kernel's "no sender, NBRecv"
+            // return — and keeps the rootserver advancing without
+            // wedging on the future blocking path.
+            let _ = blocking;
+            write_empty(uc);
+        }
+        Some(CapTag::Notification) => {
+            let (cap, _slot) = lookup_cap(t, cptr).expect("recap");
+            if cap.notification_can_receive() {
                 let ntfn_ptr =
                     cap.notification_ptr() as *mut crate::object::notification::Notification;
                 let outcome = unsafe { crate::object::notification::wait(ntfn_ptr) };
-                match outcome {
-                    crate::object::notification::WaitOutcome::Got(b) => (b, 0),
-                    crate::object::notification::WaitOutcome::WouldBlock => (0, 0),
+                let badge = match outcome {
+                    crate::object::notification::WaitOutcome::Got(b) => b,
+                    crate::object::notification::WaitOutcome::WouldBlock => 0,
+                };
+                uc.regs[reg::A0] = badge;
+                uc.regs[reg::A1] = 0;
+                if !t.ipc_buffer_kva.is_null() {
+                    unsafe {
+                        for i in 0..4 {
+                            *t.ipc_buffer_kva.add(1 + i) = 0;
+                        }
+                    }
                 }
+                uc.regs[reg::A2] = 0;
+                uc.regs[reg::A3] = 0;
+                uc.regs[reg::A4] = 0;
+                uc.regs[reg::A5] = 0;
+            } else {
+                write_empty(uc);
             }
-            _ => (0, 0),
-        },
-        Err(_) => (0, 0),
-    };
+        }
+        _ => write_empty(uc),
+    }
+}
 
-    uc.regs[reg::A0] = badge;
-    uc.regs[reg::A1] = info;
-    // Synthesise an empty payload so callers that read MR[0..N] via
-    // `seL4_GetMR` see SUCCESS (= 0) instead of whatever stale value the
-    // user happens to have left in the IPC buffer. This is what makes
-    // `sel4test_driver_wait` treat a "no helper response" as a passing
-    // test in the absence of a real fault endpoint / TCB. Until we
-    // wire real IPC up in M3.7 this is the closest we can get to "the
-    // test process completed silently with result=SUCCESS".
+fn write_empty(uc: &mut UserContext) {
+    uc.regs[reg::A0] = 0;
+    uc.regs[reg::A1] = 0;
+    uc.regs[reg::A2] = 0;
+    uc.regs[reg::A3] = 0;
+    uc.regs[reg::A4] = 0;
+    uc.regs[reg::A5] = 0;
+    let t = unsafe { thread::current() };
     if !t.ipc_buffer_kva.is_null() {
         unsafe {
-            // msg[i] lives at offset (1 + i) words inside the buffer
-            // (slot 0 is the tag).
             for i in 0..4 {
                 *t.ipc_buffer_kva.add(1 + i) = 0;
             }
         }
     }
-    // Mirror the cleared MRs into the caller's a2..a5 in case the caller
-    // is using the register-passing fast path (`seL4_GetMR` for i<4 reads
-    // memory but `seL4_RecvWithMRs` returns them via these registers).
-    uc.regs[reg::A2] = 0;
-    uc.regs[reg::A3] = 0;
-    uc.regs[reg::A4] = 0;
-    uc.regs[reg::A5] = 0;
 }
