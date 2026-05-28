@@ -353,24 +353,30 @@ pub unsafe fn init(tcb_kva: u64) {
     }
 }
 
-/// Detach `tcb` from any Endpoint wait list it might be queued on
-/// (because of a prior blocking Send / Recv / Call). Safe to call on
-/// a TCB that isn't waiting on anything — it short-circuits on
-/// `waiting_on == 0`.
+/// Detach `tcb` from any Endpoint or Notification wait list it might be
+/// queued on (because of a prior blocking Send / Recv / Call / Wait).
+/// Safe to call on a TCB that isn't waiting on anything — it
+/// short-circuits on `waiting_on == 0`.
 ///
-/// Walking the EP wait list requires the `endpoint` module; we live
-/// in `object::tcb`, so import lazily to avoid a cycle.
+/// Dispatch on `tcb.state` so we route to the right object: BlockedOn{Receive,
+/// Send, Reply} → Endpoint; BlockedOnNotification → Notification.
 unsafe fn unlink_from_wait_object(tcb: *mut Tcb) {
     if tcb.is_null() {
         return;
     }
-    let ep = unsafe { (*tcb).waiting_on };
-    if ep == 0 {
+    let obj = unsafe { (*tcb).waiting_on };
+    if obj == 0 {
         return;
     }
-    let ep_ptr = ep as *mut crate::object::endpoint::Endpoint;
+    let st = unsafe { (*tcb).state };
     unsafe {
-        crate::object::endpoint::remove_waiter(ep_ptr, tcb);
+        if st == ThreadState::BlockedOnNotification as u8 {
+            let ntfn = obj as *mut crate::object::notification::Notification;
+            crate::object::notification::remove_waiter(ntfn, tcb);
+        } else {
+            let ep = obj as *mut crate::object::endpoint::Endpoint;
+            crate::object::endpoint::remove_waiter(ep, tcb);
+        }
         (*tcb).waiting_on = 0;
         (*tcb).sender_badge = 0;
         (*tcb).sender_is_call = 0;

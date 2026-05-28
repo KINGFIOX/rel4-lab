@@ -184,6 +184,81 @@ pub unsafe fn remove_waiter(ep: *mut Endpoint, tcb: *mut Tcb) {
     }
 }
 
+/// `cancelBadgedSends(ep, badge)` (C kernel name): traverse `ep`'s
+/// wait list and wake every blocked sender whose `sender_badge` matches
+/// `badge`. Non-matching senders, and any blocked receivers, are left
+/// in place. Matching senders move to `Restart` and re-enter the
+/// runqueue with their syscall return register set to 0 (mirroring the
+/// C kernel's `setThreadState(t, Restart)` and the implicit error reply
+/// of `cancelIPC`).
+pub unsafe fn cancel_badged_sends(ep: *mut Endpoint, badge: u64) {
+    use crate::abi::types::MessageInfo;
+    use crate::arch::riscv64::trap::reg;
+    use crate::object::tcb::{self, ThreadState};
+    if ep.is_null() {
+        return;
+    }
+    unsafe {
+        // Only meaningful if EP is currently holding senders.
+        if (*ep).state() != EpState::Sending {
+            return;
+        }
+        // Snapshot the queue head and zero out the EP so we can mutate
+        // each TCB's queue_next/prev without re-entering the EP. We'll
+        // re-thread non-matching waiters back into a fresh queue.
+        let head = (*ep).head();
+        (*ep).set_head_state(core::ptr::null_mut(), EpState::Idle);
+        (*ep).set_tail(core::ptr::null_mut());
+
+        let mut new_head: *mut Tcb = core::ptr::null_mut();
+        let mut new_tail: *mut Tcb = core::ptr::null_mut();
+
+        let mut cur = head;
+        while !cur.is_null() {
+            let next = (*cur).queue_next as *mut Tcb;
+            (*cur).queue_next = 0;
+            (*cur).queue_prev = 0;
+            if (*cur).sender_badge == badge {
+                let was_call = (*cur).sender_is_call != 0;
+                (*cur).waiting_on = 0;
+                (*cur).sender_badge = 0;
+                (*cur).sender_is_call = 0;
+                (*cur).context.regs[reg::A0] = 0;
+                if was_call {
+                    // The original syscall was seL4_Call expecting a
+                    // reply. Synthesise an InvalidCapability reply so
+                    // user code observing `seL4_MessageInfo_get_label`
+                    // sees the expected `seL4_InvalidCapability` (= 2)
+                    // when the call was cancelled mid-flight.
+                    (*cur).context.regs[reg::A1] =
+                        MessageInfo::new(2, 0, 0, 0).0;
+                    (*cur).context.regs[reg::A2] = 0;
+                    (*cur).context.regs[reg::A3] = 0;
+                    (*cur).context.regs[reg::A4] = 0;
+                    (*cur).context.regs[reg::A5] = 0;
+                }
+                (*cur).state = ThreadState::Restart as u8;
+                tcb::enqueue(cur);
+            } else {
+                // Append to the rebuilt queue.
+                (*cur).queue_prev = new_tail as u64;
+                if new_tail.is_null() {
+                    new_head = cur;
+                } else {
+                    (*new_tail).queue_next = cur as u64;
+                }
+                new_tail = cur;
+            }
+            cur = next;
+        }
+
+        if !new_head.is_null() {
+            (*ep).set_head_state(new_head, EpState::Sending);
+            (*ep).set_tail(new_tail);
+        }
+    }
+}
+
 /// Drain `ep`'s wait list on destruction: wake every blocked TCB so
 /// the cap-revoke teardown doesn't leak threads. Each woken TCB is
 /// marked Restart and pushed back onto the global runqueue.

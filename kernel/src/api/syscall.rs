@@ -24,6 +24,7 @@ pub enum SyscallError {
     DeleteFirst,
     RevokeFirst,
     TruncatedMessage,
+    FailedLookup,
     Unsupported,
 }
 
@@ -37,6 +38,7 @@ impl SyscallError {
             Self::InvalidCapability => 2,
             Self::IllegalOperation => 3,
             Self::RangeError => 4,
+            Self::FailedLookup => 6,
             Self::TruncatedMessage => 7,
             Self::DeleteFirst => 8,
             Self::RevokeFirst => 9,
@@ -54,7 +56,18 @@ pub fn do_call(uc: &mut UserContext) {
     let info = MessageInfo(raw_info);
 
     let t = unsafe { thread::current() };
-    let (cap, slot) = match lookup_cap(t, cptr) {
+    let lookup_res = lookup_cap(t, cptr);
+    if cptr > 0x1000 {
+        crate::println!(
+            "do_call: cptr={:#x} radix={} guard={:#x} guard_bits={} ok={}",
+            cptr,
+            t.cspace_radix,
+            t.cspace_guard,
+            t.cspace_guard_bits,
+            lookup_res.is_ok()
+        );
+    }
+    let (cap, slot) = match lookup_res {
         Ok(v) => v,
         Err(_) => {
             return write_error_reply(uc, SyscallError::InvalidCapability);
@@ -101,6 +114,7 @@ pub fn do_call(uc: &mut UserContext) {
             //   - IrqControl_Get:  unblocks `seL4_IRQControl_Get`
             Ok(())
         }
+        None => Err(SyscallError::InvalidCapability),
         _ => Err(SyscallError::IllegalOperation),
     };
 
@@ -181,24 +195,32 @@ pub fn do_recv(uc: &mut UserContext, blocking: bool) {
             if cap.notification_can_receive() {
                 let ntfn_ptr =
                     cap.notification_ptr() as *mut crate::object::notification::Notification;
-                let outcome = unsafe { crate::object::notification::wait(ntfn_ptr) };
-                let badge = match outcome {
-                    crate::object::notification::WaitOutcome::Got(b) => b,
-                    crate::object::notification::WaitOutcome::WouldBlock => 0,
-                };
-                uc.regs[reg::A0] = badge;
-                uc.regs[reg::A1] = 0;
-                if !t.ipc_buffer_kva.is_null() {
-                    unsafe {
-                        for i in 0..4 {
-                            *t.ipc_buffer_kva.add(1 + i) = 0;
+                let cur_tcb = crate::object::tcb::current();
+                let outcome =
+                    unsafe { crate::object::notification::wait(ntfn_ptr, cur_tcb, blocking) };
+                match outcome {
+                    crate::object::notification::WaitOutcome::Got(badge) => {
+                        uc.regs[reg::A0] = badge;
+                        uc.regs[reg::A1] = 0;
+                        if !t.ipc_buffer_kva.is_null() {
+                            unsafe {
+                                for i in 0..4 {
+                                    *t.ipc_buffer_kva.add(1 + i) = 0;
+                                }
+                            }
                         }
+                        uc.regs[reg::A2] = 0;
+                        uc.regs[reg::A3] = 0;
+                        uc.regs[reg::A4] = 0;
+                        uc.regs[reg::A5] = 0;
+                    }
+                    crate::object::notification::WaitOutcome::Blocked => {
+                        // Caller is now BlockedOnNotification — leave its
+                        // registers alone; signal() will write them at
+                        // wake-up time. `kernel_exit` will pick another
+                        // runnable TCB.
                     }
                 }
-                uc.regs[reg::A2] = 0;
-                uc.regs[reg::A3] = 0;
-                uc.regs[reg::A4] = 0;
-                uc.regs[reg::A5] = 0;
             } else {
                 write_empty(uc);
             }

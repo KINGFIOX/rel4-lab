@@ -240,6 +240,7 @@ pub fn handle_untyped(
         match new_type {
             obj::TCB => unsafe { crate::object::tcb::init(obj_base) },
             obj::ENDPOINT => unsafe { crate::object::endpoint::init(obj_base) },
+            obj::NOTIFICATION => unsafe { crate::object::notification::init(obj_base) },
             obj::PAGE_TABLE => {
                 // Stamp the global kernel + PSpace mappings into the
                 // new root PT so a `satp` swap to it can still trap to
@@ -691,10 +692,78 @@ pub fn handle_thread(
         }
 
         TCB_READ_REGISTERS => {
-            // Returning a (mostly-zero) message satisfies callers that
-            // probe register state — there is no thread we can read
-            // from yet, but the user only ever blocks on this after
-            // having called WriteRegisters / Resume.
+            // libsel4: tag = MessageInfo(TCBReadRegisters, 0, 0, 2)
+            //   mr0 = (suspend_source & 1) | ((arch_flags & 0xff) << 8)
+            //   mr1 = count
+            // On reply, the kernel returns up to `count` registers:
+            //   mr0 = pc, mr1 = ra, mr2 = sp, mr3 = gp
+            //   mr4.. = s0..s11, a0..a7, t0..t6, tp  (in that order)
+            //
+            // Same RISC-V `seL4_UserContext` layout as TCB_WriteRegisters
+            // — share the same `X_INDEX` table.
+            if length < 2 {
+                return Err(SyscallError::TruncatedMessage);
+            }
+            let flag_word = uc.regs[reg::A2];
+            let count = uc.regs[reg::A3] as usize;
+            let suspend_source = (flag_word & 1) != 0;
+
+            const X_INDEX: [usize; 32] = [
+                /* 0 pc, 1 ra (handled below) */ 0, 0,
+                /* 2 sp  */ reg::SP,
+                /* 3 gp  */ reg::GP,
+                /* 4..15 s0..s11 */ 8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+                /* 16..23 a0..a7 */ reg::A0, reg::A1, reg::A2, reg::A3,
+                                    reg::A4, reg::A5, reg::A6, reg::A7,
+                /* 24..30 t0..t6 */ reg::T0, 6, 7, 28, 29, 30, 31,
+                /* 31 tp */ reg::TP,
+            ];
+
+            // Read register at seL4_UserContext field index `i`.
+            let read_reg = |i: usize| -> u64 {
+                if i == 0 {
+                    unsafe { (*tcb_ptr).context.pc }
+                } else if i == 1 {
+                    unsafe { (*tcb_ptr).context.regs[reg::RA] }
+                } else if i < 32 {
+                    let idx = X_INDEX[i];
+                    if idx == 0 {
+                        0
+                    } else {
+                        unsafe { (*tcb_ptr).context.regs[idx] }
+                    }
+                } else {
+                    0
+                }
+            };
+
+            let n = count.min(32);
+            // First 4 MRs go through registers a2..a5.
+            if n >= 1 { uc.regs[reg::A2] = read_reg(0); }
+            if n >= 2 { uc.regs[reg::A3] = read_reg(1); }
+            if n >= 3 { uc.regs[reg::A4] = read_reg(2); }
+            if n >= 4 { uc.regs[reg::A5] = read_reg(3); }
+
+            // MRs 4..n live in the IPC buffer at words[1+i].
+            if n > 4 && !thread.ipc_buffer_kva.is_null() {
+                for i in 4..n {
+                    unsafe {
+                        *thread.ipc_buffer_kva.add(1 + i) = read_reg(i);
+                    }
+                }
+            }
+
+            if suspend_source {
+                unsafe { crate::object::tcb::suspend(tcb_ptr) };
+            }
+
+            // `write_ok_reply` after we return will set a0=0 and
+            // a1=MessageInfo(label=0,length=0) — it deliberately
+            // doesn't touch a2..a5. libsel4's `seL4_TCB_ReadRegisters`
+            // stub reads `count` MRs unconditionally (using the count
+            // it sent, not the reply's length), so length=0 here is
+            // fine.
+            let _ = n;
             Ok(())
         }
 
@@ -809,14 +878,175 @@ pub fn handle_cnode(
         label::CNODE_MOVE => cnode_op_move_or_mutate(thread, dest_root_cap, length, uc, false),
         label::CNODE_MUTATE => cnode_op_move_or_mutate(thread, dest_root_cap, length, uc, true),
         label::CNODE_CANCEL_BADGED_SENDS => {
-            // No EP/Notif IPC yet (M3.6) — treat as success no-op.
-            Ok(())
+            cnode_op_cancel_badged_sends(dest_root_cap, length, uc)
         }
+        label::CNODE_ROTATE => cnode_op_rotate(thread, dest_root_cap, length, uc),
+        label::CNODE_SAVE_CALLER => cnode_op_save_caller(thread, dest_root_cap, length, uc),
         _ => {
             let _ = label_id;
             Err(SyscallError::IllegalOperation)
         }
     }
+}
+
+/// CNode_CancelBadgedSends: target slot must hold an Endpoint cap with
+/// full Send+Receive+Grant+GrantReply rights. Unbadged ⇒ no-op success.
+/// Badged ⇒ walk the EP's wait list and wake every blocked sender whose
+/// `sender_badge` matches the cap's badge.
+fn cnode_op_cancel_badged_sends(
+    dest_root_cap: Cap,
+    length: u64,
+    uc: &UserContext,
+) -> Result<(), SyscallError> {
+    if length < 2 {
+        return Err(SyscallError::TruncatedMessage);
+    }
+    let index = uc.regs[reg::A2];
+    let depth = uc.regs[reg::A3] as u32 & 0xff;
+    let slot = resolve_slot(dest_root_cap, index, depth)?;
+    let cap = unsafe { (*slot).cap };
+    // Mirror C kernel `hasCancelSendRights`: only Endpoint caps with all
+    // four rights are valid targets.
+    if cap.tag() != Some(CapTag::Endpoint)
+        || !cap.endpoint_can_send()
+        || !cap.endpoint_can_receive()
+        || !cap.endpoint_can_grant()
+        || !cap.endpoint_can_grant_reply()
+    {
+        return Err(SyscallError::IllegalOperation);
+    }
+    let badge = cap.endpoint_badge();
+    if badge == 0 {
+        return Ok(());
+    }
+    let ep_ptr = cap.endpoint_ptr() as *mut crate::object::endpoint::Endpoint;
+    if ep_ptr.is_null() {
+        return Ok(());
+    }
+    unsafe {
+        crate::object::endpoint::cancel_badged_sends(ep_ptr, badge);
+    }
+    Ok(())
+}
+
+/// CNode_Rotate: atomic move of `pivot → dest` and `src → pivot`. If
+/// `src == dest` it degenerates to a swap of `src` and `pivot`. Mirrors
+/// C kernel `decodeCNodeInvocation`'s Rotate handling.
+fn cnode_op_rotate(
+    thread: &Thread,
+    dest_root_cap: Cap,
+    length: u64,
+    uc: &UserContext,
+) -> Result<(), SyscallError> {
+    if length < 8 {
+        return Err(SyscallError::TruncatedMessage);
+    }
+    let dest_index = uc.regs[reg::A2];
+    let dest_depth = uc.regs[reg::A3] as u32 & 0xff;
+    let pivot_new_data = uc.regs[reg::A4]; // libsel4 calls this `dest_badge`
+    let pivot_index = uc.regs[reg::A5];
+    let pivot_depth = read_mr(thread, uc, 4) as u32 & 0xff;
+    let src_new_data = read_mr(thread, uc, 5); // libsel4 calls this `pivot_badge`
+    let src_index = read_mr(thread, uc, 6);
+    let src_depth = read_mr(thread, uc, 7) as u32 & 0xff;
+
+    let pivot_root_cptr = read_extra_cap(thread, 0);
+    let src_root_cptr = read_extra_cap(thread, 1);
+    let (pivot_root_cap, _) = cspace::lookup_cap(thread, pivot_root_cptr)
+        .map_err(|_| SyscallError::InvalidCapability)?;
+    let (src_root_cap, _) = cspace::lookup_cap(thread, src_root_cptr)
+        .map_err(|_| SyscallError::InvalidCapability)?;
+
+    let dest = resolve_slot(dest_root_cap, dest_index, dest_depth)?;
+    let pivot = resolve_slot(pivot_root_cap, pivot_index, pivot_depth)?;
+    let src = resolve_slot(src_root_cap, src_index, src_depth)?;
+
+    if pivot == src || pivot == dest {
+        return Err(SyscallError::IllegalOperation);
+    }
+    if src != dest {
+        unsafe {
+            if !(*dest).cap.is_null() {
+                return Err(SyscallError::DeleteFirst);
+            }
+        }
+    }
+    unsafe {
+        if (*src).cap.is_null() || (*pivot).cap.is_null() {
+            return Err(SyscallError::FailedLookup);
+        }
+    }
+    unsafe {
+        let new_src_cap = apply_badge((*src).cap, src_new_data);
+        let new_pivot_cap = apply_badge((*pivot).cap, pivot_new_data);
+        if src == dest {
+            // Swap pivot and src caps. MDB linkage stays attached to
+            // each Cte; we simply swap the `cap` fields.
+            let src_cap = new_src_cap;
+            let piv_cap = new_pivot_cap;
+            // Note: this changes the cap stored at each slot. The MDB
+            // chain still threads through these CTEs unchanged.
+            (*src).cap = piv_cap;
+            (*pivot).cap = src_cap;
+        } else {
+            // Step 1: move pivot → dest.
+            cnode_move_slot(pivot, dest, new_pivot_cap);
+            // Step 2: move src → pivot.
+            cnode_move_slot(src, pivot, new_src_cap);
+        }
+    }
+    Ok(())
+}
+
+/// Move a single cap+MDB entry from `src` slot to `dst` slot, applying
+/// the given (possibly badged) cap. Caller has verified `dst` is empty
+/// and `src` is non-null. Re-threads the doubly linked MDB list around
+/// the new location.
+unsafe fn cnode_move_slot(src: *mut Cte, dst: *mut Cte, new_cap: Cap) {
+    unsafe {
+        let moved_mdb = (*src).mdb;
+        crate::object::cnode::mdb_unlink(src);
+        (*src).cap = Cap::null();
+        (*dst).cap = new_cap;
+        (*dst).mdb = moved_mdb;
+        let prev = (*dst).mdb.prev();
+        let next = (*dst).mdb.next();
+        if prev != 0 {
+            let p = prev as *mut Cte;
+            (*p).mdb.set_next(dst as u64);
+        }
+        if next != 0 {
+            let n = next as *mut Cte;
+            (*n).mdb.set_prev(dst as u64);
+        }
+    }
+}
+
+/// CNode_SaveCaller: move the current thread's pending reply (caller)
+/// cap into `dest`. Pre-MCS only. If the thread has no caller, the C
+/// kernel logs a userError and returns NoError — match that behaviour
+/// so the rootserver's `vka_save_reply_cap` path doesn't fail spuriously.
+fn cnode_op_save_caller(
+    _thread: &Thread,
+    dest_root_cap: Cap,
+    length: u64,
+    uc: &UserContext,
+) -> Result<(), SyscallError> {
+    if length < 2 {
+        return Err(SyscallError::TruncatedMessage);
+    }
+    let index = uc.regs[reg::A2];
+    let depth = uc.regs[reg::A3] as u32 & 0xff;
+    let dest = resolve_slot(dest_root_cap, index, depth)?;
+    unsafe {
+        if !(*dest).cap.is_null() {
+            return Err(SyscallError::DeleteFirst);
+        }
+    }
+    // No real reply-cap object yet — we don't track caller via a CTE,
+    // so there's nothing to move. Returning Ok matches the C kernel's
+    // "Reply cap not present" branch, which is also a successful no-op.
+    Ok(())
 }
 
 /// Read message-register `mr_i` for `i ≥ 4` from the IPC buffer (mr0..3
@@ -893,7 +1123,11 @@ fn cnode_op_copy_or_mint(
             return Err(SyscallError::DeleteFirst);
         }
         if (*src).cap.is_null() {
-            return Err(SyscallError::IllegalOperation);
+            // Mirrors C kernel `decodeCNodeInvocation` → `lookupSourceSlot`:
+            // an empty source slot is a "failed lookup", not an
+            // "illegal operation". sel4test (CNODEOP0003 etc.) keys off
+            // the exact label, so map this carefully.
+            return Err(SyscallError::FailedLookup);
         }
         let src_cap = (*src).cap;
         let mut new_cap = src_cap;
@@ -972,7 +1206,7 @@ fn cnode_op_move_or_mutate(
             return Err(SyscallError::DeleteFirst);
         }
         if (*src).cap.is_null() {
-            return Err(SyscallError::IllegalOperation);
+            return Err(SyscallError::FailedLookup);
         }
         let mut moved = (*src).cap;
         if is_mutate {
@@ -1051,11 +1285,61 @@ fn delete_slot(slot: *mut Cte) -> Result<(), SyscallError> {
         if crate::object::cnode::mdb_has_children(slot) {
             return Err(SyscallError::RevokeFirst);
         }
-        finalize_cap(&mut (*slot).cap);
+        let is_final = is_final_capability(slot);
+        finalize_cap(&mut (*slot).cap, is_final);
         crate::object::cnode::mdb_unlink(slot);
         (*slot).cap = Cap::null();
     }
     Ok(())
+}
+
+/// `isFinalCapability`-equivalent: check whether this CTE holds the last
+/// remaining cap to its underlying object. Mirrors the C kernel logic in
+/// `kernel/src/object/cnode.c`: walk the MDB neighbours (prev / next) and
+/// see if either points at the same object. A cap is *final* iff no
+/// neighbour shares the object.
+unsafe fn is_final_capability(slot: *mut Cte) -> bool {
+    if slot.is_null() {
+        return false;
+    }
+    let mdb = unsafe { (*slot).mdb };
+    let cap = unsafe { (*slot).cap };
+    if mdb.prev() != 0 {
+        let p = mdb.prev() as *mut Cte;
+        if same_object_as(unsafe { (*p).cap }, cap) {
+            return false;
+        }
+    }
+    if mdb.next() != 0 {
+        let n = mdb.next() as *mut Cte;
+        if same_object_as(cap, unsafe { (*n).cap }) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Mirror of C kernel `sameObjectAs(cap_a, cap_b)`: two caps refer to
+/// the same underlying kernel object. For Untyped / Frame this also
+/// requires matching base+size; for the others it's just type+pointer.
+fn same_object_as(a: Cap, b: Cap) -> bool {
+    match (a.tag(), b.tag()) {
+        (Some(CapTag::Endpoint), Some(CapTag::Endpoint)) => {
+            a.endpoint_ptr() == b.endpoint_ptr()
+        }
+        (Some(CapTag::Notification), Some(CapTag::Notification)) => {
+            a.notification_ptr() == b.notification_ptr()
+        }
+        (Some(CapTag::CNode), Some(CapTag::CNode)) => a.cnode_ptr() == b.cnode_ptr(),
+        (Some(CapTag::Thread), Some(CapTag::Thread)) => a.thread_ptr() == b.thread_ptr(),
+        (Some(CapTag::PageTable), Some(CapTag::PageTable)) => {
+            a.page_table_base_ptr() == b.page_table_base_ptr()
+        }
+        (Some(CapTag::Frame), Some(CapTag::Frame)) => {
+            a.frame_base_ptr() == b.frame_base_ptr() && a.frame_size() == b.frame_size()
+        }
+        _ => false,
+    }
 }
 
 /// Architecture-aware "finalise this cap" hook. For Frame caps that are
@@ -1069,7 +1353,7 @@ fn delete_slot(slot: *mut Cte) -> Result<(), SyscallError> {
 ///                              owner → driver reads stale data via VA.
 ///
 /// Mirrors the work `Arch_finaliseCap` does in `kernel/src/arch/.../object/objecttype.c`.
-fn finalize_cap(cap: &mut Cap) {
+fn finalize_cap(cap: &mut Cap, is_final: bool) {
     match cap.tag() {
         Some(CapTag::Frame) => {
             let va = cap.frame_mapped_addr();
@@ -1106,35 +1390,41 @@ fn finalize_cap(cap: &mut Cap) {
             }
         }
         Some(CapTag::Endpoint) => {
-            // Wake every TCB blocked on this Endpoint. Without this a
-            // cap Revoke would orphan senders / receivers — they'd be
-            // dequeued from the runqueue, marked Blocked, and never
-            // reachable again because the EP's storage is recycled by
-            // the parent Untyped on the next Retype.
-            let p = cap.endpoint_ptr();
-            if p != 0 && is_pspace_kva(p) {
-                unsafe {
-                    crate::object::endpoint::finalize(
-                        p as *mut crate::object::endpoint::Endpoint,
-                    );
+            // Mirrors C kernel `finaliseCap(cap, final, _)` Endpoint
+            // branch: wake every blocked TCB **only** when this is the
+            // last surviving cap to the EP (`final == true`). Deleting
+            // a non-final cap (e.g. a derived/badged copy during a
+            // Revoke) just unlinks the cap from MDB; the senders /
+            // receivers stay queued on the EP because other refs to it
+            // are still live.
+            if is_final {
+                let p = cap.endpoint_ptr();
+                if p != 0 && is_pspace_kva(p) {
+                    unsafe {
+                        crate::object::endpoint::finalize(
+                            p as *mut crate::object::endpoint::Endpoint,
+                        );
+                    }
                 }
             }
         }
         Some(CapTag::Notification) => {
-            // Drop the back-link from the bound TCB so a future
-            // `signal()` on a recycled slab doesn't try to wake a
-            // stale "bound TCB". The notification storage itself is
-            // reclaimed by the parent Untyped on the next Retype.
-            let p = cap.notification_ptr();
-            if p != 0 && is_pspace_kva(p) {
-                unsafe {
-                    let n = p as *mut crate::object::notification::Notification;
-                    let bound = (*n).bound_tcb();
-                    if bound != 0 {
-                        let tcb_ptr = bound as *mut crate::object::tcb::Tcb;
-                        (*tcb_ptr).bound_notification = 0;
+            // Final-cap path only (see Endpoint above for the
+            // rationale). Non-final delete leaves the notification
+            // object and its waiters intact.
+            if is_final {
+                let p = cap.notification_ptr();
+                if p != 0 && is_pspace_kva(p) {
+                    unsafe {
+                        let n = p as *mut crate::object::notification::Notification;
+                        let bound = (*n).bound_tcb();
+                        if bound != 0 {
+                            let tcb_ptr = bound as *mut crate::object::tcb::Tcb;
+                            (*tcb_ptr).bound_notification = 0;
+                        }
+                        (*n).set_bound_tcb(0);
+                        crate::object::notification::finalize(n);
                     }
-                    (*n).set_bound_tcb(0);
                 }
             }
         }
@@ -1193,7 +1483,8 @@ fn revoke_descendants(cte: *mut Cte) {
         while crate::object::cnode::mdb_has_children(cte) {
             let child = (*cte).mdb.next() as *mut Cte;
             revoke_descendants(child);
-            finalize_cap(&mut (*child).cap);
+            let is_final = is_final_capability(child);
+            finalize_cap(&mut (*child).cap, is_final);
             crate::object::cnode::mdb_unlink(child);
             (*child).cap = Cap::null();
         }

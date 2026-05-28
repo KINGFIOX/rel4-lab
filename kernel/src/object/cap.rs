@@ -401,6 +401,16 @@ impl Cap {
     }
 
     #[inline]
+    pub const fn endpoint_can_grant(self) -> bool {
+        (self.words[0] >> 57) & 1 != 0
+    }
+
+    #[inline]
+    pub const fn endpoint_can_grant_reply(self) -> bool {
+        (self.words[0] >> 58) & 1 != 0
+    }
+
+    #[inline]
     pub const fn notification_ptr(self) -> u64 {
         sign_extend_ptr(self.words[0] & PTR_LOW_MASK)
     }

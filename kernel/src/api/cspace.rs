@@ -72,11 +72,20 @@ pub fn lookup_slot(
 
 /// Convenience: resolve `cptr` through the thread's CSpace and return the
 /// cap stored in the final slot, plus a pointer to the slot itself.
+///
+/// Mirrors the C kernel's `lookupCap` semantics: a partial walk (where
+/// the cptr extends past the deepest CNode in the chain) is a
+/// `DepthMismatch` failure, not a successful return of a null cap.
+/// Callers that want partial walks (CNode_Copy etc.) should use
+/// `lookup_slot_in` directly.
 pub fn lookup_cap(
     thread: &Thread,
     cptr: u64,
 ) -> Result<(Cap, *mut Cte), LookupError> {
     let r = lookup_slot(thread, cptr, WORD_BITS)?;
+    if r.bits_remaining != 0 {
+        return Err(LookupError::DepthMismatch);
+    }
     let cap = unsafe { (*r.slot).cap };
     Ok((cap, r.slot))
 }
