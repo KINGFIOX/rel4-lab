@@ -107,6 +107,10 @@ fn park_current_thread() -> ! {
     }
 }
 
+/// Walk the rootserver's PT for VA 0x10004000 and assert it still points
+/// at PA 0x8034D000 (the boot-time mapping). If a syscall ever stomps on
+/// the PT we'll catch it here. Disabled in release; left in until M3.7
+/// is debugged.
 /// Called when scause = environment call from U-mode.
 ///
 /// On RV64 seL4, the syscall number is passed in `a7` as a signed `isize`.
@@ -151,17 +155,20 @@ fn handle_syscall(uc: &mut UserContext) {
         syscall::SYS_CALL => {
             crate::api::syscall::do_call(uc);
         }
-        syscall::SYS_SEND | syscall::SYS_NB_SEND | syscall::SYS_REPLY => {
-            // M3.6 will turn these into real IPC. Send-side syscalls have
-            // no register return value, so a silent no-op is safe.
+        syscall::SYS_SEND | syscall::SYS_NB_SEND => {
+            crate::api::syscall::do_send(uc, false);
         }
-        syscall::SYS_RECV | syscall::SYS_REPLY_RECV | syscall::SYS_NB_RECV => {
-            // Recv-side syscalls return the sender badge in a0 and the
-            // message info in a1. Until we have real endpoints, return
-            // (badge=0, msginfo=0) so callers don't misinterpret a stale
-            // cptr value as e.g. a timer interrupt badge.
-            uc.regs[reg::A0] = 0;
-            uc.regs[reg::A1] = 0;
+        syscall::SYS_REPLY => {
+            // M3.6 will turn Reply into real IPC. For now, no-op.
+        }
+        syscall::SYS_RECV | syscall::SYS_NB_RECV => {
+            let blocking = sysno == syscall::SYS_RECV;
+            crate::api::syscall::do_recv(uc, blocking);
+        }
+        syscall::SYS_REPLY_RECV => {
+            // Treat as Recv for now (Reply portion is a no-op until we
+            // have a real reply cap path).
+            crate::api::syscall::do_recv(uc, true);
         }
         n if syscall::is_known(n) => {
             crate::println!(

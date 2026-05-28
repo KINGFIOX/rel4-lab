@@ -266,6 +266,45 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     }
     let device_end_slot = next_slot;
     let untyped_end_slot = next_slot;
+
+    // --- User image frames -----------------------------------------------
+    //
+    // The rootserver's vspace library (`sel4utils`) needs to know which
+    // VA range is occupied by its own statically-mapped ELF image. With
+    // no `userImageFrames` entries in BootInfo, the library treats the
+    // image's VAs as free and happily Page_Map's new frames on top of
+    // them — silently overwriting the .text/.data PTEs and crashing the
+    // moment the rootserver next dereferences something from there.
+    //
+    // Install one 4 KiB Frame cap per image page; the user-VA is recorded
+    // in the cap's `mapped_address` field so the vspace library's "where
+    // is this page?" query has a real answer. Memory itself is already
+    // mapped at boot time, so we don't add new PTEs here.
+    let user_image_frames_start = next_slot;
+    let user_va_start_aligned = args.user_pstart.wrapping_sub(args.pv_offset) & !(PAGE_SIZE - 1);
+    let user_va_end_aligned =
+        (args.user_pend.wrapping_sub(args.pv_offset) + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let mut va = user_va_start_aligned;
+    while va < user_va_end_aligned {
+        if next_slot >= cnode.len() {
+            crate::println!("  warn: root CNode full while installing user-image frame caps");
+            break;
+        }
+        let pa = va.wrapping_add(args.pv_offset) as u64;
+        let frame_kva = pa_to_pspace_va(pa);
+        let mut cap = Cap::new_frame(frame_kva, 0 /* 4 KiB */, 2 /* RW */, false);
+        cap.set_frame_mapped_addr(va as u64);
+        install_initial_cap(cnode, next_slot, cap);
+        next_slot += 1;
+        va += PAGE_SIZE;
+    }
+    let user_image_frames_end = next_slot;
+    crate::println!(
+        "  user image frames: slots {}..{} ({} caps)",
+        user_image_frames_start,
+        user_image_frames_end,
+        user_image_frames_end - user_image_frames_start,
+    );
     crate::println!(
         "  device untyped: slots {}..{} ({} caps)",
         device_start_slot,
@@ -309,7 +348,10 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
             start: next_slot as u64,
             end: cnode.len() as u64,
         };
-        (*bi).user_image_frames = SlotRegion { start: 0, end: 0 };
+        (*bi).user_image_frames = SlotRegion {
+            start: user_image_frames_start as u64,
+            end: user_image_frames_end as u64,
+        };
         (*bi).user_image_paging = SlotRegion { start: 0, end: 0 };
         (*bi).io_space_caps = SlotRegion { start: 0, end: 0 };
         (*bi).extra_bi_pages = SlotRegion { start: 0, end: 0 };

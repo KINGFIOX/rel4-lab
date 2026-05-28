@@ -61,7 +61,12 @@ pub const fn paddr_to_kpptr(paddr: usize) -> usize {
 // distinct from the rootserver-visible "untyped" memory and is only used
 // by the kernel itself.
 
-const BOOT_PT_POOL_PAGES: usize = 64;
+// Each test process the driver spawns conjures a fresh VSpace, and every
+// 4 KiB user mapping inside it can pull two more page-table pages out of
+// this pool. We compromise between binary size and headroom — the rest of
+// the leak gets recovered in `release_root_pt` when an Untyped-Revoke
+// finalises a Thread/VSpace root.
+const BOOT_PT_POOL_PAGES: usize = 1024;
 
 #[repr(C, align(4096))]
 struct BootPtPool {
@@ -123,12 +128,19 @@ pub unsafe fn map_user_4k(root: *mut PageTable, vaddr: usize, paddr: usize, mut 
     flags |= PTE_U | PTE_V | PTE_A | PTE_D;
 
     let mut pt = root;
+    let mut l1pt_pa = 0u64;
+    let mut l0pt_pa = 0u64;
     for level in (1..=2).rev() {
         let i = pt_index(vaddr, level);
         let entry = unsafe { (*pt).entries[i] };
         let next_pt: *mut PageTable = if !entry.is_valid() {
             let new_pt = alloc_pt_page();
             let new_pt_pa = kpptr_to_paddr(new_pt as usize) as u64;
+            if level == 2 {
+                l1pt_pa = new_pt_pa;
+            } else {
+                l0pt_pa = new_pt_pa;
+            }
             unsafe {
                 (*pt).entries[i] = Pte::next(new_pt_pa);
             }
@@ -139,12 +151,19 @@ pub unsafe fn map_user_4k(root: *mut PageTable, vaddr: usize, paddr: usize, mut 
                 level, vaddr
             );
         } else {
-            paddr_to_kpptr(entry.next_pt_paddr() as usize) as *mut PageTable
+            let pa = entry.next_pt_paddr();
+            if level == 2 {
+                l1pt_pa = pa;
+            } else {
+                l0pt_pa = pa;
+            }
+            paddr_to_kpptr(pa as usize) as *mut PageTable
         };
         pt = next_pt;
     }
 
     let i = pt_index(vaddr, 0);
+    let _ = (l1pt_pa, l0pt_pa);
     unsafe {
         (*pt).entries[i] = Pte::leaf(paddr as u64, flags);
     }
@@ -162,13 +181,16 @@ pub unsafe fn unmap_user_4k(root: *mut PageTable, vaddr: usize) -> Option<usize>
     debug_assert!(vaddr & (PAGE_SIZE - 1) == 0, "vaddr not 4K-aligned");
 
     let mut pt = root;
+    let mut levels = [0u64; 3];
     for level in (1..=2).rev() {
         let i = pt_index(vaddr, level);
         let entry = unsafe { (*pt).entries[i] };
         if !entry.is_valid() || entry.is_leaf() {
             return None;
         }
-        pt = paddr_to_kpptr(entry.next_pt_paddr() as usize) as *mut PageTable;
+        let next_pa = entry.next_pt_paddr();
+        levels[level] = next_pa;
+        pt = paddr_to_kpptr(next_pa as usize) as *mut PageTable;
     }
 
     let i = pt_index(vaddr, 0);
@@ -177,6 +199,7 @@ pub unsafe fn unmap_user_4k(root: *mut PageTable, vaddr: usize) -> Option<usize>
         return None;
     }
     let pa = entry.leaf_pa() as usize;
+    let _ = levels;
     unsafe {
         (*pt).entries[i] = Pte::NULL;
     }

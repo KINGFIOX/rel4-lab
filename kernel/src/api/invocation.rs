@@ -55,12 +55,15 @@ mod label {
 /// type and user-supplied size (used for CNode / Untyped where the user
 /// picks a radix).
 fn object_size_bits(ty: u64, user_size: u64) -> Option<u64> {
+    use crate::abi::constants::{
+        SEL4_ENDPOINT_BITS, SEL4_NOTIFICATION_BITS, SEL4_SLOT_BITS, SEL4_TCB_BITS,
+    };
     Some(match ty {
         obj::UNTYPED => user_size,
-        obj::TCB => 11,
-        obj::ENDPOINT => 4,
-        obj::NOTIFICATION => 6,
-        obj::CAP_TABLE => user_size + crate::abi::constants::SEL4_SLOT_BITS as u64,
+        obj::TCB => SEL4_TCB_BITS as u64,
+        obj::ENDPOINT => SEL4_ENDPOINT_BITS as u64,
+        obj::NOTIFICATION => SEL4_NOTIFICATION_BITS as u64,
+        obj::CAP_TABLE => user_size + SEL4_SLOT_BITS as u64,
         obj::FOUR_K_PAGE | obj::PAGE_TABLE => 12,
         obj::MEGA_PAGE => 21,
         obj::GIGA_PAGE => 30,
@@ -151,7 +154,6 @@ pub fn handle_untyped(
         cap
     };
     if dest_cnode_cap.tag() != Some(CapTag::CNode) {
-        crate::println!("    dest cap is not a CNode (tag={:?})", dest_cnode_cap.tag());
         return Err(SyscallError::InvalidCapability);
     }
     let dest_radix = dest_cnode_cap.cnode_radix();
@@ -204,10 +206,6 @@ pub fn handle_untyped(
     let total_obj_bytes = node_window << obj_bits;
 
     if aligned_start_offset.saturating_add(total_obj_bytes) > region_size {
-        crate::println!(
-            "    NotEnoughMemory: untyped={} bits, used={} bytes, need {} bytes",
-            untyped_bits, used_bytes, total_obj_bytes,
-        );
         return Err(SyscallError::NotEnoughMemory);
     }
     let _ = free_bytes;
@@ -302,6 +300,12 @@ pub fn handle_frame(
             let frame_kva = cap.frame_base_ptr();
             let frame_pa = kva_to_pa(frame_kva);
 
+            // Track which VSpace this frame is going into so a later
+            // Page_Unmap routes to the right root PT instead of clobbering
+            // the current thread's mappings. ASID 0 means "no mapping
+            // recorded" so we leave mapped_addr=0 in that pathological
+            // case (table exhausted).
+            let asid = crate::object::asid::assign(root_pt_kva);
             unsafe {
                 vspace::map_user_4k(
                     root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
@@ -309,28 +313,35 @@ pub fn handle_frame(
                     frame_pa as usize,
                     vspace::user_flags(true, true, false),
                 );
-                // Record the mapping inside the frame cap so a future
-                // Page_Unmap (or Delete-with-cleanup) can find it.
                 (*_slot).cap.set_frame_mapped_addr(vaddr);
+                (*_slot).cap.set_frame_mapped_asid(asid);
             }
             Ok(())
         }
         RISCV_PAGE_UNMAP => {
             let frame_va = cap.frame_mapped_addr();
             if frame_va == 0 {
-                // Not mapped — nothing to do.
                 return Ok(());
             }
-            // No `capFMappedASID` yet; we assume the unmap targets the
-            // *current* thread's VSpace, which is the rootserver while
-            // tests are running.
-            let root_pt_kva = thread.vspace_root_kva;
+            let asid = cap.frame_mapped_asid();
+            let root_pt_kva = crate::object::asid::lookup(asid);
+            if root_pt_kva == 0 {
+                // Best effort: clear the cap's mapped_addr but don't
+                // touch any page table. This is what the C kernel does
+                // for caps whose ASID has been freed under it.
+                unsafe {
+                    (*_slot).cap.set_frame_mapped_addr(0);
+                    (*_slot).cap.set_frame_mapped_asid(0);
+                }
+                return Ok(());
+            }
             unsafe {
                 let _ = vspace::unmap_user_4k(
                     root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
                     frame_va as usize,
                 );
                 (*_slot).cap.set_frame_mapped_addr(0);
+                (*_slot).cap.set_frame_mapped_asid(0);
             }
             Ok(())
         }
@@ -346,7 +357,7 @@ pub fn handle_frame(
             Ok(())
         }
         _ => {
-            crate::println!("  Frame op: label={} (unsupported)", label_id);
+            let _ = label_id;
             Err(SyscallError::IllegalOperation)
         }
     }
@@ -378,7 +389,7 @@ pub fn handle_page_table(
             Ok(())
         }
         _ => {
-            crate::println!("  PageTable op: label={} (unsupported)", label_id);
+            let _ = label_id;
             Err(SyscallError::IllegalOperation)
         }
     }
@@ -424,7 +435,7 @@ pub fn handle_cnode(
             Ok(())
         }
         _ => {
-            crate::println!("  CNode op: label={} (unsupported)", label_id);
+            let _ = label_id;
             Err(SyscallError::IllegalOperation)
         }
     }
@@ -506,17 +517,53 @@ fn cnode_op_copy_or_mint(
         if (*src).cap.is_null() {
             return Err(SyscallError::IllegalOperation);
         }
-        let mut new_cap = (*src).cap;
+        let src_cap = (*src).cap;
+        let mut new_cap = src_cap;
         if is_mint {
             new_cap = apply_badge(new_cap, badge);
         }
+        // Mirror C kernel `isCapRevocable(newCap, srcCap)` — copies of
+        // Untypeds and freshly badged EP/Notification caps are revocable
+        // *roots* of their own subtree. Without setting `revocable=true`
+        // here, a Revoke on the original Untyped would stop at the copy
+        // because is_mdb_parent_of(copy, grandchildren) needs the copy
+        // itself to be revocable to keep walking.
+        let new_rev = is_cap_revocable(new_cap, src_cap);
         (*dest).cap = new_cap;
-        // Both Copy and Mint produce derivable children; we just record
-        // the link so future Revoke/Delete walks find them.
-        (*dest).mdb = crate::object::mdb::MdbNode::NULL;
+        (*dest).mdb = crate::object::mdb::MdbNode::new(0, 0, new_rev, new_rev);
         crate::object::cnode::mdb_insert_after(src, dest);
     }
     Ok(())
+}
+
+/// Is `va` inside the kernel's PSpace window — i.e. backed by directly
+/// mapped RAM that we may safely zero?  CNode caps may legitimately
+/// point at kernel-ELF mirrors or device frames; finalising those would
+/// store into read-only memory and panic the kernel.
+#[inline]
+fn is_pspace_kva(va: u64) -> bool {
+    let v = va as usize;
+    v >= crate::abi::constants::PPTR_BASE && v < crate::abi::constants::PPTR_TOP
+}
+
+/// Mirrors C kernel `isCapRevocable(derivedCap, srcCap)` from
+/// `kernel/src/object/objecttype.c`. Determines whether the destination
+/// cap of a Copy/Mint becomes a revocable root of its own derivation
+/// subtree (true) or just a leaf sibling (false).
+fn is_cap_revocable(new_cap: Cap, src_cap: Cap) -> bool {
+    match new_cap.tag() {
+        // Arch caps (Frame / PageTable / ASIDPool / …) are never revocable.
+        Some(CapTag::Frame) | Some(CapTag::PageTable) => false,
+        Some(CapTag::Untyped) => true,
+        Some(CapTag::Endpoint) => {
+            new_cap.endpoint_badge() != src_cap.endpoint_badge()
+        }
+        Some(CapTag::Notification) => {
+            new_cap.notification_badge() != src_cap.notification_badge()
+        }
+        Some(CapTag::IrqHandler) => src_cap.tag() == Some(CapTag::IrqControl),
+        _ => false,
+    }
 }
 
 fn cnode_op_move_or_mutate(
@@ -645,22 +692,68 @@ fn delete_slot(slot: *mut Cte) -> Result<(), SyscallError> {
 ///
 /// Mirrors the work `Arch_finaliseCap` does in `kernel/src/arch/.../object/objecttype.c`.
 fn finalize_cap(cap: &mut Cap) {
-    if cap.tag() == Some(CapTag::Frame) {
-        let va = cap.frame_mapped_addr();
-        if va != 0 {
-            // Same simplification as `RISCV_PAGE_UNMAP`: assume the
-            // mapping lives in the current thread's VSpace.
-            let t = unsafe { crate::api::thread::current() };
-            if t.vspace_root_kva != 0 {
+    match cap.tag() {
+        Some(CapTag::Frame) => {
+            let va = cap.frame_mapped_addr();
+            if va != 0 {
+                // Route the unmap through the VSpace the cap was originally
+                // mapped into, *not* the current thread. Otherwise a Revoke
+                // on the parent Untyped would walk Frame children and erase
+                // PTEs out of whatever VSpace happens to be active right
+                // now (the driver), corrupting unrelated mappings.
+                let asid = cap.frame_mapped_asid();
+                let root_pt_kva = crate::object::asid::lookup(asid);
+                if root_pt_kva != 0 {
+                    unsafe {
+                        let _ = crate::arch::riscv64::vspace::unmap_user_4k(
+                            root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
+                            va as usize,
+                        );
+                    }
+                }
+                cap.set_frame_mapped_addr(0);
+                cap.set_frame_mapped_asid(0);
+            }
+        }
+        Some(CapTag::CNode) => {
+            // Mirrors the C kernel `finaliseCap` returning a Zombie for a
+            // CNode: every slot inside the CNode must be cleaned up before
+            // we reuse the storage. Without this, caps held by a test
+            // process linger in the global MDB chain even after the
+            // process is torn down — and the next Retype-reset on the
+            // parent Untyped sees a stale `has_children=true` and refuses
+            // to recycle the slab.
+            //
+            // Only operate on CNode storage we know is safely backed by
+            // PSpace RAM (kernel-window mapped). The kernel ELF / device
+            // windows are read-only, and an over-eager finalize on a stale
+            // CNode cap pointing there would page-fault the kernel.
+            let base = cap.cnode_ptr();
+            let radix = cap.cnode_radix();
+            if base != 0 && is_pspace_kva(base) {
+                let n_slots = 1usize << radix;
                 unsafe {
-                    let _ = crate::arch::riscv64::vspace::unmap_user_4k(
-                        t.vspace_root_kva as *mut crate::arch::riscv64::sv39::PageTable,
-                        va as usize,
-                    );
+                    let slots =
+                        crate::object::cnode::cnode_at(base as *mut u8, radix as usize);
+                    if slots.len() == n_slots {
+                        for i in 0..n_slots {
+                            let inner = &mut slots[i];
+                            if !inner.cap.is_null() {
+                                let inner_ptr = inner as *mut Cte;
+                                // Pull the inner cap out of the global
+                                // MDB chain; we intentionally do *not*
+                                // recurse into nested CNodes here — the
+                                // outer Revoke walk will visit those
+                                // through their own derivation links.
+                                crate::object::cnode::mdb_unlink(inner_ptr);
+                                inner.cap = Cap::null();
+                            }
+                        }
+                    }
                 }
             }
-            cap.set_frame_mapped_addr(0);
         }
+        _ => {}
     }
 }
 
@@ -676,9 +769,6 @@ fn revoke_descendants(cte: *mut Cte) {
     unsafe {
         while crate::object::cnode::mdb_has_children(cte) {
             let child = (*cte).mdb.next() as *mut Cte;
-            // Recurse first: clear *child*'s subtree before clearing
-            // `child` itself. Order matters so finalize_cap on the leaf
-            // mappings runs before we forget the chain.
             revoke_descendants(child);
             finalize_cap(&mut (*child).cap);
             crate::object::cnode::mdb_unlink(child);

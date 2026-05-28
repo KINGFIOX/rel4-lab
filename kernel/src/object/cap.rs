@@ -258,8 +258,21 @@ impl Cap {
             | ((size_class & 0x3) << 57)
             | ((rights & 0x3) << 55)
             | (((is_device as u64) & 0x1) << 54);
+        // words[1]: [capFMappedASID:48..64] [capFBasePtr:9..48]
         c.words[1] = (base_ptr & PTR_LOW_MASK) << 9;
         c
+    }
+
+    /// `capFMappedASID` — the ASID (vspace identifier) of the VSpace the
+    /// frame is currently mapped into. 0 == not currently mapped.
+    #[inline]
+    pub const fn frame_mapped_asid(self) -> u16 {
+        ((self.words[1] >> 48) & 0xFFFF) as u16
+    }
+
+    pub fn set_frame_mapped_asid(&mut self, asid: u16) {
+        self.words[1] &= !(0xFFFFu64 << 48);
+        self.words[1] |= ((asid as u64) & 0xFFFF) << 48;
     }
 
     #[inline]
@@ -298,19 +311,50 @@ impl Cap {
         sign_extend_ptr((self.words[1] >> 9) & PTR_LOW_MASK)
     }
 
-    // ---- Endpoint / Notification (placeholders, will fill in M3.3) -------
+    // ---- Endpoint / Notification ---------------------------------------
+    //
+    // Layout mirrors `cap_endpoint_cap_new` / `cap_notification_cap_new`
+    // from `kernel/generated/arch/object/structures_gen.h`:
+    //
+    //   Endpoint words[0]:
+    //     [59..64) capType
+    //     [58]     capCanGrantReply
+    //     [57]     capCanGrant
+    //     [56]     capCanReceive
+    //     [55]     capCanSend
+    //     [0..39)  capEPPtr (sign-extended)
+    //   Endpoint words[1]: capEPBadge
+    //
+    //   Notification words[0]:
+    //     [59..64) capType
+    //     [58]     capNtfnCanReceive
+    //     [57]     capNtfnCanSend
+    //     [0..39)  capNtfnPtr (sign-extended)
+    //   Notification words[1]: capNtfnBadge
 
     #[inline]
     pub const fn new_endpoint(ptr: u64) -> Cap {
         let mut c = Cap::null();
-        c.words[0] = ((CapTag::Endpoint as u64) << 59) | ptr_low(ptr);
+        c.words[0] = ((CapTag::Endpoint as u64) << 59)
+            // CanGrantReply | CanGrant | CanReceive | CanSend
+            | (1u64 << 58)
+            | (1u64 << 57)
+            | (1u64 << 56)
+            | (1u64 << 55)
+            | ptr_low(ptr);
+        c.words[1] = 0;
         c
     }
 
     #[inline]
     pub const fn new_notification(ptr: u64) -> Cap {
         let mut c = Cap::null();
-        c.words[0] = ((CapTag::Notification as u64) << 59) | ptr_low(ptr);
+        c.words[0] = ((CapTag::Notification as u64) << 59)
+            // CanReceive | CanSend
+            | (1u64 << 58)
+            | (1u64 << 57)
+            | ptr_low(ptr);
+        c.words[1] = 0;
         c
     }
 
@@ -320,8 +364,46 @@ impl Cap {
     }
 
     #[inline]
+    pub const fn endpoint_badge(self) -> u64 {
+        self.words[1]
+    }
+
+    pub fn set_endpoint_badge(&mut self, badge: u64) {
+        self.words[1] = badge;
+    }
+
+    #[inline]
+    pub const fn endpoint_can_send(self) -> bool {
+        (self.words[0] >> 55) & 1 != 0
+    }
+
+    #[inline]
+    pub const fn endpoint_can_receive(self) -> bool {
+        (self.words[0] >> 56) & 1 != 0
+    }
+
+    #[inline]
     pub const fn notification_ptr(self) -> u64 {
         sign_extend_ptr(self.words[0] & PTR_LOW_MASK)
+    }
+
+    #[inline]
+    pub const fn notification_badge(self) -> u64 {
+        self.words[1]
+    }
+
+    pub fn set_notification_badge(&mut self, badge: u64) {
+        self.words[1] = badge;
+    }
+
+    #[inline]
+    pub const fn notification_can_send(self) -> bool {
+        (self.words[0] >> 57) & 1 != 0
+    }
+
+    #[inline]
+    pub const fn notification_can_receive(self) -> bool {
+        (self.words[0] >> 58) & 1 != 0
     }
 
     #[inline]

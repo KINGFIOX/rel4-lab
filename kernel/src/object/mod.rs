@@ -10,7 +10,9 @@
 //! `kernel/generated/arch/object/structures_gen.h` for the source of
 //! truth.
 
+pub mod asid;
 pub mod cap;
 pub mod cnode;
 pub mod mdb;
+pub mod notification;
 pub mod untyped;
