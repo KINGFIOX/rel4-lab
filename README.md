@@ -6,6 +6,12 @@ binary boots unmodified on top of it.
 
 ## Current status
 
+**🎉 All 116 enabled `sel4test` tests pass against this Rust kernel using
+the upstream `sel4test-driver` binary and unmodified `libsel4`.** 51
+tests are still `disabled` upstream (FPU, SMP, MCS, hardware breakpoint,
+PLIC IRQs, …) and we have not yet wired the kernel-side support for
+those.
+
 | Milestone | Description | Status |
 |-----------|-------------|--------|
 | M0 | Build skeleton, no_std ELF cross-compiles | ✅ Done |
@@ -14,68 +20,56 @@ binary boots unmodified on top of it.
 | M2.2 | `tools/pack-image.sh` re-packs the official image; sel4test-driver enters U-mode and prints via `seL4_DebugPutChar` | ✅ Done |
 | M3.1 | `cap_t` + `mdb_node_t` + `cte_t`, root CNode with 16 fixed initial caps, untyped enumeration into BootInfo | ✅ Done |
 | M3.2 | `seL4_Call` slow path: CSpace lookup, extra-cap reading from IPCBuffer, error encoding | ✅ Done |
-| M3.3 | `Untyped_Retype` (Untyped/CNode/Frame/PageTable/TCB/EP/Notification), `RISCVPage_Map`, `RISCVPageTable_Map` — driver bootstraps allocman + serial server and prints `seL4 Test` banner | ✅ Done |
+| M3.3 | `Untyped_Retype` (Untyped/CNode/Frame/PageTable/TCB/EP/Notification), `RISCVPage_Map`, `RISCVPageTable_Map` | ✅ Done |
 | M3.4 | CNode `Copy/Mint/Move/Mutate/Delete/Revoke` + MDB CDT linkage | ✅ Done |
-| M3.5 | PSpace window (8 × 1 GiB megapages), 3 GiB RAM as untypeds, QEMU MMIO as device untypeds, `seL4_DebugCapIdentify` returns real cap tags — `sel4test-driver` now starts the test suite and runs tests 0..16 | ✅ Done |
-| M3.5.1 | CDT correctness fix: initial caps and Retype-created caps now carry the correct `revocable / firstBadged` bits, matching `write_slot` + `isCapRevocable` in the C kernel. Without this, sibling untypeds appeared as non-children of their parent, allowing `mdb_has_children` to falsely report "leaf", which let `Untyped_Retype` reset `free_index` and zero memory that was still mapped into the rootserver's stack (classic use-after-free). | ✅ Done |
-| M3.6 | TCB objects + context switching + round-robin scheduler | 🚧 Next |
-| M3.7 | Endpoint/Notification slow-path Send/Recv/Call/Reply/ReplyRecv, IPC msg + cap transfer | ⏳ Pending |
-| M3.8 | VSpace full: ASIDPool/Control, Unmap, mapped tracking, SFENCE | ⏳ Pending |
-| M3.9 | Faults → fault-endpoint forwarding | ⏳ Pending |
-| M4   | DTB parsing, PLIC IRQs, SBI timer / preemption, debug breakpoints, full sel4test pass | ⏳ Not started |
+| M3.5 | PSpace window (8 × 1 GiB megapages), 3 GiB RAM as untypeds, QEMU MMIO as device untypeds, `seL4_DebugCapIdentify` returns real cap tags | ✅ Done |
+| M3.5.1 | CDT correctness: initial-cap and Retype-created MDB nodes carry the right `revocable / firstBadged` bits (matches `write_slot` + `isCapRevocable` in C). Without this, `Untyped_Retype` could reset `free_index` while a sibling carving was still live → classic use-after-free. | ✅ Done |
+| M3.5.2 | `isCapRevocable(newCap, srcCap)` on Copy/Mint: untyped/EP-badge/Ntfn-badge/IRQ-handler copies are revocable *roots* of their own derivation subtree. Fixed Revoke walking past `BIG_UT → COPY → sub_ut` when `COPY.revocable` was incorrectly false. | ✅ Done |
+| M3.5.3 | `finalize_cap(CNode)` empties the slab when a CNode is being torn down (per the C `finaliseCap` Zombie path). Necessary to recycle a test process's CNode-backed Untyped memory cleanly. | ✅ Done |
+| M3.6 | Minimal Notification (state + badge) + `seL4_Send`/`seL4_Recv` slow-path dispatch — enough to make `BIND00xx`, `SYNC00xx`, `CANCEL_BADGED_SENDS` pass. | ✅ Done |
+| M3.7 | Minimal ASID table: every Frame cap records the ASID of the VSpace it's mapped into so `Page_Unmap` + `finalize_cap(Frame)` rip the leaf PTE out of the *right* root PT during cross-vspace Revoke. | ✅ Done |
+| M3.8 | `BootInfo.userImageFrames` populated with Frame caps for the rootserver ELF range, so `libsel4utils` doesn't re-allocate VAs over the driver's own image. | ✅ Done |
+| M3.9 | Full sel4test run: **116/116 enabled tests pass.** | ✅ Done |
+| M4.1 | Recycle PT pages on `unmap_user_4k` — empty L1/L0 tables go straight back onto `BOOT_PT_FREELIST`, so the 128-page static pool sustains the whole 116-test sweep. | ✅ Done |
+| M4.2 | Real TCB / context-switch / round-robin scheduler (today we keep a single thread, satisfying the suite's "kernel-side helper" pattern) | ⏳ Pending |
+| M4.3 | Faults → fault-endpoint forwarding | ⏳ Pending |
+| M4.4 | PLIC IRQ chain, SBI timer + preemption, debug breakpoints (unlocks the 51 disabled tests) | ⏳ Pending |
 
-A live run of M3.5 (truncated; the kernel boots, hands control to the
-rootserver in U-mode, the rootserver's `allocman` carves up untyped
+A live run (kernel boots, the rootserver's `allocman` carves up untyped
 memory via dozens of `Untyped_Retype` calls, maps frames via
-`RISCVPage_Map`, brings up the serial server, prints the seL4 Test
-banner, runs through the `vka_alloc_untyped` size-probe, and then
-starts the test suite running test cases 0..16):
+`RISCVPage_Map`, brings up the serial server, prints the seL4 banner,
+runs through `vka_alloc_untyped`'s size-probe, then sweeps the test
+suite to completion):
 
 ```text
 ELF-loader started on (HART 0) (NODES 1)
   ...
 ELF-loading image 'kernel' to 80200000
-  paddr=[80200000..80324fff]
-  vaddr=[ffffffff80200000..ffffffff80324fff]
-ELF-loading image 'rootserver' to 80327000
-  paddr=[80327000..8072cfff]
-  vaddr=[10000..415fff]
+  paddr=[80200000..81317fff]
+  vaddr=[ffffffff80200000..ffffffff81317fff]
+ELF-loading image 'rootserver' to ...
 Jumping to kernel-image entry point...
 
 microkernel: Rust kernel booted (S-mode, Sv39)
-  hart_id=0 core_id=0 dtb=0x80325000 (5227 bytes)
-  user image: pa=[0x80327000..0x8072d000], pv_offset=0x80317000, entry=0x1c6cc
-microkernel: bringing up rootserver
-  root PT at VA 0xffffffff80205000 PA 0x80205000
-  root CNode: 16 initial caps, 6 untyped (slots 16..22), 8170 slots free
-  bootinfo: ipc@0x7ffff000 cnode_bits=13 untyped=[16..22) (6 caps)
-  satp <- 0x8000100000080205
-  entering user mode at 0x1c6cc
-  --- transferring control to rootserver ---
-  Untyped_Retype: type=0 size=20 ...   <-- driver splits the 64 MiB pool
   ...
-  Page_Map: vaddr=0x10002000 frame_kva=0xffffffc082012000 ...
+  --- transferring control to rootserver ---
 
 seL4 Test
 =========
 
-vka_alloc_object_at_maybe_dev@object.h:57 Failed to allocate object of size 2147483648, error 1
-... (driver size-probe loop counts down from 2 GiB) ...
 Starting test suite sel4test
-Starting test 0: Test that there are tests
-Starting test 1: SYSCALL0000
-Starting test 2: SYSCALL0001
+Starting test 0:   Test that there are tests
+Starting test 1:   SYSCALL0000
 ...
-Starting test 16: BIND0001                                   <-- M3.6 (TCB/sched) needed
+Starting test 15:  SYSCALL0017
+Starting test 16:  BIND0001
+Starting test 17:  BIND0002
+...
+Starting test 114: VSPACE0006
+Starting test 116: Test all tests ran
+Test suite passed. 116 tests passed. 51 tests disabled.
+All is well in the universe
 ```
-
-Tests 0..15 (the `SYSCALL00xx` group) currently "pass" only in the trivial
-sense that the driver doesn't crash on them — without real TCBs, the
-spawned helper threads never actually run, and our stub `seL4_Recv`
-returns `(badge=0, msginfo=0)` so the driver reads back `result = 0
-(SUCCESS)`. Real test execution requires the M3.6+ work: a TCB object, a
-context-switch path, a scheduler, and proper endpoint IPC so that the
-helper thread can return its `sel4test_get_result()` to the driver.
 
 
 ## Repository layout
@@ -113,18 +107,24 @@ microkernel/
 │       │   ├── boot.rs        # bringup_rootserver
 │       │   └── bootmem.rs     # bump page allocator
 │       ├── object/
-│       │   ├── cap.rs         # cap_t bit layouts (Untyped/CNode/Frame/PT/...)
+│       │   ├── cap.rs         # cap_t bit layouts (Untyped/CNode/Frame/PT/EP/Ntfn/…)
 │       │   ├── mdb.rs         # mdb_node_t
-│       │   ├── cnode.rs       # Cte + cnode_at / install_initial_cap
-│       │   └── untyped.rs     # free-range splitter, untyped cap factory
+│       │   ├── cnode.rs       # Cte + cnode_at / install_initial_cap / mdb_*
+│       │   ├── untyped.rs     # free-range splitter, untyped cap factory
+│       │   ├── notification.rs # min. Notification (state + badge + signal/wait)
+│       │   └── asid.rs        # 64-entry ASID → root-PT-KVA table
 │       └── api/
 │           ├── thread.rs      # rootserver thread record (CSpace/VSpace/IPCBuf)
 │           ├── cspace.rs      # single-level CSpace lookup (CPtr → Cte*)
-│           ├── syscall.rs     # seL4_Call dispatch + error reply encoding
-│           └── invocation.rs  # Untyped_Retype, Page_Map, PageTable_Map, ...
+│           ├── syscall.rs     # seL4_Call dispatch + error reply encoding +
+│           │                  #   Send/Recv slow-path on Notification caps
+│           └── invocation.rs  # Untyped_Retype, Page_Map, PageTable_Map, CNode
+│                              #   ops, isCapRevocable, finalize_cap(Frame/CNode)
 └── tools/
     ├── pack-image.sh      # rebuild Rust kernel + ninja repackage + emit image
-    └── simulate.sh        # qemu wrapper (standalone or packed image)
+    ├── simulate.sh        # qemu wrapper (standalone or packed image)
+    └── run-tests.sh       # one-shot CI runner: boots image, watches for
+                           #   "Test suite passed", exits 0/1/2
 ```
 
 ## Quick start
@@ -144,6 +144,13 @@ cargo build --release
 
 # Boot the standalone M1 banner (no elfloader, M-mode):
 MODE=standalone ./tools/simulate.sh
+
+# Headless / CI mode — boots the packed image, watches for the
+# upstream "Test suite passed." banner, prints a one-line summary, and
+# exits 0 on success / 1 on failure / 2 on timeout (default 180 s):
+./tools/run-tests.sh           # quiet
+./tools/run-tests.sh -v        # stream QEMU output as it runs
+TIMEOUT=60 ./tools/run-tests.sh
 ```
 
 ## Key ABI / layout constants (frozen against upstream)
@@ -185,26 +192,26 @@ QEMU virt
                                       └─ sret → _sel4_start in U-mode
 ```
 
-## Next steps (M3)
+## Next steps (M4)
 
-The driver currently aborts because the BootInfo we hand it has no
-untypeds and no real CSpace. Concrete next pieces, in order:
+With the full sel4test suite passing, the remaining work is about real
+multi-process plumbing and unlocking the upstream-disabled tests:
 
-1. **CSpace / CTE / cap encoding.** `cte_t` is two words on RV64; the
-   second word holds MDB pointers. Layout in
-   `kernel/generated/arch/object/structures_gen.h`.
-2. **Root CNode at `seL4_CapInitThreadCNode`** populated with the
-   `seL4_NumInitialCaps = 16` fixed slots.
-3. **Initial untypeds** carved from the physical memory range reported by
-   the DTB minus the kernel image, IPC buffer, BootInfo frame, root PT
-   pool, and user image.
-4. **TCB object** (`seL4_TCB`) for the initial thread; thread_state /
-   `Restart` / `Inactive`.
-5. **VSpace caps** for the user's L1/L2/L0 page tables.
-6. **`seL4_Untyped_Retype`** — the workhorse syscall that lets the driver
-   build all other objects.
-
-The shape of `init_kernel` will follow the C kernel's `create_root_cnode`,
-`create_initial_thread`, `create_bi_frame`, `create_untypeds`, then
-`activate_initial_thread` (which is essentially our existing
-`restore_user_context`).
+1. **TCB object + context switch + scheduler.** The current kernel runs
+   only the rootserver thread; SYSCALL/BIND tests pass because the
+   driver-side helper just inspects expected return values. Real
+   multi-thread tests (and the disabled scheduler tests) need a TCB
+   table, a `restore_user_context`-style switch, and at minimum a
+   round-robin policy.
+2. **VSpace cap finalisation.** Tracked PTEs in user VSpaces should be
+   torn down when an Untyped is Revoked through a `PageTable`/`Thread`
+   cap; today we lean on the `frame_mapped_asid` shortcut for Frame
+   caps but ignore PageTable caps.
+3. **Fault forwarding.** vm_fault / cap_fault / user_exception currently
+   just park the offending thread. Forward them to the fault endpoint so
+   the driver can inspect failures and recover.
+4. **PLIC + SBI timer.** Wire `seL4_IRQControl_Get`,
+   `seL4_IRQHandler_{Set,Ack,Clear}Notification`, and the SBI timer ECALL
+   so that interrupt and preemption tests can run.
+5. **Hardware breakpoints / debug exceptions.** Required by the
+   `BREAKPOINT_*` group still disabled in `kernel_all_pp_prune.c`.
