@@ -42,6 +42,19 @@ pub struct Pte(pub u64);
 impl Pte {
     pub const NULL: Pte = Pte(0);
 
+    /// Wrap a raw 64-bit word as a PTE. Useful for embedding freelist
+    /// pointers inside reclaimed PT pages.
+    #[inline]
+    pub const fn from_raw(raw: u64) -> Pte {
+        Pte(raw)
+    }
+
+    /// Inverse of `from_raw`.
+    #[inline]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+
     /// Build a non-leaf entry pointing at the next-level PT (which must be
     /// 4 KiB aligned).
     #[inline]

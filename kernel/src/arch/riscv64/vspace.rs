@@ -61,12 +61,17 @@ pub const fn paddr_to_kpptr(paddr: usize) -> usize {
 // distinct from the rootserver-visible "untyped" memory and is only used
 // by the kernel itself.
 
-// Each test process the driver spawns conjures a fresh VSpace, and every
-// 4 KiB user mapping inside it can pull two more page-table pages out of
-// this pool. We compromise between binary size and headroom — the rest of
-// the leak gets recovered in `release_root_pt` when an Untyped-Revoke
-// finalises a Thread/VSpace root.
-const BOOT_PT_POOL_PAGES: usize = 1024;
+// The boot pool keeps L1/L0 page-table pages for *every* user VSpace
+// the rootserver creates. Each Page_Map call can pull up to two fresh
+// pages out of this pool; without recycling, a 100-test sweep blows
+// past anything we'd ship in `.bss`. We keep the pool modest (128
+// pages ≈ 512 KiB) and reclaim empty interior tables back onto the
+// `BOOT_PT_FREELIST` stack as soon as `unmap_user_4k` empties them.
+//
+// `seL4` would normally manage these via user-supplied `PageTable`
+// objects (Retype-from-Untyped); modelling that properly is on the
+// M4 todo list.
+const BOOT_PT_POOL_PAGES: usize = 128;
 
 #[repr(C, align(4096))]
 struct BootPtPool {
@@ -77,19 +82,73 @@ static mut BOOT_PT_POOL: BootPtPool = BootPtPool {
     pages: [const { PageTable::zeroed() }; BOOT_PT_POOL_PAGES],
 };
 
+/// Bump pointer for pages we haven't handed out yet. We only consult
+/// this when the freelist is empty.
 static BOOT_PT_POOL_NEXT: AtomicUsize = AtomicUsize::new(0);
 
+/// Freelist head — a sentinel index (`!0` ≡ empty) into the bump pool.
+/// Recycled PT pages embed the next-free index in the first PTE's
+/// raw bits (we re-zero the slot before handing it back out).
+static BOOT_PT_FREELIST_HEAD: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+#[inline]
+fn pool_base() -> *mut PageTable {
+    // SAFETY: we only ever construct a raw pointer from the static
+    // pool; deref happens through the freelist / bump-pointer paths,
+    // which run single-threaded on the rootserver hart.
+    unsafe { &raw mut BOOT_PT_POOL.pages as *mut PageTable }
+}
+
+/// True if `p` was allocated from `BOOT_PT_POOL`.
+#[inline]
+fn is_boot_pool_pt(p: *mut PageTable) -> bool {
+    let base = pool_base() as usize;
+    let end = base + BOOT_PT_POOL_PAGES * core::mem::size_of::<PageTable>();
+    let v = p as usize;
+    v >= base && v < end && (v - base) % core::mem::size_of::<PageTable>() == 0
+}
+
 /// Allocate a fresh zeroed page-table page from the boot pool. Returns its
-/// kernel-window virtual address.
+/// kernel-window virtual address. Prefers the freelist over the bump
+/// pointer so long-running suites don't starve the pool.
 pub fn alloc_pt_page() -> *mut PageTable {
+    let head = BOOT_PT_FREELIST_HEAD.load(Ordering::SeqCst);
+    if head != usize::MAX {
+        unsafe {
+            let p = pool_base().add(head);
+            // Next-free index is stashed in entries[0].
+            let next = (*p).entries[0].raw() as usize;
+            BOOT_PT_FREELIST_HEAD.store(next, Ordering::SeqCst);
+            (*p).entries = [Pte::NULL; 512];
+            return p;
+        }
+    }
     let idx = BOOT_PT_POOL_NEXT.fetch_add(1, Ordering::SeqCst);
     assert!(idx < BOOT_PT_POOL_PAGES, "boot PT pool exhausted");
     unsafe {
-        let p = &raw mut BOOT_PT_POOL.pages[idx];
-        // Zero it (was zeroed by .bss clear, but be defensive in case we
-        // ever recycle).
+        let p = pool_base().add(idx);
         (*p).entries = [Pte::NULL; 512];
         p
+    }
+}
+
+/// Push a PT page back onto the boot-pool freelist. Silently ignores
+/// pages outside the pool (e.g. caller-owned page-table objects we
+/// never allocated).
+pub unsafe fn free_pt_page(p: *mut PageTable) {
+    if !is_boot_pool_pt(p) {
+        return;
+    }
+    let idx = ((p as usize) - (pool_base() as usize))
+        / core::mem::size_of::<PageTable>();
+    unsafe {
+        let head = BOOT_PT_FREELIST_HEAD.load(Ordering::SeqCst);
+        (*p).entries[0] = Pte::from_raw(head as u64);
+        // Zero the rest so a stale entry can't accidentally look valid.
+        for i in 1..512 {
+            (*p).entries[i] = Pte::NULL;
+        }
+        BOOT_PT_FREELIST_HEAD.store(idx, Ordering::SeqCst);
     }
 }
 
@@ -169,9 +228,17 @@ pub unsafe fn map_user_4k(root: *mut PageTable, vaddr: usize, paddr: usize, mut 
     }
 }
 
-/// Remove the 4 KiB user mapping at `vaddr` if present, leaving any
-/// intermediate page-table levels alone. Returns the physical address
-/// the page used to map to, or `None` if no mapping existed.
+/// Remove the 4 KiB user mapping at `vaddr` if present and trim any
+/// interior PT levels that become empty as a result.  Returns the
+/// physical address the page used to map to, or `None` if no mapping
+/// existed.
+///
+/// Recycling empty L1/L0 tables back onto the boot pool's freelist is
+/// what keeps `BOOT_PT_POOL` from growing unbounded across the
+/// rootserver's test sweep — every test process eventually has its
+/// frames unmapped via `seL4_RISCV_Page_Unmap` (directly or via the
+/// Revoke walk in `finalize_cap`), so this is also where we close the
+/// loop on per-VSpace cleanup.
 ///
 /// We follow the same "only chase entries we allocated" invariant as
 /// `map_user_4k`: every interior PTE is expected to live in the boot
@@ -180,17 +247,21 @@ pub unsafe fn map_user_4k(root: *mut PageTable, vaddr: usize, paddr: usize, mut 
 pub unsafe fn unmap_user_4k(root: *mut PageTable, vaddr: usize) -> Option<usize> {
     debug_assert!(vaddr & (PAGE_SIZE - 1) == 0, "vaddr not 4K-aligned");
 
+    // Remember each interior table we walked so we can prune the
+    // empties on the way back up.  `pts[level]` is the table that
+    // *contains* `pt_index(vaddr, level)`; `pts[2]` is the root and is
+    // never freed.
+    let mut pts: [*mut PageTable; 3] = [core::ptr::null_mut(); 3];
+    pts[2] = root;
     let mut pt = root;
-    let mut levels = [0u64; 3];
     for level in (1..=2).rev() {
         let i = pt_index(vaddr, level);
         let entry = unsafe { (*pt).entries[i] };
         if !entry.is_valid() || entry.is_leaf() {
             return None;
         }
-        let next_pa = entry.next_pt_paddr();
-        levels[level] = next_pa;
-        pt = paddr_to_kpptr(next_pa as usize) as *mut PageTable;
+        pt = paddr_to_kpptr(entry.next_pt_paddr() as usize) as *mut PageTable;
+        pts[level - 1] = pt;
     }
 
     let i = pt_index(vaddr, 0);
@@ -199,12 +270,39 @@ pub unsafe fn unmap_user_4k(root: *mut PageTable, vaddr: usize) -> Option<usize>
         return None;
     }
     let pa = entry.leaf_pa() as usize;
-    let _ = levels;
     unsafe {
         (*pt).entries[i] = Pte::NULL;
     }
     csr::sfence_vma_va(vaddr);
+
+    // Walk up, freeing each interior table that no longer references
+    // anything.  We *never* trim the root (`level == 2`): it carries
+    // the kernel-ELF + PSpace mappings every process depends on.
+    for level in 0..=1 {
+        let child = pts[level];
+        if unsafe { !pt_is_empty(child) } {
+            break;
+        }
+        let parent = pts[level + 1];
+        let parent_i = pt_index(vaddr, level + 1);
+        unsafe {
+            (*parent).entries[parent_i] = Pte::NULL;
+            free_pt_page(child);
+        }
+    }
     Some(pa)
+}
+
+/// True if every entry in `pt` is invalid (i.e. the table contributes
+/// no mappings).  Cheap because `Pte` is `Copy`.
+#[inline]
+unsafe fn pt_is_empty(pt: *mut PageTable) -> bool {
+    for i in 0..512 {
+        if unsafe { (*pt).entries[i] }.is_valid() {
+            return false;
+        }
+    }
+    true
 }
 
 /// Install a fresh `satp` value, then flush the TLB.
