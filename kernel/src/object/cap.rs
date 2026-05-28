@@ -191,6 +191,24 @@ impl Cap {
         sign_extend_ptr((self.words[0] & 0x3F_FFFF_FFFF) << 1)
     }
 
+    /// Overlay a `seL4_CNode_CapData` word onto a `CNode` cap, mirroring
+    /// the `cap_cnode_cap_set_capCNodeGuard{,Size}` path inside
+    /// `updateCapData()` (kernel/src/object/objecttype.c). Used by
+    /// `TCB_Configure` / `TCB_SetSpace` so that the test process's root
+    /// CNode cap carries the guard the rootserver intended.
+    ///
+    /// `seL4_CNode_CapData` layout (`shared_types_gen.h`):
+    ///   bits  0..6   guardSize (6 bits)
+    ///   bits  6..64  guard
+    #[inline]
+    pub fn cnode_apply_capdata(&mut self, capdata: u64) {
+        let guard_size = capdata & 0x3F;
+        let guard = capdata >> 6;
+        // Clear and rewrite the guard_size field at bits 53..59.
+        self.words[0] = (self.words[0] & !(0x3F << 53)) | ((guard_size & 0x3F) << 53);
+        self.words[1] = guard;
+    }
+
     // ---- Thread (TCB) cap -------------------------------------------------
     //
     // words[0]: [tag:59..64] [capTCBPtr:0..39 (sign-ext)]

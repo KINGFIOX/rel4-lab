@@ -36,12 +36,6 @@
 //!     TCB on the rootserver's PT (helpers share it). Multi-VSpace
 //!     switching is the next iteration.
 
-// Currently held back of dead-code: callers in `api::syscall` and
-// `arch::riscv64::trap` route Endpoint Send/Recv/Call/Reply through
-// stubs until the three prerequisites — bound-notification wakeup,
-// idle thread / null-schedule handling, and suspend/finalize EP
-// unlinking — land. Keeping the full state machine compiled in-tree
-// means the next iteration is a 1-line swap rather than a re-port.
 #![allow(dead_code)]
 
 use crate::abi::types::MessageInfo;
@@ -245,6 +239,41 @@ pub fn recv(uc: &mut UserContext, blocking: bool) {
             }
         }
         EpState::Idle | EpState::Receiving => {
+            // Before blocking on the Endpoint, check the bound
+            // Notification. The C kernel's `receiveIPC` path does the
+            // same when the TCB has a bound ntfn that's Active: it
+            // returns the notification's badge as the IPC reply
+            // instead of queuing on the EP. This is what lets
+            // BIND0001 deliver ASYNC signals through a `seL4_Wait` on
+            // a *different* (sync) endpoint.
+            unsafe {
+                let bound = (*cur).bound_notification;
+                if bound != 0 {
+                    let n =
+                        bound as *mut crate::object::notification::Notification;
+                    if (*n).state() == crate::object::notification::NtfnState::Active {
+                        let badge = (*n).badge();
+                        (*n).set_badge(0);
+                        (*n).set_state(crate::object::notification::NtfnState::Idle);
+                        uc.regs[reg::A0] = badge;
+                        uc.regs[reg::A1] = 0;
+                        uc.regs[reg::A2] = 0;
+                        uc.regs[reg::A3] = 0;
+                        uc.regs[reg::A4] = 0;
+                        uc.regs[reg::A5] = 0;
+                        // Mirror MR[0..3] into the buffer too, mirroring
+                        // write_empty_reply.
+                        let buf = (*cur).ipc_buffer_kva;
+                        if buf != 0 {
+                            let p = buf as *mut u64;
+                            for i in 0..MR_REG_COUNT as usize {
+                                *p.add(1 + i) = 0;
+                            }
+                        }
+                        return;
+                    }
+                }
+            }
             if blocking {
                 unsafe { block_receiver(ep) };
             } else {

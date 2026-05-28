@@ -81,12 +81,12 @@ pub fn do_call(uc: &mut UserContext) {
             invocation::handle_thread(t, slot, cap, label, info.length(), uc)
         }
         Some(CapTag::Endpoint) => {
-            // `seL4_Call` on an Endpoint is stubbed alongside Send/
-            // Recv: return 0/0 like the legacy path. The full state
-            // machine lives in `api::ipc::call` and is ready to be
-            // re-routed here once the bound-notification wakeup and
-            // idle-thread prereqs land.
-            write_ok_reply(uc, 0, 0);
+            // Real Send + implicit Reply via `api::ipc::call`. The
+            // reply path lands here with a0/a1/MRs already populated
+            // by `ipc::reply`, so we *don't* fall through to the
+            // boilerplate `write_ok_reply` below — that would clobber
+            // the reply.
+            crate::api::ipc::call(uc);
             return;
         }
         Some(CapTag::IrqControl)
@@ -153,14 +153,7 @@ pub fn do_send(uc: &mut UserContext, nb: bool) {
             }
         }
         Some(CapTag::Endpoint) => {
-            // EP Send is stubbed until M4.2e2 lands the three
-            // prerequisites (bound-notification wakeup, idle thread,
-            // suspend/finalize EP unlinking) — without those, naive
-            // blocking deadlocks BIND0001+. The full state machine
-            // already lives in `api::ipc::send` and is held back of
-            // dead-code by this stub; silently drop matches the
-            // "no receiver, NBSend" semantics of the C kernel.
-            let _ = nb;
+            crate::api::ipc::send(uc, !nb);
         }
         _ => {}
     }
@@ -182,14 +175,7 @@ pub fn do_recv(uc: &mut UserContext, blocking: bool) {
     };
 
     match cap_tag {
-        Some(CapTag::Endpoint) => {
-            // EP Recv is stubbed alongside EP Send (see do_send).
-            // Empty reply mirrors the C kernel's "no sender, NBRecv"
-            // return — and keeps the rootserver advancing without
-            // wedging on the future blocking path.
-            let _ = blocking;
-            write_empty(uc);
-        }
+        Some(CapTag::Endpoint) => crate::api::ipc::recv(uc, blocking),
         Some(CapTag::Notification) => {
             let (cap, _slot) = lookup_cap(t, cptr).expect("recap");
             if cap.notification_can_receive() {

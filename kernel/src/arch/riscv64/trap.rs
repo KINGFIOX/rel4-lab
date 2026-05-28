@@ -106,24 +106,96 @@ pub extern "C" fn handle_trap_rust(uc: &mut UserContext) -> *mut UserContext {
     kernel_exit(uc)
 }
 
+/// Program `satp` for the TCB we're about to resume.
+///
+/// Reads the TCB's `vspace_cap` (a `PageTable` cap whose `base_ptr` is
+/// the root PT's kernel VA) and translates that into an Sv39 satp value
+/// via `vspace::satp_from_kva`. ASID 0 is reserved for "no user
+/// translation"; we encode our own ASIDs in the cap's mapped-ASID field
+/// today only for Frame caps, so for VSpace switching we just use a
+/// stable ASID derived from the root-PT KVA (consistent across re-entries
+/// to the same VSpace, which is all the TLB needs).
+///
+/// No-ops when the cap is missing/invalid or when the new satp matches
+/// the current one — both common for the rootserver path.
+unsafe fn switch_to_tcb_vspace(tcb: *const crate::object::tcb::Tcb) {
+    use crate::object::cap::CapTag;
+    let vroot = unsafe { (*tcb).vspace_cap };
+    if vroot.tag() != Some(CapTag::PageTable) {
+        return;
+    }
+    let root_kva = vroot.page_table_base_ptr();
+    if root_kva == 0 {
+        return;
+    }
+    // ASID 1 is the rootserver (set in boot); test processes get fresh
+    // slot IDs from the ASID table. `assign` dedupes on root-PT KVA so a
+    // VSpace re-entered later sees the same ASID, keeping TLB-tagged
+    // entries valid.
+    let asid = crate::object::asid::assign(root_kva) as u64;
+    let new_satp = crate::arch::riscv64::vspace::satp_from_kva(root_kva, asid);
+    if new_satp == 0 {
+        return;
+    }
+    let cur_satp = csr::satp() as u64;
+    if cur_satp != new_satp {
+        unsafe { crate::arch::riscv64::vspace::switch_satp(new_satp) };
+    }
+}
+
 /// Pick the next TCB to run and return the `UserContext*` to restore.
 ///
-/// Today every priority bin except #255 (the rootserver) is empty in
-/// the steady state, so this short-circuits to the trapping TCB. The
-/// hook exists so a future `TCB_Resume(higher-prio child)` will land
-/// the new thread on `sret` without further plumbing.
+/// Three paths:
+/// 1. Highest-priority head differs from the trapping TCB → swap.
+/// 2. Highest-priority head *is* the trapping TCB, or current is
+///    runnable and no peer exists → fall through to current.
+/// 3. Scheduler returns null AND the trapping TCB is no longer
+///    runnable (state != Running) — every thread is blocked. We
+///    cannot sret back into the blocked TCB (its caller saw the
+///    syscall complete and would resume past it as if it returned
+///    a no-op reply). Spin in S-mode WFI until something becomes
+///    runnable. With no interrupts wired yet this is functionally
+///    a deadlock guard: the test runner's `TIMEOUT` will catch a
+///    real deadlock instead of silently corrupting a blocked TCB's
+///    user-mode state.
 #[inline]
 fn kernel_exit(uc: &mut UserContext) -> *mut UserContext {
-    let cur = crate::object::tcb::current();
-    let next = crate::object::tcb::schedule();
-    if !next.is_null() && next != cur {
-        crate::object::tcb::set_current(next);
-        // Future: swap satp + flush TLB here when next has a different
-        // VSpace than cur. We don't run multi-VSpace threads yet, so
-        // skip — every TCB shares the rootserver's PT.
-        return unsafe { &raw mut (*next).context };
+    use crate::object::tcb::{self, ThreadState};
+    let cur = tcb::current();
+
+    loop {
+        let next = tcb::schedule();
+        if !next.is_null() {
+            if next != cur {
+                tcb::set_current(next);
+                // Swap satp if `next` lives in a different VSpace.
+                // Test processes (sel4test BASIC tests) each spawn into
+                // their own root PT; without this swap they'd execute
+                // in the driver's VSpace and re-run the driver's
+                // libc constructors (re-running `init_syscall_table`
+                // hits its `boot_set_tid_address` assertion).
+                unsafe { switch_to_tcb_vspace(next) };
+                return unsafe { &raw mut (*next).context };
+            }
+            return uc as *mut UserContext;
+        }
+
+        // schedule() returned null. Safe to fall through *only* if
+        // current is still runnable — otherwise we'd resume a blocked
+        // TCB's user mode and break IPC semantics.
+        let cur_runnable = if !cur.is_null() {
+            unsafe { (*cur).state == ThreadState::Running as u8 }
+        } else {
+            false
+        };
+        if cur_runnable {
+            return uc as *mut UserContext;
+        }
+
+        // Stall the hart until an interrupt (none today) or, eventually,
+        // a queued-up timer wakeup makes a TCB runnable again.
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
     }
-    uc as *mut UserContext
 }
 
 /// Park the current (only) user thread: spin in S-mode with interrupts
@@ -197,17 +269,14 @@ fn handle_syscall(uc: &mut UserContext) {
             crate::api::syscall::do_send(uc, false);
         }
         syscall::SYS_REPLY => {
-            // Reply is stubbed alongside Send/Recv (see syscall.rs).
-            // No-op until the full IPC path is re-enabled.
+            crate::api::ipc::reply(uc);
         }
         syscall::SYS_RECV | syscall::SYS_NB_RECV => {
             let blocking = sysno == syscall::SYS_RECV;
             crate::api::syscall::do_recv(uc, blocking);
         }
         syscall::SYS_REPLY_RECV => {
-            // ReplyRecv = Reply + Recv; with Reply stubbed, treat as
-            // a plain Recv on the supplied EP cap.
-            crate::api::syscall::do_recv(uc, true);
+            crate::api::ipc::reply_recv(uc);
         }
         n if syscall::is_known(n) => {
             crate::println!(

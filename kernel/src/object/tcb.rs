@@ -353,6 +353,30 @@ pub unsafe fn init(tcb_kva: u64) {
     }
 }
 
+/// Detach `tcb` from any Endpoint wait list it might be queued on
+/// (because of a prior blocking Send / Recv / Call). Safe to call on
+/// a TCB that isn't waiting on anything — it short-circuits on
+/// `waiting_on == 0`.
+///
+/// Walking the EP wait list requires the `endpoint` module; we live
+/// in `object::tcb`, so import lazily to avoid a cycle.
+unsafe fn unlink_from_wait_object(tcb: *mut Tcb) {
+    if tcb.is_null() {
+        return;
+    }
+    let ep = unsafe { (*tcb).waiting_on };
+    if ep == 0 {
+        return;
+    }
+    let ep_ptr = ep as *mut crate::object::endpoint::Endpoint;
+    unsafe {
+        crate::object::endpoint::remove_waiter(ep_ptr, tcb);
+        (*tcb).waiting_on = 0;
+        (*tcb).sender_badge = 0;
+        (*tcb).sender_is_call = 0;
+    }
+}
+
 /// Per-invocation primitives. They mark the TCB runnable / non-runnable
 /// and update the global ready-queue accordingly. The actual CPU swap
 /// happens at the next `kernel_exit()` boundary (top of `restore_user_context`).
@@ -361,6 +385,10 @@ pub unsafe fn suspend(tcb: *mut Tcb) {
         return;
     }
     unsafe {
+        // A suspended TCB must leave any EP wait list it's queued on,
+        // otherwise the EP would later try to `pop_head` a TCB whose
+        // backing slab might be reused.
+        unlink_from_wait_object(tcb);
         dequeue(tcb);
         (*tcb).state = ThreadState::Inactive as u8;
     }
@@ -413,11 +441,21 @@ pub unsafe fn set_tls_base(tcb: *mut Tcb, tls_base: u64) {
 }
 
 pub unsafe fn bind_notification(tcb: *mut Tcb, ntfn_kva: u64) {
-    if tcb.is_null() {
+    if tcb.is_null() || ntfn_kva == 0 {
         return;
     }
     unsafe {
+        // First clear the TCB's existing binding (if any) — symmetric
+        // with `unbind_notification`, so a re-bind doesn't leave a
+        // stale back-pointer in the old notification.
+        let prev_ntfn = (*tcb).bound_notification;
+        if prev_ntfn != 0 {
+            let p = prev_ntfn as *mut crate::object::notification::Notification;
+            (*p).set_bound_tcb(0);
+        }
         (*tcb).bound_notification = ntfn_kva;
+        let ntfn_ptr = ntfn_kva as *mut crate::object::notification::Notification;
+        (*ntfn_ptr).set_bound_tcb(tcb as u64);
     }
 }
 
@@ -426,6 +464,11 @@ pub unsafe fn unbind_notification(tcb: *mut Tcb) {
         return;
     }
     unsafe {
+        let ntfn_kva = (*tcb).bound_notification;
+        if ntfn_kva != 0 {
+            let p = ntfn_kva as *mut crate::object::notification::Notification;
+            (*p).set_bound_tcb(0);
+        }
         (*tcb).bound_notification = 0;
     }
 }
@@ -441,13 +484,19 @@ pub unsafe fn finalize(tcb: *mut Tcb) {
         return;
     }
     unsafe {
-        // Remove the TCB from the ready queue first, so the scheduler
-        // can't pick a Tcb whose backing slab is about to be recycled.
+        // 1. Detach from any EP wait list. Crucial: a TCB whose slab
+        //    is about to be recycled by Untyped_Revoke cannot remain
+        //    queued on an Endpoint — that would leave the EP's
+        //    `pop_head` returning a freed pointer.
+        unlink_from_wait_object(tcb);
+        // 2. Drop our binding so the notification stops believing
+        //    we're still its owner (symmetric with unbind_notification).
+        unbind_notification(tcb);
+        // 3. Remove from the runqueue so the scheduler can't pick us.
         dequeue(tcb);
-        (*tcb).bound_notification = 0;
         (*tcb).queue_next = 0;
         (*tcb).queue_prev = 0;
-        (*tcb).waiting_on = 0;
+        (*tcb).caller = 0;
         (*tcb).state = ThreadState::Inactive as u8;
     }
 }

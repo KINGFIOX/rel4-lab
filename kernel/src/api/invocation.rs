@@ -240,6 +240,17 @@ pub fn handle_untyped(
         match new_type {
             obj::TCB => unsafe { crate::object::tcb::init(obj_base) },
             obj::ENDPOINT => unsafe { crate::object::endpoint::init(obj_base) },
+            obj::PAGE_TABLE => {
+                // Stamp the global kernel + PSpace mappings into the
+                // new root PT so a `satp` swap to it can still trap to
+                // S-mode (`trap_entry` lives in the kernel ELF window).
+                // Cheap on intermediate PTs too — those entries land in
+                // the upper half (>= L2[256]) which user code never
+                // walks through.
+                crate::arch::riscv64::vspace::copy_kernel_mappings_to(
+                    obj_base as *mut crate::arch::riscv64::sv39::PageTable,
+                );
+            }
             _ => {}
         }
         // Mirrors `isCapRevocable(newCap, srcCap)` from
@@ -294,10 +305,16 @@ pub fn handle_frame(
                 return Err(SyscallError::TruncatedMessage);
             }
             let vaddr = uc.regs[reg::A2];
-            let _rights_packed = uc.regs[reg::A3];
-            let _attrs = uc.regs[reg::A4];
+            // libsel4 packs `seL4_CapRights_t` (from `shared_types.pbf`):
+            //   bit 0 capAllowWrite, bit 1 capAllowRead,
+            //   bit 2 capAllowGrant, bit 3 capAllowGrantReply.
+            // VM attributes (RISC-V) bit 0 = riscvExecuteNever.
+            let rights_packed = uc.regs[reg::A3];
+            let attrs = uc.regs[reg::A4];
+            let can_write = (rights_packed & 0x1) != 0;
+            let can_read = (rights_packed & 0x2) != 0;
+            let exec_never = (attrs & 0x1) != 0;
 
-            // Look up the vspace cap from extraCaps[0].
             let vspace_cptr = read_extra_cap(thread, 0);
             let (vspace_cap, _) = cspace::lookup_cap(thread, vspace_cptr)
                 .map_err(|_| SyscallError::InvalidCapability)?;
@@ -322,7 +339,7 @@ pub fn handle_frame(
                     root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
                     vaddr as usize,
                     frame_pa as usize,
-                    vspace::user_flags(true, true, false),
+                    vspace::user_flags(can_read, can_write, !exec_never),
                 );
                 (*_slot).cap.set_frame_mapped_addr(vaddr);
                 (*_slot).cap.set_frame_mapped_asid(asid);
@@ -469,17 +486,25 @@ pub fn handle_thread(
                 return Err(SyscallError::TruncatedMessage);
             }
             let fault_ep = uc.regs[reg::A2];
-            let _cspace_data = uc.regs[reg::A3];
+            let cspace_data = uc.regs[reg::A3];
             let _vspace_data = uc.regs[reg::A4];
             let buffer_uva = uc.regs[reg::A5];
 
-            let cspace_cap = lookup_extra_cap(thread, 0)?;
+            let mut cspace_cap = lookup_extra_cap(thread, 0)?;
             let vspace_cap = lookup_extra_cap(thread, 1)?;
             let buffer_cap = lookup_extra_cap(thread, 2)?;
 
             require_tag(cspace_cap, CapTag::CNode)?;
             require_tag(vspace_cap, CapTag::PageTable)?;
             require_tag(buffer_cap, CapTag::Frame)?;
+
+            // `seL4_CNode_CapData` packs (guard, guard_size) that the
+            // rootserver wants stamped onto the cspace cap before it
+            // becomes the test process's CSpace root — see C kernel
+            // `decodeTCBConfigure` → `updateCapData`.
+            if cspace_data != 0 {
+                cspace_cap.cnode_apply_capdata(cspace_data);
+            }
 
             unsafe {
                 (*tcb_ptr).cspace_cap = cspace_cap;
@@ -503,13 +528,16 @@ pub fn handle_thread(
                 return Err(SyscallError::TruncatedMessage);
             }
             let fault_ep = uc.regs[reg::A2];
-            let _cspace_data = uc.regs[reg::A3];
+            let cspace_data = uc.regs[reg::A3];
             let _vspace_data = uc.regs[reg::A4];
 
-            let cspace_cap = lookup_extra_cap(thread, 0)?;
+            let mut cspace_cap = lookup_extra_cap(thread, 0)?;
             let vspace_cap = lookup_extra_cap(thread, 1)?;
             require_tag(cspace_cap, CapTag::CNode)?;
             require_tag(vspace_cap, CapTag::PageTable)?;
+            if cspace_data != 0 {
+                cspace_cap.cnode_apply_capdata(cspace_data);
+            }
 
             unsafe {
                 (*tcb_ptr).cspace_cap = cspace_cap;
@@ -611,21 +639,26 @@ pub fn handle_thread(
                 }
             }
             // Remaining regs (mr4..) live in the IPC buffer. The RISC-V
-            // `seL4_UserContext` layout, indexed by *seL4_UserContext
-            // field number* (= MR index − 2), is:
-            //   0:pc, 1:ra, 2:sp, 3:gp, 4:tp,
-            //   5..16:s0..s11, 17..24:a0..a7, 25..31:t0..t6
-            // We use 0 for the entries that are handled separately
-            // (pc / ra) or land in the unused x0 slot.
+            // `seL4_UserContext` layout — and the corresponding C
+            // kernel `frameRegisters[]` ++ `gpRegisters[]` flattening
+            // that libsel4's stub marshals via
+            // `((seL4_Word*)&regs->sp)[i-2]` — is:
+            //   0:pc, 1:ra, 2:sp, 3:gp,
+            //   4..15:s0..s11, 16..23:a0..a7,
+            //   24..30:t0..t6, 31:tp
+            // Note `tp` sits at the END of the struct on RISC-V, *not*
+            // at position 4 — a layout quirk vs. the standard ABI
+            // ordering. Slots 0/1 are 0-marked because pc/ra are
+            // handled above.
             const X_INDEX: [usize; 32] = [
                 /* 0 pc, 1 ra (handled above) */ 0, 0,
-                /* 2 sp */ reg::SP,
-                /* 3 gp */ reg::GP,
-                /* 4 tp */ reg::TP,
-                /* 5..16 s0..s11 */ 8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
-                /* 17..24 a0..a7 */ reg::A0, reg::A1, reg::A2, reg::A3,
+                /* 2 sp  */ reg::SP,
+                /* 3 gp  */ reg::GP,
+                /* 4..15 s0..s11 */ 8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+                /* 16..23 a0..a7 */ reg::A0, reg::A1, reg::A2, reg::A3,
                                     reg::A4, reg::A5, reg::A6, reg::A7,
-                /* 25..31 t0..t6 */ reg::T0, 6, 7, 28, 29, 30, 31,
+                /* 24..30 t0..t6 */ reg::T0, 6, 7, 28, 29, 30, 31,
+                /* 31 tp */ reg::TP,
             ];
             if length >= 5 && count >= 3 {
                 let mr_count = ((length - 1) as usize).min(count as usize).min(34);
@@ -1084,6 +1117,24 @@ fn finalize_cap(cap: &mut Cap) {
                     crate::object::endpoint::finalize(
                         p as *mut crate::object::endpoint::Endpoint,
                     );
+                }
+            }
+        }
+        Some(CapTag::Notification) => {
+            // Drop the back-link from the bound TCB so a future
+            // `signal()` on a recycled slab doesn't try to wake a
+            // stale "bound TCB". The notification storage itself is
+            // reclaimed by the parent Untyped on the next Retype.
+            let p = cap.notification_ptr();
+            if p != 0 && is_pspace_kva(p) {
+                unsafe {
+                    let n = p as *mut crate::object::notification::Notification;
+                    let bound = (*n).bound_tcb();
+                    if bound != 0 {
+                        let tcb_ptr = bound as *mut crate::object::tcb::Tcb;
+                        (*tcb_ptr).bound_notification = 0;
+                    }
+                    (*n).set_bound_tcb(0);
                 }
             }
         }

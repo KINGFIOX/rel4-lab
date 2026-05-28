@@ -322,6 +322,34 @@ pub fn user_flags(read: bool, write: bool, exec: bool) -> u64 {
     f
 }
 
+/// Populate the kernel & PSpace L2 entries on a freshly-zeroed root PT.
+///
+/// User PTs (allocated by the rootserver via `Untyped_Retype` →
+/// `PageTable`) come out of Untyped fully zeroed, so a `satp` swap
+/// to them would leave the kernel window untranslatable — the very
+/// next trap from U-mode would fetch from VA `trap_entry` ∈ the
+/// kernel ELF window, fault, and re-trap forever. Mirrors the
+/// `copyGlobalMappings` step in `Arch_initPageTable` /
+/// `kernel/src/object/structures.bf` derivatives.
+pub fn copy_kernel_mappings_to(pt: *mut PageTable) {
+    use crate::abi::constants::{KERNEL_ELF_BASE, PPTR_BASE};
+    let kernel_flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_G | PTE_A | PTE_D;
+    let pspace_flags = PTE_V | PTE_R | PTE_W | PTE_G | PTE_A | PTE_D;
+
+    let kernel_l2_index = pt_index(KERNEL_ELF_BASE, 2);
+    let kernel_pa = 0x8000_0000u64;
+    unsafe {
+        (*pt).entries[kernel_l2_index] = Pte::leaf(kernel_pa, kernel_flags);
+    }
+    let pspace_base_l2 = pt_index(PPTR_BASE, 2);
+    for i in 0..8 {
+        let pa = (i as u64) * (1u64 << 30);
+        unsafe {
+            (*pt).entries[pspace_base_l2 + i] = Pte::leaf(pa, pspace_flags);
+        }
+    }
+}
+
 /// Build a fresh root Sv39 page table with kernel + PSpace mappings:
 ///
 ///   • Kernel ELF window at L2[510] (single 1 GiB megapage,
@@ -362,4 +390,27 @@ pub fn make_boot_root_pt() -> *mut PageTable {
 pub fn satp_for(root: *mut PageTable, asid: u64) -> u64 {
     let pa = kpptr_to_paddr(root as usize) as u64;
     make_satp(asid, pa)
+}
+
+/// Compose a Sv39 `satp` from a root PT KVA, picking the right physical
+/// translation based on which kernel window the KVA lives in:
+///
+///   * `PPTR_BASE .. PPTR_TOP`            → PSpace direct map (user PTs
+///                                           allocated from Untyped).
+///   * `KERNEL_ELF_BASE .. PPTR_BASE+...` → kernel ELF / `.bss` window
+///                                           (the boot root PT only).
+///
+/// Returns 0 for KVAs outside both windows so callers can ignore them
+/// instead of programming a bogus `satp`.
+pub fn satp_from_kva(root_kva: u64, asid: u64) -> u64 {
+    use crate::abi::constants::{KERNEL_ELF_BASE, PPTR_BASE, PPTR_TOP};
+    let kva = root_kva as usize;
+    let pa = if kva >= PPTR_BASE && kva < PPTR_TOP {
+        pptr_to_paddr(kva)
+    } else if kva >= KERNEL_ELF_BASE {
+        kpptr_to_paddr(kva)
+    } else {
+        return 0;
+    };
+    make_satp(asid, pa as u64)
 }
