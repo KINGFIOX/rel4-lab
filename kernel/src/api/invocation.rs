@@ -73,8 +73,11 @@ fn create_object_cap(ty: u64, region_base: u64, user_size: u64, is_device: bool)
     Some(match ty {
         obj::UNTYPED => Cap::new_untyped(region_base, user_size, 0, is_device),
         obj::CAP_TABLE => {
-            let radix = user_size;
-            Cap::new_cnode(region_base, radix, 0, 64 - radix)
+            // Fresh CNode caps have no guard: callers are expected to
+            // set one with `seL4_CNode_Mint`/`Mutate` when they put the
+            // cap into a CSpace. Matches `createCNodeObject` in
+            // `kernel/src/object/objecttype.c`.
+            Cap::new_cnode(region_base, user_size, 0, 0)
         }
         obj::FOUR_K_PAGE => Cap::new_frame(region_base, 0, 2 /* RW */, is_device),
         obj::MEGA_PAGE => Cap::new_frame(region_base, 1, 2, is_device),
@@ -122,12 +125,6 @@ pub fn handle_untyped(
     // The dest-CNode CPtr was placed in `caps_or_badges[0]` by the libsel4
     // stub's `seL4_SetCap(0, root)`.
     let root_cptr = read_extra_cap(thread, 0);
-
-    crate::println!(
-        "  Untyped_Retype: type={} size={} window={} off={} depth={} idx={:#x} root={:#x} (cap@{:#x})",
-        new_type, user_size, node_window, node_offset, node_depth,
-        node_index, root_cptr, src_cap.untyped_ptr(),
-    );
 
     let obj_bits = object_size_bits(new_type, user_size)
         .ok_or(SyscallError::IllegalOperation)?;
@@ -178,10 +175,28 @@ pub fn handle_untyped(
     }
 
     let untyped_bits = src_cap.untyped_block_size_bits();
-    let free_index = src_cap.untyped_free_index();
     let is_device = src_cap.untyped_is_device();
     let region_base_kva = src_cap.untyped_ptr();
     let region_size = 1u64 << untyped_bits;
+
+    // If the untyped has no surviving CDT descendants we restart
+    // allocation from offset 0 — mirrors `resetUntypedCap` in the C
+    // kernel's `decodeUntypedInvocation`. This is what makes a
+    // Revoke-on-parent return a fully fresh untyped to libsel4allocman
+    // so subsequent `_refill_pool` calls don't drown in NotEnoughMemory.
+    let has_children = unsafe { crate::object::cnode::mdb_has_children(src_slot) };
+    let stored_fi = src_cap.untyped_free_index();
+    let free_index = if has_children {
+        stored_fi
+    } else {
+        if stored_fi != 0 {
+            unsafe {
+                let s = &mut *src_slot;
+                s.cap.set_untyped_free_index(0);
+            }
+        }
+        0
+    };
     let used_bytes = free_index << 4;
     let free_bytes = region_size.saturating_sub(used_bytes);
 
@@ -205,18 +220,32 @@ pub fn handle_untyped(
         }
     }
 
-    // Install caps for each new object.
+    // Install caps for each new object and weave them into the CDT
+    // right after the parent untyped slot. We splice each new child
+    // between `src_slot` and whatever currently follows it so that:
+    //
+    //   src_slot -> child[0] -> child[1] -> ... -> child[N-1] -> (old next)
+    //
+    // `mdb_has_children(src_slot)` checks whether `src_slot.next` (now
+    // child[0]) points back at us — that's what lets the next Retype
+    // detect "no children left" after a Revoke and reset free_index.
     for i in 0..node_window {
         let obj_base = alloc_base_kva.wrapping_add(i << obj_bits);
         let cap = create_object_cap(new_type, obj_base, user_size, is_device)
             .ok_or(SyscallError::IllegalOperation)?;
+        // Mirrors `isCapRevocable(newCap, srcCap)` from
+        // `kernel/src/object/objecttype.c`. For arch caps (Frame /
+        // PageTable) it returns false, so children of an Untyped are
+        // *not* themselves revocable — that lets the user `Delete` them
+        // without first `Revoke`ing the parent. Only sub-Untypeds (and
+        // future badged EP / IRQ-handler caps) are revocable.
+        let new_revocable = new_type == obj::UNTYPED;
         let dst = &mut dest_cnode[(node_offset + i) as usize];
         dst.cap = cap;
-        // CDT bookkeeping: parent = src_slot. The C kernel uses a circular
-        // doubly-linked list rooted at the parent. For M3 we only need the
-        // parent-linkage to detect "has children" later; a full impl follows
-        // when we add Delete/Revoke.
-        dst.mdb = MdbNode::new(src_slot as u64, 0, true, true);
+        dst.mdb = MdbNode::new(0, 0, new_revocable, true);
+        unsafe {
+            crate::object::cnode::mdb_insert_after(src_slot, dst as *mut Cte);
+        }
     }
 
     // Bump the untyped's free index past what we used.
@@ -273,11 +302,6 @@ pub fn handle_frame(
             let frame_kva = cap.frame_base_ptr();
             let frame_pa = kva_to_pa(frame_kva);
 
-            crate::println!(
-                "  Page_Map: vaddr={:#x} frame_kva={:#x} frame_pa={:#x} root_pt={:#x}",
-                vaddr, frame_kva, frame_pa, root_pt_kva,
-            );
-
             unsafe {
                 vspace::map_user_4k(
                     root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
@@ -285,11 +309,29 @@ pub fn handle_frame(
                     frame_pa as usize,
                     vspace::user_flags(true, true, false),
                 );
+                // Record the mapping inside the frame cap so a future
+                // Page_Unmap (or Delete-with-cleanup) can find it.
+                (*_slot).cap.set_frame_mapped_addr(vaddr);
             }
             Ok(())
         }
         RISCV_PAGE_UNMAP => {
-            crate::println!("  Page_Unmap: (stubbed)");
+            let frame_va = cap.frame_mapped_addr();
+            if frame_va == 0 {
+                // Not mapped — nothing to do.
+                return Ok(());
+            }
+            // No `capFMappedASID` yet; we assume the unmap targets the
+            // *current* thread's VSpace, which is the rootserver while
+            // tests are running.
+            let root_pt_kva = thread.vspace_root_kva;
+            unsafe {
+                let _ = vspace::unmap_user_4k(
+                    root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
+                    frame_va as usize,
+                );
+                (*_slot).cap.set_frame_mapped_addr(0);
+            }
             Ok(())
         }
         RISCV_PAGE_GET_ADDR => {
@@ -330,11 +372,9 @@ pub fn handle_page_table(
 
     match label_id {
         RISCV_PAGE_TABLE_MAP => {
-            crate::println!("  PageTable_Map: (stubbed — auto-allocated)");
             Ok(())
         }
         RISCV_PAGE_TABLE_UNMAP => {
-            crate::println!("  PageTable_Unmap: (stubbed)");
             Ok(())
         }
         _ => {
@@ -586,29 +626,61 @@ fn delete_slot(slot: *mut Cte) -> Result<(), SyscallError> {
         if crate::object::cnode::mdb_has_children(slot) {
             return Err(SyscallError::RevokeFirst);
         }
+        finalize_cap(&mut (*slot).cap);
         crate::object::cnode::mdb_unlink(slot);
         (*slot).cap = Cap::null();
     }
     Ok(())
 }
 
+/// Architecture-aware "finalise this cap" hook. For Frame caps that are
+/// still mapped, this rips the leaf PTE out of the owning VSpace so the
+/// underlying memory can be safely re-used. Without this we hit a
+/// classic use-after-free during Untyped reset:
+///
+///   Retype  → Frame F → Page_Map F→VA  →  Delete F  →  Retype again
+///                                                         ↑
+///                              still-mapped F's memory served to new
+///                              owner → driver reads stale data via VA.
+///
+/// Mirrors the work `Arch_finaliseCap` does in `kernel/src/arch/.../object/objecttype.c`.
+fn finalize_cap(cap: &mut Cap) {
+    if cap.tag() == Some(CapTag::Frame) {
+        let va = cap.frame_mapped_addr();
+        if va != 0 {
+            // Same simplification as `RISCV_PAGE_UNMAP`: assume the
+            // mapping lives in the current thread's VSpace.
+            let t = unsafe { crate::api::thread::current() };
+            if t.vspace_root_kva != 0 {
+                unsafe {
+                    let _ = crate::arch::riscv64::vspace::unmap_user_4k(
+                        t.vspace_root_kva as *mut crate::arch::riscv64::sv39::PageTable,
+                        va as usize,
+                    );
+                }
+            }
+            cap.set_frame_mapped_addr(0);
+        }
+    }
+}
+
 /// Walk the CDT descendants of `cte` and clear them. The C kernel does
 /// this recursively with preemption points; we just iterate the linked
 /// list once since our single-thread model has no preemption.
 fn revoke_descendants(cte: *mut Cte) {
+    // The C kernel uses recursive `cteDelete(child, true)` to also kill
+    // grandchildren. Without that an Untyped Revoke would leave Frame
+    // caps carved from it still mapped into someone's VSpace, and the
+    // next Retype-reset would hand out memory that's still being read
+    // through stale PTEs (use-after-free).
     unsafe {
-        // Walk forward until we hit a sibling/parent (i.e. an MDB node
-        // whose prev is not `cte` itself).
-        let parent = cte;
-        loop {
-            let next = (*parent).mdb.next();
-            if next == 0 {
-                break;
-            }
-            let child = next as *mut Cte;
-            if (*child).mdb.prev() != parent as u64 {
-                break;
-            }
+        while crate::object::cnode::mdb_has_children(cte) {
+            let child = (*cte).mdb.next() as *mut Cte;
+            // Recurse first: clear *child*'s subtree before clearing
+            // `child` itself. Order matters so finalize_cap on the leaf
+            // mappings runs before we forget the chain.
+            revoke_descendants(child);
+            finalize_cap(&mut (*child).cap);
             crate::object::cnode::mdb_unlink(child);
             (*child).cap = Cap::null();
         }

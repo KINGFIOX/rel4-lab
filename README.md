@@ -17,6 +17,7 @@ binary boots unmodified on top of it.
 | M3.3 | `Untyped_Retype` (Untyped/CNode/Frame/PageTable/TCB/EP/Notification), `RISCVPage_Map`, `RISCVPageTable_Map` — driver bootstraps allocman + serial server and prints `seL4 Test` banner | ✅ Done |
 | M3.4 | CNode `Copy/Mint/Move/Mutate/Delete/Revoke` + MDB CDT linkage | ✅ Done |
 | M3.5 | PSpace window (8 × 1 GiB megapages), 3 GiB RAM as untypeds, QEMU MMIO as device untypeds, `seL4_DebugCapIdentify` returns real cap tags — `sel4test-driver` now starts the test suite and runs tests 0..16 | ✅ Done |
+| M3.5.1 | CDT correctness fix: initial caps and Retype-created caps now carry the correct `revocable / firstBadged` bits, matching `write_slot` + `isCapRevocable` in the C kernel. Without this, sibling untypeds appeared as non-children of their parent, allowing `mdb_has_children` to falsely report "leaf", which let `Untyped_Retype` reset `free_index` and zero memory that was still mapped into the rootserver's stack (classic use-after-free). | ✅ Done |
 | M3.6 | TCB objects + context switching + round-robin scheduler | 🚧 Next |
 | M3.7 | Endpoint/Notification slow-path Send/Recv/Call/Reply/ReplyRecv, IPC msg + cap transfer | ⏳ Pending |
 | M3.8 | VSpace full: ASIDPool/Control, Unmap, mapped tracking, SFENCE | ⏳ Pending |
@@ -67,6 +68,15 @@ Starting test 2: SYSCALL0001
 ...
 Starting test 16: BIND0001                                   <-- M3.6 (TCB/sched) needed
 ```
+
+Tests 0..15 (the `SYSCALL00xx` group) currently "pass" only in the trivial
+sense that the driver doesn't crash on them — without real TCBs, the
+spawned helper threads never actually run, and our stub `seL4_Recv`
+returns `(badge=0, msginfo=0)` so the driver reads back `result = 0
+(SUCCESS)`. Real test execution requires the M3.6+ work: a TCB object, a
+context-switch path, a scheduler, and proper endpoint IPC so that the
+helper thread can return its `sel4test_get_result()` to the driver.
+
 
 ## Repository layout
 

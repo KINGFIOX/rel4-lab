@@ -76,6 +76,13 @@ impl Pte {
     pub const fn next_pt_paddr(self) -> u64 {
         self.ppn() << RISCV_PG_SHIFT
     }
+
+    /// Physical address of the leaf page this PTE maps to. Only
+    /// meaningful when `is_leaf()` holds.
+    #[inline]
+    pub const fn leaf_pa(self) -> u64 {
+        self.ppn() << RISCV_PG_SHIFT
+    }
 }
 
 /// A single Sv39 page table — 512 entries, 4 KiB total.

@@ -150,6 +150,40 @@ pub unsafe fn map_user_4k(root: *mut PageTable, vaddr: usize, paddr: usize, mut 
     }
 }
 
+/// Remove the 4 KiB user mapping at `vaddr` if present, leaving any
+/// intermediate page-table levels alone. Returns the physical address
+/// the page used to map to, or `None` if no mapping existed.
+///
+/// We follow the same "only chase entries we allocated" invariant as
+/// `map_user_4k`: every interior PTE is expected to live in the boot
+/// pool, so its physical address can be translated back to a kernel-ELF
+/// VA via `paddr_to_kpptr`.
+pub unsafe fn unmap_user_4k(root: *mut PageTable, vaddr: usize) -> Option<usize> {
+    debug_assert!(vaddr & (PAGE_SIZE - 1) == 0, "vaddr not 4K-aligned");
+
+    let mut pt = root;
+    for level in (1..=2).rev() {
+        let i = pt_index(vaddr, level);
+        let entry = unsafe { (*pt).entries[i] };
+        if !entry.is_valid() || entry.is_leaf() {
+            return None;
+        }
+        pt = paddr_to_kpptr(entry.next_pt_paddr() as usize) as *mut PageTable;
+    }
+
+    let i = pt_index(vaddr, 0);
+    let entry = unsafe { (*pt).entries[i] };
+    if !entry.is_valid() || !entry.is_leaf() {
+        return None;
+    }
+    let pa = entry.leaf_pa() as usize;
+    unsafe {
+        (*pt).entries[i] = Pte::NULL;
+    }
+    csr::sfence_vma_va(vaddr);
+    Some(pa)
+}
+
 /// Install a fresh `satp` value, then flush the TLB.
 pub unsafe fn switch_satp(satp_val: u64) {
     csr::sfence_vma_all();

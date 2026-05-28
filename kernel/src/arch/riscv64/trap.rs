@@ -85,13 +85,25 @@ pub extern "C" fn handle_trap_rust(uc: &mut UserContext) {
         scause_code::ENV_CALL_FROM_U => handle_syscall(uc),
         _ => {
             crate::println!(
-                "user trap: scause={:#x} stval={:#x} sepc={:#x}",
-                cause,
-                stval,
-                uc.pc
+                "user fault: scause={:#x} stval={:#x} sepc={:#x} sp={:#x} ra={:#x}",
+                cause, stval, uc.pc,
+                uc.regs[reg::SP], uc.regs[reg::RA],
             );
-            panic!("unhandled exception from user mode");
+            // Until we have a real fault-endpoint IPC, just freeze the
+            // offending user thread instead of dragging the kernel down.
+            // M3 will turn this into a `seL4_Fault_VMFault` delivery.
+            park_current_thread();
         }
+    }
+}
+
+/// Park the current (only) user thread: spin in S-mode with interrupts
+/// disabled. Lets the user inspect the panic message above without QEMU
+/// rebooting and without us pretending to handle a fault we can't yet
+/// route to a fault endpoint.
+fn park_current_thread() -> ! {
+    loop {
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
     }
 }
 
@@ -104,6 +116,7 @@ fn handle_syscall(uc: &mut UserContext) {
     // Advance PC past the `ecall` (4 bytes; RVC ecall is 16-bit but the
     // compressed encoding doesn't exist for ecall — it's always 32-bit).
     uc.pc = uc.pc.wrapping_add(4);
+
 
     match sysno {
         syscall::SYS_DEBUG_PUT_CHAR => {
@@ -138,19 +151,17 @@ fn handle_syscall(uc: &mut UserContext) {
         syscall::SYS_CALL => {
             crate::api::syscall::do_call(uc);
         }
-        syscall::SYS_SEND
-        | syscall::SYS_NB_SEND
-        | syscall::SYS_REPLY
-        | syscall::SYS_RECV
-        | syscall::SYS_REPLY_RECV
-        | syscall::SYS_NB_RECV => {
-            // M3.6 will turn these into real IPC. For now, silently no-op
-            // so the syscall-register-preservation tests pass and any
-            // fire-and-forget Send to a non-EP cap doesn't crash the
-            // rootserver. Send-style syscalls have no return value the
-            // caller expects, and Recv-style syscalls callers that
-            // currently exist all happen on uninitialised endpoints
-            // during driver setup.
+        syscall::SYS_SEND | syscall::SYS_NB_SEND | syscall::SYS_REPLY => {
+            // M3.6 will turn these into real IPC. Send-side syscalls have
+            // no register return value, so a silent no-op is safe.
+        }
+        syscall::SYS_RECV | syscall::SYS_REPLY_RECV | syscall::SYS_NB_RECV => {
+            // Recv-side syscalls return the sender badge in a0 and the
+            // message info in a1. Until we have real endpoints, return
+            // (badge=0, msginfo=0) so callers don't misinterpret a stale
+            // cptr value as e.g. a timer interrupt badge.
+            uc.regs[reg::A0] = 0;
+            uc.regs[reg::A1] = 0;
         }
         n if syscall::is_known(n) => {
             crate::println!(

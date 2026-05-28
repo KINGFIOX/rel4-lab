@@ -267,6 +267,19 @@ impl Cap {
         sign_extend_ptr((self.words[1] >> 9) & PTR_LOW_MASK)
     }
 
+    /// `capFMappedAddress` — the user-space VA the frame is currently
+    /// mapped at, or 0 if unmapped. Stored in `words[0]` bits 0..39
+    /// (sign-extended on read), matching the C kernel layout.
+    #[inline]
+    pub const fn frame_mapped_addr(self) -> u64 {
+        sign_extend_ptr(self.words[0] & PTR_LOW_MASK)
+    }
+
+    pub fn set_frame_mapped_addr(&mut self, addr: u64) {
+        self.words[0] &= !PTR_LOW_MASK;
+        self.words[0] |= addr & PTR_LOW_MASK;
+    }
+
     // ---- Page Table cap ---------------------------------------------------
     //
     // words[0]: [tag:59..64] [capPTIsMapped:39] [capPTMappedAddress:0..39]
@@ -299,6 +312,21 @@ impl Cap {
         let mut c = Cap::null();
         c.words[0] = ((CapTag::Notification as u64) << 59) | ptr_low(ptr);
         c
+    }
+
+    #[inline]
+    pub const fn endpoint_ptr(self) -> u64 {
+        sign_extend_ptr(self.words[0] & PTR_LOW_MASK)
+    }
+
+    #[inline]
+    pub const fn notification_ptr(self) -> u64 {
+        sign_extend_ptr(self.words[0] & PTR_LOW_MASK)
+    }
+
+    #[inline]
+    pub const fn frame_size(self) -> u64 {
+        (self.words[0] >> 57) & 0x3
     }
 }
 

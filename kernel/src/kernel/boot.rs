@@ -89,6 +89,10 @@ fn pa_to_pspace_va(pa: u64) -> u64 {
 /// Bootstrap the user environment and drop into U-mode.
 pub fn bringup_rootserver(args: &BootArgs) -> ! {
     crate::println!("microkernel: bringing up rootserver");
+    crate::println!(
+        "  user image: PA [{:#x}, {:#x}) VA offset={:#x} entry={:#x}",
+        args.user_pstart, args.user_pend, args.pv_offset, args.user_ventry,
+    );
 
     install_trap_vector();
 

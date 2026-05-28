@@ -45,6 +45,12 @@ pub fn sfence_vma_all() {
 
 #[inline]
 #[allow(dead_code)]
+pub fn sfence_vma_va(vaddr: usize) {
+    unsafe { asm!("sfence.vma {0}, zero", in(reg) vaddr, options(nostack, nomem)) };
+}
+
+#[inline]
+#[allow(dead_code)]
 pub fn fence_i() {
     unsafe { asm!("fence.i", options(nostack, nomem)) };
 }
