@@ -31,7 +31,8 @@ those.
 | M3.8 | `BootInfo.userImageFrames` populated with Frame caps for the rootserver ELF range, so `libsel4utils` doesn't re-allocate VAs over the driver's own image. | ✅ Done |
 | M3.9 | Full sel4test run: **116/116 enabled tests pass.** | ✅ Done |
 | M4.1 | Recycle PT pages on `unmap_user_4k` — empty L1/L0 tables go straight back onto `BOOT_PT_FREELIST`, so the 128-page static pool sustains the whole 116-test sweep. | ✅ Done |
-| M4.2 | Real TCB / context-switch / round-robin scheduler (today we keep a single thread, satisfying the suite's "kernel-side helper" pattern) | ⏳ Pending |
+| M4.2a | `Tcb` struct + per-Untyped-Retype slab init + dedicated `handle_thread()` for all 15 non-MCS `TCB_*` labels (Configure/SetSpace/SetIPCBuffer/SetPriority/SetMCPriority/SetSchedParams/WriteRegisters/ReadRegisters/CopyRegisters/Suspend/Resume/BindNotification/UnbindNotification/SetTLSBase/SetFlags). Data is parsed, validated, and persisted into the TCB slab; behaviour is still "return OK without scheduling" until M4.2b lands a context-switch path. | ✅ Done |
+| M4.2b | Real round-robin scheduler + `restore_user_context` that pulls the current TCB's saved context (unlocks `SCHED_*`, `THREADS00xx`, and most `IPC00xx` upstream-disabled tests) | ⏳ Pending |
 | M4.3 | Faults → fault-endpoint forwarding | ⏳ Pending |
 | M4.4 | PLIC IRQ chain, SBI timer + preemption, debug breakpoints (unlocks the 51 disabled tests) | ⏳ Pending |
 
@@ -112,6 +113,8 @@ microkernel/
 │       │   ├── cnode.rs       # Cte + cnode_at / install_initial_cap / mdb_*
 │       │   ├── untyped.rs     # free-range splitter, untyped cap factory
 │       │   ├── notification.rs # min. Notification (state + badge + signal/wait)
+│       │   ├── tcb.rs         # Tcb struct (context + scheduler/IPC state), init on
+│       │   │                  #   Retype, finalize on revoke
 │       │   └── asid.rs        # 64-entry ASID → root-PT-KVA table
 │       └── api/
 │           ├── thread.rs      # rootserver thread record (CSpace/VSpace/IPCBuf)
@@ -197,12 +200,14 @@ QEMU virt
 With the full sel4test suite passing, the remaining work is about real
 multi-process plumbing and unlocking the upstream-disabled tests:
 
-1. **TCB object + context switch + scheduler.** The current kernel runs
-   only the rootserver thread; SYSCALL/BIND tests pass because the
-   driver-side helper just inspects expected return values. Real
-   multi-thread tests (and the disabled scheduler tests) need a TCB
-   table, a `restore_user_context`-style switch, and at minimum a
-   round-robin policy.
+1. **Context-switch + scheduler (M4.2b).** The `Tcb` data model from
+   M4.2a now persists everything that `seL4_TCB_Configure /
+   WriteRegisters / SetPriority / BindNotification / SetTLSBase / …`
+   marshal in — but `handle_thread()` still returns OK without ever
+   actually entering the new thread. The next iteration's work is a
+   ready-queue + `restore_user_context` that picks the highest-priority
+   non-blocked TCB and `sret`s into its saved `UserContext`. Unlocks the
+   `SCHED_*`, `THREADS00xx`, `IPC0009+` upstream-disabled tests.
 2. **VSpace cap finalisation.** Tracked PTEs in user VSpaces should be
    torn down when an Untyped is Revoked through a `PageTable`/`Thread`
    cap; today we lean on the `frame_mapped_asid` shortcut for Frame

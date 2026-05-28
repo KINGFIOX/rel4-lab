@@ -77,16 +77,19 @@ pub fn do_call(uc: &mut UserContext) {
         Some(CapTag::PageTable) => {
             invocation::handle_page_table(t, slot, cap, label, info.length(), uc)
         }
+        Some(CapTag::Thread) => {
+            invocation::handle_thread(t, slot, cap, label, info.length(), uc)
+        }
         Some(CapTag::IrqControl)
         | Some(CapTag::Domain)
-        | Some(CapTag::Thread)
         | Some(CapTag::AsidControl)
         | Some(CapTag::AsidPool) => {
-            // Stubbed cap kinds: report success-with-empty so the
-            // rootserver's optional features fail soft instead of aborting.
-            // AsidPool_Assign in particular is what `assign_asid_pool`
-            // hits during process spawn — succeeding lets the test
-            // driver progress to TCB Configure (M3.6).
+            // Still-stubbed cap kinds: report success so the rootserver's
+            // optional features fail soft instead of aborting. Each of
+            // these will become its own `handle_*` in M4.
+            //   - AsidPool_Assign: needed by `assign_asid_pool`
+            //   - Domain_Set:      single-domain build, nothing to do
+            //   - IrqControl_Get:  unblocks `seL4_IRQControl_Get`
             Ok(())
         }
         _ => Err(SyscallError::IllegalOperation),

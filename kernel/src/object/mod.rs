@@ -15,4 +15,5 @@ pub mod cap;
 pub mod cnode;
 pub mod mdb;
 pub mod notification;
+pub mod tcb;
 pub mod untyped;
