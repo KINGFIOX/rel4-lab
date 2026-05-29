@@ -127,5 +127,7 @@ pub const fn pt_index(vaddr: usize, level: usize) -> usize {
 /// address. Sv39 mode = 8.
 #[inline]
 pub const fn make_satp(asid: u64, root_pt_paddr: u64) -> u64 {
-    (8u64 << 60) | ((asid & 0xFFFF) << 44) | ((root_pt_paddr >> RISCV_PG_SHIFT) & ((1u64 << 44) - 1))
+    (8u64 << 60)
+        | ((asid & 0xFFFF) << 44)
+        | ((root_pt_paddr >> RISCV_PG_SHIFT) & ((1u64 << 44) - 1))
 }

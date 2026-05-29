@@ -220,8 +220,8 @@ pub unsafe fn remove_waiter(ntfn: *mut Notification, tcb: *mut Tcb) {
 ///              Queue empty afterwards ⇒ state goes Idle.
 /// * `Active`  → OR `badge` into the latched value.
 pub unsafe fn signal(ntfn: *mut Notification, badge: u64) {
-    use crate::object::tcb::{self, ThreadState};
     use crate::arch::riscv64::trap::reg;
+    use crate::object::tcb::{self, ThreadState};
 
     let n = unsafe { &mut *ntfn };
     match n.state() {
@@ -262,7 +262,10 @@ pub unsafe fn signal(ntfn: *mut Notification, badge: u64) {
         }
         NtfnState::Waiting => {
             let dest = unsafe { pop_head(ntfn) };
-            debug_assert!(!dest.is_null(), "Waiting Notification must have non-empty queue");
+            debug_assert!(
+                !dest.is_null(),
+                "Waiting Notification must have non-empty queue"
+            );
             unsafe {
                 (*dest).waiting_on = 0;
                 (*dest).context.regs[reg::A0] = badge;
@@ -302,11 +305,7 @@ pub enum WaitOutcome {
 ///
 /// The caller writes badge into A0 and clears A1..A5 / MR[0..3]; we
 /// only handle queue & state bookkeeping here.
-pub unsafe fn wait(
-    ntfn: *mut Notification,
-    tcb: *mut Tcb,
-    blocking: bool,
-) -> WaitOutcome {
+pub unsafe fn wait(ntfn: *mut Notification, tcb: *mut Tcb, blocking: bool) -> WaitOutcome {
     use crate::object::tcb::{self, ThreadState};
     let n = unsafe { &mut *ntfn };
     match n.state() {
@@ -337,8 +336,8 @@ pub unsafe fn wait(
 /// `cancelAllSignals` in the C kernel. Also clears any bound TCB
 /// back-pointer.
 pub unsafe fn finalize(ntfn: *mut Notification) {
-    use crate::object::tcb::{self, ThreadState};
     use crate::arch::riscv64::trap::reg;
+    use crate::object::tcb::{self, ThreadState};
     if ntfn.is_null() {
         return;
     }

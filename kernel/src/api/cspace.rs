@@ -78,10 +78,7 @@ pub fn lookup_slot(
 /// `DepthMismatch` failure, not a successful return of a null cap.
 /// Callers that want partial walks (CNode_Copy etc.) should use
 /// `lookup_slot_in` directly.
-pub fn lookup_cap(
-    thread: &Thread,
-    cptr: u64,
-) -> Result<(Cap, *mut Cte), LookupError> {
+pub fn lookup_cap(thread: &Thread, cptr: u64) -> Result<(Cap, *mut Cte), LookupError> {
     let r = lookup_slot(thread, cptr, WORD_BITS)?;
     if r.bits_remaining != 0 {
         return Err(LookupError::DepthMismatch);
@@ -124,7 +121,11 @@ pub fn lookup_slot_in(
 
         // Top of the CPtr after the depth window: peel `total` bits.
         let cptr_top = cptr >> (depth_limit - total);
-        let guard_mask = if guard_bits == 0 { 0 } else { (1u64 << guard_bits) - 1 };
+        let guard_mask = if guard_bits == 0 {
+            0
+        } else {
+            (1u64 << guard_bits) - 1
+        };
         if ((cptr_top >> radix) & guard_mask) != (guard & guard_mask) {
             return Err(LookupError::GuardMismatch);
         }
@@ -135,14 +136,20 @@ pub fn lookup_slot_in(
 
         let remaining = depth_limit - total;
         if remaining == 0 {
-            return Ok(LookupResult { slot, bits_remaining: 0 });
+            return Ok(LookupResult {
+                slot,
+                bits_remaining: 0,
+            });
         }
 
         // More bits to resolve — descend through the slot's cap if it's
         // another CNode, otherwise stop here.
         let next_cap = unsafe { (*slot).cap };
         if next_cap.tag() != Some(CapTag::CNode) {
-            return Ok(LookupResult { slot, bits_remaining: remaining });
+            return Ok(LookupResult {
+                slot,
+                bits_remaining: remaining,
+            });
         }
         // Strip the bits we just consumed and recurse.
         cptr &= (1u64 << (depth_limit - total)) - 1;

@@ -12,11 +12,12 @@ use crate::abi::types::MessageInfo;
 use crate::api::cspace::lookup_cap;
 use crate::api::invocation;
 use crate::api::thread;
-use crate::arch::riscv64::trap::{reg, UserContext};
+use crate::arch::riscv64::trap::{UserContext, reg};
 use crate::object::cap::CapTag;
 
 #[derive(Copy, Clone, Debug)]
 pub enum SyscallError {
+    InvalidArgument,
     InvalidCapability,
     IllegalOperation,
     RangeError,
@@ -35,6 +36,7 @@ impl SyscallError {
         //   4 RangeError, 5 AlignmentError, 6 FailedLookup,
         //   7 TruncatedMessage, 8 DeleteFirst, 9 RevokeFirst, 10 NotEnoughMemory
         match self {
+            Self::InvalidArgument => 1,
             Self::InvalidCapability => 2,
             Self::IllegalOperation => 3,
             Self::RangeError => 4,
@@ -57,16 +59,6 @@ pub fn do_call(uc: &mut UserContext) {
 
     let t = unsafe { thread::current() };
     let lookup_res = lookup_cap(t, cptr);
-    if cptr > 0x1000 {
-        crate::println!(
-            "do_call: cptr={:#x} radix={} guard={:#x} guard_bits={} ok={}",
-            cptr,
-            t.cspace_radix,
-            t.cspace_guard,
-            t.cspace_guard_bits,
-            lookup_res.is_ok()
-        );
-    }
     let (cap, slot) = match lookup_res {
         Ok(v) => v,
         Err(_) => {
@@ -78,21 +70,13 @@ pub fn do_call(uc: &mut UserContext) {
     let label = info.label();
 
     let result = match tag {
-        Some(CapTag::Untyped) => {
-            invocation::handle_untyped(t, slot, cap, label, info.length(), uc)
-        }
-        Some(CapTag::CNode) => {
-            invocation::handle_cnode(t, slot, cap, label, info.length(), uc)
-        }
-        Some(CapTag::Frame) => {
-            invocation::handle_frame(t, slot, cap, label, info.length(), uc)
-        }
+        Some(CapTag::Untyped) => invocation::handle_untyped(t, slot, cap, label, info.length(), uc),
+        Some(CapTag::CNode) => invocation::handle_cnode(t, slot, cap, label, info.length(), uc),
+        Some(CapTag::Frame) => invocation::handle_frame(t, slot, cap, label, info.length(), uc),
         Some(CapTag::PageTable) => {
             invocation::handle_page_table(t, slot, cap, label, info.length(), uc)
         }
-        Some(CapTag::Thread) => {
-            invocation::handle_thread(t, slot, cap, label, info.length(), uc)
-        }
+        Some(CapTag::Thread) => invocation::handle_thread(t, slot, cap, label, info.length(), uc),
         Some(CapTag::Endpoint) => {
             // Real Send + implicit Reply via `api::ipc::call`. The
             // reply path lands here with a0/a1/MRs already populated
@@ -102,10 +86,9 @@ pub fn do_call(uc: &mut UserContext) {
             crate::api::ipc::call(uc);
             return;
         }
-        Some(CapTag::IrqControl)
-        | Some(CapTag::Domain)
-        | Some(CapTag::AsidControl)
-        | Some(CapTag::AsidPool) => {
+        Some(CapTag::Null) => Err(SyscallError::InvalidCapability),
+        Some(CapTag::Domain) => invocation::handle_domain(t, cap, label, info.length(), uc),
+        Some(CapTag::IrqControl) | Some(CapTag::AsidControl) | Some(CapTag::AsidPool) => {
             // Still-stubbed cap kinds: report success so the rootserver's
             // optional features fail soft instead of aborting. Each of
             // these will become its own `handle_*` in M4.
@@ -159,8 +142,7 @@ pub fn do_send(uc: &mut UserContext, nb: bool) {
             if !cap.notification_can_send() {
                 return;
             }
-            let ntfn_ptr =
-                cap.notification_ptr() as *mut crate::object::notification::Notification;
+            let ntfn_ptr = cap.notification_ptr() as *mut crate::object::notification::Notification;
             let badge = cap.notification_badge();
             unsafe {
                 crate::object::notification::signal(ntfn_ptr, badge);

@@ -6,14 +6,15 @@
 
 use core::arch::global_asm;
 
+use crate::abi::types::MessageInfo;
 use crate::abi::syscall::{self, SyscallNo};
 use crate::arch::riscv64::{csr, sbi};
 
 /// User-mode register snapshot, exactly the layout consumed by `trap.S`.
 ///
 /// Field order is load-bearing: `regs[i]` lives at offset `i * 8`, with
-/// `regs[0]` ignored (x0 is hardwired zero), then `pc`, `sstatus`, and
-/// `sscratch_saved`.
+/// `regs[0]` ignored (x0 is hardwired zero), then `pc`, `sstatus`,
+/// `sscratch_saved`, and the floating-point state.
 #[repr(C)]
 #[derive(Default)]
 pub struct UserContext {
@@ -25,11 +26,15 @@ pub struct UserContext {
     pub sstatus: u64,
     /// Reserved slot — keeps the trampoline asm offsets clean.
     pub _reserved: u64,
+    /// f0..f31, saved as raw IEEE-754 bits.
+    pub fregs: [u64; 32],
+    /// Floating-point control/status register.
+    pub fcsr: u64,
 }
 
 const _: () = {
-    // 32 GPRs + pc + sstatus + reserved = 35 words = 280 bytes
-    assert!(core::mem::size_of::<UserContext>() == 35 * 8);
+    // 32 GPRs + pc + sstatus + reserved + 32 FPRs + fcsr = 68 words.
+    assert!(core::mem::size_of::<UserContext>() == 68 * 8);
 };
 
 /// Register name → index in `UserContext.regs`.
@@ -50,6 +55,12 @@ pub mod reg {
     pub const A7: usize = 17;
 }
 
+pub const SSTATUS_SPIE: u64 = 1 << 5;
+pub const SSTATUS_FS_DIRTY: u64 = 0b11 << 13;
+pub const SSTATUS_SUM: u64 = 1 << 18;
+pub const USER_SSTATUS: u64 = SSTATUS_SPIE | SSTATUS_FS_DIRTY;
+pub const ROOTSERVER_SSTATUS: u64 = USER_SSTATUS | SSTATUS_SUM;
+
 global_asm!(include_str!("trap.S"));
 
 unsafe extern "C" {
@@ -63,6 +74,22 @@ unsafe extern "C" {
 /// scause codes we care about.
 mod scause_code {
     pub const ENV_CALL_FROM_U: usize = 8;
+    pub const SUPERVISOR_TIMER: usize = 5;
+}
+
+const SIE_STIE: usize = 1 << 5;
+const TIMER_INTERVAL_TICKS: u64 = 20_000;
+const FAULT_USER_EXCEPTION: u64 = 3;
+const FAULT_VM_FAULT: u64 = 5;
+
+pub fn init_timer() {
+    csr::set_sie(csr::sie() | SIE_STIE);
+    program_next_timer();
+}
+
+fn program_next_timer() {
+    let now = csr::time() as u64;
+    sbi::set_timer(now.wrapping_add(TIMER_INTERVAL_TICKS));
 }
 
 /// Rust trap dispatcher, called from `trap_entry` once user registers are
@@ -84,26 +111,159 @@ pub extern "C" fn handle_trap_rust(uc: &mut UserContext) -> *mut UserContext {
     let code = cause & !(1usize << 63);
 
     if is_interrupt {
-        // No interrupts handled in M2; just panic for now.
-        panic!("unexpected interrupt: scause={:#x} stval={:#x}", cause, stval);
+        match code {
+            scause_code::SUPERVISOR_TIMER => {
+                handle_timer_interrupt();
+                return kernel_exit(uc);
+            }
+            _ => {
+                panic!(
+                    "unexpected interrupt: scause={:#x} stval={:#x}",
+                    cause, stval
+                );
+            }
+        }
     }
 
     match code {
         scause_code::ENV_CALL_FROM_U => handle_syscall(uc),
         _ => {
-            crate::println!(
-                "user fault: scause={:#x} stval={:#x} sepc={:#x} sp={:#x} ra={:#x}",
-                cause, stval, uc.pc,
-                uc.regs[reg::SP], uc.regs[reg::RA],
-            );
-            // Until we have a real fault-endpoint IPC, just freeze the
-            // offending user thread instead of dragging the kernel down.
-            // M3 will turn this into a `seL4_Fault_VMFault` delivery.
-            park_current_thread();
+            if !send_fault_ipc(uc, code, stval as u64) {
+                crate::println!(
+                    "user fault: scause={:#x} stval={:#x} sepc={:#x} sp={:#x} ra={:#x}",
+                    cause,
+                    stval,
+                    uc.pc,
+                    uc.regs[reg::SP],
+                    uc.regs[reg::RA],
+                );
+                park_current_thread();
+            }
         }
     }
 
     kernel_exit(uc)
+}
+
+fn fault_message(code: usize, stval: u64, uc: &UserContext) -> (u64, [u64; 4]) {
+    match code {
+        1 | 5 | 7 | 12 | 13 | 15 => {
+            let instruction_fault = matches!(code, 1 | 12) as u64;
+            let fsr = match code {
+                1 | 12 => 1,  // RISCVInstructionAccessFault
+                5 | 13 => 5,  // RISCVLoadAccessFault
+                7 | 15 => 7,  // RISCVStoreAccessFault
+                _ => code as u64,
+            };
+            (
+                FAULT_VM_FAULT,
+                [uc.pc, stval, instruction_fault, fsr],
+            )
+        }
+        _ => (
+            FAULT_USER_EXCEPTION,
+            [uc.pc, uc.regs[reg::SP], code as u64, 0],
+        ),
+    }
+}
+
+fn send_fault_ipc(uc: &mut UserContext, code: usize, stval: u64) -> bool {
+    use crate::object::cap::CapTag;
+    use crate::object::endpoint::{self, EpState};
+    use crate::object::tcb::{self, ThreadState};
+
+    let cur = tcb::current();
+    if cur.is_null() {
+        return false;
+    }
+
+    let fault_ep_cptr = unsafe { (*cur).fault_ep_cptr };
+    if fault_ep_cptr == 0 {
+        return false;
+    }
+
+    let thread = unsafe { crate::api::thread::current() };
+    let (handler_cap, _) = match crate::api::cspace::lookup_cap(thread, fault_ep_cptr) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    if handler_cap.tag() != Some(CapTag::Endpoint)
+        || !handler_cap.endpoint_can_send()
+        || !(handler_cap.endpoint_can_grant() || handler_cap.endpoint_can_grant_reply())
+    {
+        return false;
+    }
+
+    let ep = handler_cap.endpoint_ptr() as *mut endpoint::Endpoint;
+    if ep.is_null() {
+        return false;
+    }
+
+    let (label, mrs) = fault_message(code, stval, uc);
+    uc.regs[reg::A0] = fault_ep_cptr;
+    uc.regs[reg::A1] = MessageInfo::new(label, 0, 0, 4).0;
+    uc.regs[reg::A2] = mrs[0];
+    uc.regs[reg::A3] = mrs[1];
+    uc.regs[reg::A4] = mrs[2];
+    uc.regs[reg::A5] = mrs[3];
+
+    unsafe {
+        match (*ep).state() {
+            EpState::Receiving => {
+                let receiver = endpoint::pop_head(ep);
+                if receiver.is_null() {
+                    block_fault_sender(cur, ep, handler_cap.endpoint_badge());
+                    return true;
+                }
+                (*receiver).context.regs[reg::A0] = handler_cap.endpoint_badge();
+                (*receiver).context.regs[reg::A1] = uc.regs[reg::A1];
+                (*receiver).context.regs[reg::A2] = mrs[0];
+                (*receiver).context.regs[reg::A3] = mrs[1];
+                (*receiver).context.regs[reg::A4] = mrs[2];
+                (*receiver).context.regs[reg::A5] = mrs[3];
+                (*receiver).waiting_on = 0;
+                (*receiver).caller = cur as u64;
+                (*receiver).state = ThreadState::Running as u8;
+                tcb::enqueue(receiver);
+
+                tcb::dequeue(cur);
+                (*cur).state = ThreadState::BlockedOnReply as u8;
+                (*cur).waiting_on = 0;
+            }
+            EpState::Idle | EpState::Sending => {
+                block_fault_sender(cur, ep, handler_cap.endpoint_badge());
+            }
+        }
+    }
+    true
+}
+
+unsafe fn block_fault_sender(
+    cur: *mut crate::object::tcb::Tcb,
+    ep: *mut crate::object::endpoint::Endpoint,
+    badge: u64,
+) {
+    use crate::object::endpoint::{self, EpState};
+    use crate::object::tcb::{self, ThreadState};
+
+    unsafe {
+        tcb::dequeue(cur);
+        (*cur).state = ThreadState::BlockedOnSend as u8;
+        (*cur).waiting_on = ep as u64;
+        (*cur).sender_badge = badge;
+        (*cur).sender_is_call = 1;
+        endpoint::enqueue_waiter(ep, cur, EpState::Sending);
+    }
+}
+
+fn handle_timer_interrupt() {
+    program_next_timer();
+    unsafe {
+        let cur = crate::object::tcb::current();
+        if !cur.is_null() && (*cur).state == crate::object::tcb::ThreadState::Running as u8 {
+            crate::object::tcb::rotate_to_tail(cur);
+        }
+    }
 }
 
 /// Program `satp` for the TCB we're about to resume.
@@ -222,7 +382,6 @@ fn handle_syscall(uc: &mut UserContext) {
     // compressed encoding doesn't exist for ecall — it's always 32-bit).
     uc.pc = uc.pc.wrapping_add(4);
 
-
     match sysno {
         syscall::SYS_DEBUG_PUT_CHAR => {
             let ch = uc.regs[reg::A0] as u8;
@@ -265,8 +424,11 @@ fn handle_syscall(uc: &mut UserContext) {
         syscall::SYS_CALL => {
             crate::api::syscall::do_call(uc);
         }
-        syscall::SYS_SEND | syscall::SYS_NB_SEND => {
+        syscall::SYS_SEND => {
             crate::api::syscall::do_send(uc, false);
+        }
+        syscall::SYS_NB_SEND => {
+            crate::api::syscall::do_send(uc, true);
         }
         syscall::SYS_REPLY => {
             crate::api::ipc::reply(uc);

@@ -79,7 +79,10 @@ mod tests {
 
     #[test]
     fn split_simple_2mb_region() {
-        let r = FreeRange { start_kva: 0x80400000, size: 0x200000 };
+        let r = FreeRange {
+            start_kva: 0x80400000,
+            size: 0x200000,
+        };
         let chunks: Vec<_> = UntypedChunks::new(r).collect();
         assert_eq!(chunks, vec![(0x80400000, 21)]);
     }

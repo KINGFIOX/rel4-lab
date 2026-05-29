@@ -7,15 +7,13 @@
 
 use core::ptr;
 
-use crate::abi::bootinfo::{
-    self as bi_slot, BootInfo, SlotRegion, UntypedDesc,
-};
+use crate::abi::bootinfo::{self as bi_slot, BootInfo, SlotRegion, UntypedDesc};
 use crate::abi::constants::{
-    KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, ROOT_CNODE_SIZE_BITS,
-    SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
+    KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, ROOT_CNODE_SIZE_BITS, SEL4_MAX_UNTYPED_BITS,
+    SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
 };
 use crate::arch::riscv64::sv39::{PAGE_SIZE, PageTable};
-use crate::arch::riscv64::trap::{install_trap_vector, restore_user_context};
+use crate::arch::riscv64::trap::{init_timer, install_trap_vector, restore_user_context};
 use crate::arch::riscv64::vspace::{
     kpptr_to_paddr, make_boot_root_pt, map_user_4k, satp_for, switch_satp, user_flags,
 };
@@ -23,7 +21,7 @@ use crate::kernel::bootmem;
 use crate::object::cap::Cap;
 use crate::object::cnode::{cnode_at, cnode_bytes, install_initial_cap};
 use crate::object::tcb::{self, Tcb};
-use crate::object::untyped::{make_untyped_cap, FreeRange, UntypedChunks};
+use crate::object::untyped::{FreeRange, UntypedChunks, make_untyped_cap};
 
 /// Where we place the user IPC buffer in the user's virtual address space.
 /// Picked above the rootserver image to avoid collisions with any segment
@@ -91,10 +89,14 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     crate::println!("microkernel: bringing up rootserver");
     crate::println!(
         "  user image: PA [{:#x}, {:#x}) VA offset={:#x} entry={:#x}",
-        args.user_pstart, args.user_pend, args.pv_offset, args.user_ventry,
+        args.user_pstart,
+        args.user_pend,
+        args.pv_offset,
+        args.user_ventry,
     );
 
     install_trap_vector();
+    init_timer();
 
     // --- VSpace -----------------------------------------------------------
     let root_pt = make_boot_root_pt();
@@ -118,11 +120,25 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     // Allocate + map BootInfo, IPC buffer, user stack.
     let bi_kva = bootmem::alloc_page();
     let bi_pa = kpptr_to_paddr(bi_kva);
-    unsafe { map_user_4k(root_pt, USER_BOOTINFO_VA, bi_pa, user_flags(true, false, false)) };
+    unsafe {
+        map_user_4k(
+            root_pt,
+            USER_BOOTINFO_VA,
+            bi_pa,
+            user_flags(true, false, false),
+        )
+    };
 
     let ipc_kva = bootmem::alloc_page();
     let ipc_pa = kpptr_to_paddr(ipc_kva);
-    unsafe { map_user_4k(root_pt, USER_IPC_BUFFER_VA, ipc_pa, user_flags(true, true, false)) };
+    unsafe {
+        map_user_4k(
+            root_pt,
+            USER_IPC_BUFFER_VA,
+            ipc_pa,
+            user_flags(true, true, false),
+        )
+    };
 
     for i in 0..USER_STACK_PAGES {
         let kva = bootmem::alloc_page();
@@ -152,7 +168,12 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     install_initial_cap(
         cnode,
         bi_slot::CAP_INIT_THREAD_CNODE as usize,
-        Cap::new_cnode(cnode_kva, ROOT_CNODE_SIZE_BITS as u64, 0, 64 - ROOT_CNODE_SIZE_BITS as u64),
+        Cap::new_cnode(
+            cnode_kva,
+            ROOT_CNODE_SIZE_BITS as u64,
+            0,
+            64 - ROOT_CNODE_SIZE_BITS as u64,
+        ),
     );
     install_initial_cap(
         cnode,
@@ -164,11 +185,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         bi_slot::CAP_IRQ_CONTROL as usize,
         Cap::new_irq_control(),
     );
-    install_initial_cap(
-        cnode,
-        bi_slot::CAP_DOMAIN as usize,
-        Cap::new_domain(),
-    );
+    install_initial_cap(cnode, bi_slot::CAP_DOMAIN as usize, Cap::new_domain());
     install_initial_cap(
         cnode,
         bi_slot::CAP_ASID_CONTROL as usize,
@@ -196,7 +213,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     // to keep clear of the elfloader's CPIO data (located in PA region
     // 0x8100_0000+ before it copies the kernel/rootserver out).
     const FREE_RAM_BASE_PA: u64 = 0x8200_0000; // 2 MiB aligned, after rootserver + elfloader staging
-    const RAM_TOP_PA: u64 = 0x1_4000_0000;     // QEMU virt -m 3072 → 3 GiB
+    const RAM_TOP_PA: u64 = 0x1_4000_0000; // QEMU virt -m 3072 → 3 GiB
     let free_range = FreeRange {
         start_kva: pa_to_pspace_va(FREE_RAM_BASE_PA),
         size: RAM_TOP_PA - FREE_RAM_BASE_PA,
@@ -212,7 +229,8 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
             is_device: 0,
             _padding: [0; 6],
         }
-    }; MAX_NUM_BOOTINFO_UNTYPED_CAPS];
+    };
+        MAX_NUM_BOOTINFO_UNTYPED_CAPS];
 
     for (base_kva, bits) in UntypedChunks::new(free_range) {
         if next_slot >= cnode.len() {
@@ -401,13 +419,14 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
 
     unsafe {
         let t = &raw mut ROOTSERVER_TCB;
-        // sstatus: SPIE=1 (bit 5, sret re-enables interrupts),
-        //          SUM=1  (bit 18, kernel can touch user memory),
+        // sstatus: SPIE=1 (sret re-enables interrupts),
+        //          FS=Dirty (user FPU instructions are legal),
+        //          SUM=1  (kernel can touch user memory),
         //          SPP=0  (sret enters U-mode).
         (*t).context.pc = args.user_ventry as u64;
-        (*t).context.sstatus = (1 << 5) | (1 << 18);
+        (*t).context.sstatus = crate::arch::riscv64::trap::ROOTSERVER_SSTATUS;
         (*t).context.regs[10] = USER_BOOTINFO_VA as u64; // a0 = bootinfo
-        (*t).context.regs[2] = USER_STACK_TOP as u64;    // sp
+        (*t).context.regs[2] = USER_STACK_TOP as u64; // sp
         (*t).state = crate::object::tcb::ThreadState::Running as u8;
         (*t).priority = 255;
         (*t).mcp = 255;

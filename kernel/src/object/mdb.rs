@@ -12,7 +12,11 @@ const SIGN_EXT: u64 = 0xFFFF_FF80_0000_0000;
 
 #[inline]
 const fn sign_extend_next(low: u64) -> u64 {
-    if (low & (1 << 38)) != 0 { low | SIGN_EXT } else { low }
+    if (low & (1 << 38)) != 0 {
+        low | SIGN_EXT
+    } else {
+        low
+    }
 }
 
 #[repr(C)]
@@ -28,9 +32,7 @@ impl MdbNode {
     pub const fn new(prev: u64, next: u64, revocable: bool, first_badged: bool) -> MdbNode {
         let mut m = MdbNode::NULL;
         m.words[0] = prev;
-        m.words[1] = (next & NEXT_MASK)
-            | ((revocable as u64) << 1)
-            | (first_badged as u64);
+        m.words[1] = (next & NEXT_MASK) | ((revocable as u64) << 1) | (first_badged as u64);
         m
     }
 

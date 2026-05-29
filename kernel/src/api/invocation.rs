@@ -12,9 +12,9 @@ use core::ptr;
 use crate::api::cspace;
 use crate::api::syscall::SyscallError;
 use crate::api::thread::Thread;
-use crate::arch::riscv64::trap::{reg, UserContext};
+use crate::arch::riscv64::trap::{UserContext, reg};
 use crate::object::cap::{Cap, CapTag};
-use crate::object::cnode::{cnode_at, Cte};
+use crate::object::cnode::{Cte, cnode_at};
 use crate::object::mdb::MdbNode;
 
 /// Object type IDs as defined by `seL4_ObjectType` (`api_object` +
@@ -129,8 +129,7 @@ pub fn handle_untyped(
     // stub's `seL4_SetCap(0, root)`.
     let root_cptr = read_extra_cap(thread, 0);
 
-    let obj_bits = object_size_bits(new_type, user_size)
-        .ok_or(SyscallError::IllegalOperation)?;
+    let obj_bits = object_size_bits(new_type, user_size).ok_or(SyscallError::IllegalOperation)?;
 
     if node_window < 1 || node_window > 256 {
         return Err(SyscallError::RangeError);
@@ -140,16 +139,16 @@ pub fn handle_untyped(
     //   nodeDepth == 0 → use the looked-up cap *directly* (it must be a CNode).
     //   nodeDepth > 0  → walk `nodeIndex` for `nodeDepth` bits within it.
     let dest_cnode_cap = if node_depth == 0 {
-        let (cap, _) = cspace::lookup_cap(thread, root_cptr)
-            .map_err(|_| SyscallError::InvalidCapability)?;
+        let (cap, _) =
+            cspace::lookup_cap(thread, root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
         cap
     } else {
         // Single-level walk for now: assume the supplied cap is already
         // the rootserver's root CNode (caps_or_badges[0]) and we just
         // re-resolve through it. For our M3 scenarios `node_depth == 0`,
         // so we fall back to that interpretation if anything's off.
-        let (cap, _) = cspace::lookup_cap(thread, root_cptr)
-            .map_err(|_| SyscallError::InvalidCapability)?;
+        let (cap, _) =
+            cspace::lookup_cap(thread, root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
         let _ = (node_index, node_depth);
         cap
     };
@@ -164,9 +163,7 @@ pub fn handle_untyped(
         return Err(SyscallError::RangeError);
     }
     let dest_base_kva = dest_cnode_cap.cnode_ptr();
-    let dest_cnode = unsafe {
-        cnode_at(dest_base_kva as *mut u8, dest_radix as usize)
-    };
+    let dest_cnode = unsafe { cnode_at(dest_base_kva as *mut u8, dest_radix as usize) };
 
     // Ensure target slots are empty.
     for i in 0..node_window {
@@ -411,17 +408,53 @@ pub fn handle_page_table(
     const RISCV_PAGE_TABLE_UNMAP: u64 = 34;
 
     match label_id {
-        RISCV_PAGE_TABLE_MAP => {
-            Ok(())
-        }
-        RISCV_PAGE_TABLE_UNMAP => {
-            Ok(())
-        }
+        RISCV_PAGE_TABLE_MAP => Ok(()),
+        RISCV_PAGE_TABLE_UNMAP => Ok(()),
         _ => {
             let _ = label_id;
             Err(SyscallError::IllegalOperation)
         }
     }
+}
+
+/// DomainSet invocations.
+///
+/// This build has `CONFIG_NUM_DOMAINS = 1`, so setting a thread to
+/// domain 0 is a successful metadata update and every other domain is
+/// `seL4_InvalidArgument`.
+pub fn handle_domain(
+    thread: &Thread,
+    _cap: Cap,
+    label_id: u64,
+    length: u64,
+    uc: &mut UserContext,
+) -> Result<(), SyscallError> {
+    const DOMAIN_SET_SET: u64 = 30;
+
+    if label_id != DOMAIN_SET_SET {
+        return Err(SyscallError::IllegalOperation);
+    }
+    if length < 1 {
+        return Err(SyscallError::TruncatedMessage);
+    }
+
+    let domain = uc.regs[reg::A2] & 0xff;
+    if domain >= crate::abi::constants::NUM_DOMAINS as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+
+    let tcb_cap = lookup_extra_cap(thread, 0)?;
+    if tcb_cap.tag() != Some(CapTag::Thread) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let tcb_ptr = crate::object::tcb::from_cap(tcb_cap);
+    if tcb_ptr.is_null() {
+        return Err(SyscallError::InvalidArgument);
+    }
+    unsafe {
+        (*tcb_ptr).domain = domain as u8;
+    }
+    Ok(())
 }
 
 /// TCB invocations.
@@ -652,13 +685,37 @@ pub fn handle_thread(
             // ordering. Slots 0/1 are 0-marked because pc/ra are
             // handled above.
             const X_INDEX: [usize; 32] = [
-                /* 0 pc, 1 ra (handled above) */ 0, 0,
+                /* 0 pc, 1 ra (handled above) */ 0,
+                0,
                 /* 2 sp  */ reg::SP,
                 /* 3 gp  */ reg::GP,
-                /* 4..15 s0..s11 */ 8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
-                /* 16..23 a0..a7 */ reg::A0, reg::A1, reg::A2, reg::A3,
-                                    reg::A4, reg::A5, reg::A6, reg::A7,
-                /* 24..30 t0..t6 */ reg::T0, 6, 7, 28, 29, 30, 31,
+                /* 4..15 s0..s11 */ 8,
+                9,
+                18,
+                19,
+                20,
+                21,
+                22,
+                23,
+                24,
+                25,
+                26,
+                27,
+                /* 16..23 a0..a7 */ reg::A0,
+                reg::A1,
+                reg::A2,
+                reg::A3,
+                reg::A4,
+                reg::A5,
+                reg::A6,
+                reg::A7,
+                /* 24..30 t0..t6 */ reg::T0,
+                6,
+                7,
+                28,
+                29,
+                30,
+                31,
                 /* 31 tp */ reg::TP,
             ];
             if length >= 5 && count >= 3 {
@@ -667,8 +724,7 @@ pub fn handle_thread(
                     // mr_i for i=4..mr_count holds frameRegister/gpRegister
                     // value at slot (i-2) of seL4_UserContext.
                     for i in 4..mr_count {
-                        let mr_val =
-                            unsafe { *thread.ipc_buffer_kva.add(1 + i) };
+                        let mr_val = unsafe { *thread.ipc_buffer_kva.add(1 + i) };
                         let ctx_idx = i - 2;
                         let target_idx = X_INDEX[ctx_idx];
                         if target_idx != 0 {
@@ -709,13 +765,37 @@ pub fn handle_thread(
             let suspend_source = (flag_word & 1) != 0;
 
             const X_INDEX: [usize; 32] = [
-                /* 0 pc, 1 ra (handled below) */ 0, 0,
+                /* 0 pc, 1 ra (handled below) */ 0,
+                0,
                 /* 2 sp  */ reg::SP,
                 /* 3 gp  */ reg::GP,
-                /* 4..15 s0..s11 */ 8, 9, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
-                /* 16..23 a0..a7 */ reg::A0, reg::A1, reg::A2, reg::A3,
-                                    reg::A4, reg::A5, reg::A6, reg::A7,
-                /* 24..30 t0..t6 */ reg::T0, 6, 7, 28, 29, 30, 31,
+                /* 4..15 s0..s11 */ 8,
+                9,
+                18,
+                19,
+                20,
+                21,
+                22,
+                23,
+                24,
+                25,
+                26,
+                27,
+                /* 16..23 a0..a7 */ reg::A0,
+                reg::A1,
+                reg::A2,
+                reg::A3,
+                reg::A4,
+                reg::A5,
+                reg::A6,
+                reg::A7,
+                /* 24..30 t0..t6 */ reg::T0,
+                6,
+                7,
+                28,
+                29,
+                30,
+                31,
                 /* 31 tp */ reg::TP,
             ];
 
@@ -739,10 +819,18 @@ pub fn handle_thread(
 
             let n = count.min(32);
             // First 4 MRs go through registers a2..a5.
-            if n >= 1 { uc.regs[reg::A2] = read_reg(0); }
-            if n >= 2 { uc.regs[reg::A3] = read_reg(1); }
-            if n >= 3 { uc.regs[reg::A4] = read_reg(2); }
-            if n >= 4 { uc.regs[reg::A5] = read_reg(3); }
+            if n >= 1 {
+                uc.regs[reg::A2] = read_reg(0);
+            }
+            if n >= 2 {
+                uc.regs[reg::A3] = read_reg(1);
+            }
+            if n >= 3 {
+                uc.regs[reg::A4] = read_reg(2);
+            }
+            if n >= 4 {
+                uc.regs[reg::A5] = read_reg(3);
+            }
 
             // MRs 4..n live in the IPC buffer at words[1+i].
             if n > 4 && !thread.ipc_buffer_kva.is_null() {
@@ -805,9 +893,22 @@ pub fn handle_thread(
             }
             let clear = uc.regs[reg::A2] as u32;
             let set = uc.regs[reg::A3] as u32;
+            const TCB_FLAG_MASK: u32 = 0x1; // seL4_TCBFlag_fpuDisabled
             unsafe {
                 let cur = (*tcb_ptr).flags;
-                (*tcb_ptr).flags = (cur & !clear) | set;
+                let flags = (cur & !clear) | (set & TCB_FLAG_MASK);
+                (*tcb_ptr).flags = flags;
+                if (flags & TCB_FLAG_MASK) != 0 {
+                    (*tcb_ptr).context.sstatus &=
+                        !crate::arch::riscv64::trap::SSTATUS_FS_DIRTY;
+                } else {
+                    (*tcb_ptr).context.sstatus |=
+                        crate::arch::riscv64::trap::SSTATUS_FS_DIRTY;
+                }
+                uc.regs[reg::A2] = flags as u64;
+                if !thread.ipc_buffer_kva.is_null() {
+                    *thread.ipc_buffer_kva.add(1) = flags as u64;
+                }
             }
             Ok(())
         }
@@ -877,9 +978,7 @@ pub fn handle_cnode(
         label::CNODE_MINT => cnode_op_copy_or_mint(thread, dest_root_cap, length, uc, true),
         label::CNODE_MOVE => cnode_op_move_or_mutate(thread, dest_root_cap, length, uc, false),
         label::CNODE_MUTATE => cnode_op_move_or_mutate(thread, dest_root_cap, length, uc, true),
-        label::CNODE_CANCEL_BADGED_SENDS => {
-            cnode_op_cancel_badged_sends(dest_root_cap, length, uc)
-        }
+        label::CNODE_CANCEL_BADGED_SENDS => cnode_op_cancel_badged_sends(dest_root_cap, length, uc),
         label::CNODE_ROTATE => cnode_op_rotate(thread, dest_root_cap, length, uc),
         label::CNODE_SAVE_CALLER => cnode_op_save_caller(thread, dest_root_cap, length, uc),
         _ => {
@@ -952,10 +1051,10 @@ fn cnode_op_rotate(
 
     let pivot_root_cptr = read_extra_cap(thread, 0);
     let src_root_cptr = read_extra_cap(thread, 1);
-    let (pivot_root_cap, _) = cspace::lookup_cap(thread, pivot_root_cptr)
-        .map_err(|_| SyscallError::InvalidCapability)?;
-    let (src_root_cap, _) = cspace::lookup_cap(thread, src_root_cptr)
-        .map_err(|_| SyscallError::InvalidCapability)?;
+    let (pivot_root_cap, _) =
+        cspace::lookup_cap(thread, pivot_root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
+    let (src_root_cap, _) =
+        cspace::lookup_cap(thread, src_root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
 
     let dest = resolve_slot(dest_root_cap, dest_index, dest_depth)?;
     let pivot = resolve_slot(pivot_root_cap, pivot_index, pivot_depth)?;
@@ -1057,18 +1156,12 @@ fn read_mr(thread: &Thread, uc: &UserContext, i: usize) -> u64 {
         1 => uc.regs[reg::A3],
         2 => uc.regs[reg::A4],
         3 => uc.regs[reg::A5],
-        _ if !thread.ipc_buffer_kva.is_null() => unsafe {
-            *thread.ipc_buffer_kva.add(1 + i)
-        },
+        _ if !thread.ipc_buffer_kva.is_null() => unsafe { *thread.ipc_buffer_kva.add(1 + i) },
         _ => 0,
     }
 }
 
-fn cnode_op_revoke(
-    dest_root_cap: Cap,
-    length: u64,
-    uc: &UserContext,
-) -> Result<(), SyscallError> {
+fn cnode_op_revoke(dest_root_cap: Cap, length: u64, uc: &UserContext) -> Result<(), SyscallError> {
     if length < 2 {
         return Err(SyscallError::TruncatedMessage);
     }
@@ -1079,11 +1172,7 @@ fn cnode_op_revoke(
     Ok(())
 }
 
-fn cnode_op_delete(
-    dest_root_cap: Cap,
-    length: u64,
-    uc: &UserContext,
-) -> Result<(), SyscallError> {
+fn cnode_op_delete(dest_root_cap: Cap, length: u64, uc: &UserContext) -> Result<(), SyscallError> {
     if length < 2 {
         return Err(SyscallError::TruncatedMessage);
     }
@@ -1112,8 +1201,8 @@ fn cnode_op_copy_or_mint(
     let badge = if is_mint { read_mr(thread, uc, 5) } else { 0 };
 
     let src_root_cptr = read_extra_cap(thread, 0);
-    let (src_root_cap, _) = cspace::lookup_cap(thread, src_root_cptr)
-        .map_err(|_| SyscallError::InvalidCapability)?;
+    let (src_root_cap, _) =
+        cspace::lookup_cap(thread, src_root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
 
     let dest = resolve_slot(dest_root_cap, dest_index, dest_depth)?;
     let src = resolve_slot(src_root_cap, src_index, src_depth)?;
@@ -1167,12 +1256,8 @@ fn is_cap_revocable(new_cap: Cap, src_cap: Cap) -> bool {
         // Arch caps (Frame / PageTable / ASIDPool / …) are never revocable.
         Some(CapTag::Frame) | Some(CapTag::PageTable) => false,
         Some(CapTag::Untyped) => true,
-        Some(CapTag::Endpoint) => {
-            new_cap.endpoint_badge() != src_cap.endpoint_badge()
-        }
-        Some(CapTag::Notification) => {
-            new_cap.notification_badge() != src_cap.notification_badge()
-        }
+        Some(CapTag::Endpoint) => new_cap.endpoint_badge() != src_cap.endpoint_badge(),
+        Some(CapTag::Notification) => new_cap.notification_badge() != src_cap.notification_badge(),
         Some(CapTag::IrqHandler) => src_cap.tag() == Some(CapTag::IrqControl),
         _ => false,
     }
@@ -1195,8 +1280,8 @@ fn cnode_op_move_or_mutate(
     let badge = if is_mutate { read_mr(thread, uc, 4) } else { 0 };
 
     let src_root_cptr = read_extra_cap(thread, 0);
-    let (src_root_cap, _) = cspace::lookup_cap(thread, src_root_cptr)
-        .map_err(|_| SyscallError::InvalidCapability)?;
+    let (src_root_cap, _) =
+        cspace::lookup_cap(thread, src_root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
 
     let dest = resolve_slot(dest_root_cap, dest_index, dest_depth)?;
     let src = resolve_slot(src_root_cap, src_index, src_depth)?;
@@ -1324,9 +1409,7 @@ unsafe fn is_final_capability(slot: *mut Cte) -> bool {
 /// requires matching base+size; for the others it's just type+pointer.
 fn same_object_as(a: Cap, b: Cap) -> bool {
     match (a.tag(), b.tag()) {
-        (Some(CapTag::Endpoint), Some(CapTag::Endpoint)) => {
-            a.endpoint_ptr() == b.endpoint_ptr()
-        }
+        (Some(CapTag::Endpoint), Some(CapTag::Endpoint)) => a.endpoint_ptr() == b.endpoint_ptr(),
         (Some(CapTag::Notification), Some(CapTag::Notification)) => {
             a.notification_ptr() == b.notification_ptr()
         }
@@ -1446,8 +1529,7 @@ fn finalize_cap(cap: &mut Cap, is_final: bool) {
             if base != 0 && is_pspace_kva(base) {
                 let n_slots = 1usize << radix;
                 unsafe {
-                    let slots =
-                        crate::object::cnode::cnode_at(base as *mut u8, radix as usize);
+                    let slots = crate::object::cnode::cnode_at(base as *mut u8, radix as usize);
                     if slots.len() == n_slots {
                         for i in 0..n_slots {
                             let inner = &mut slots[i];

@@ -41,10 +41,22 @@ impl MessageInfo {
         MessageInfo(w)
     }
 
-    #[inline] pub const fn label(self) -> Word { (self.0 >> 12) & 0x000F_FFFF_FFFF_FFFF }
-    #[inline] pub const fn caps_unwrapped(self) -> Word { (self.0 >> 9) & 0x7 }
-    #[inline] pub const fn extra_caps(self) -> Word { (self.0 >> 7) & 0x3 }
-    #[inline] pub const fn length(self) -> Word { self.0 & 0x7F }
+    #[inline]
+    pub const fn label(self) -> Word {
+        (self.0 >> 12) & 0x000F_FFFF_FFFF_FFFF
+    }
+    #[inline]
+    pub const fn caps_unwrapped(self) -> Word {
+        (self.0 >> 9) & 0x7
+    }
+    #[inline]
+    pub const fn extra_caps(self) -> Word {
+        (self.0 >> 7) & 0x3
+    }
+    #[inline]
+    pub const fn length(self) -> Word {
+        self.0 & 0x7F
+    }
 }
 
 /// `seL4_CapRights` packed word.
@@ -84,9 +96,6 @@ pub struct CNodeCapData(pub Word);
 impl CNodeCapData {
     #[inline]
     pub const fn new(guard: Word, guard_size: Word) -> Self {
-        CNodeCapData(
-            ((guard & 0x03FF_FFFF_FFFF_FFFF) << 6)
-                | (guard_size & 0x3F),
-        )
+        CNodeCapData(((guard & 0x03FF_FFFF_FFFF_FFFF) << 6) | (guard_size & 0x3F))
     }
 }

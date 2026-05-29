@@ -230,8 +230,7 @@ pub unsafe fn cancel_badged_sends(ep: *mut Endpoint, badge: u64) {
                     // user code observing `seL4_MessageInfo_get_label`
                     // sees the expected `seL4_InvalidCapability` (= 2)
                     // when the call was cancelled mid-flight.
-                    (*cur).context.regs[reg::A1] =
-                        MessageInfo::new(2, 0, 0, 0).0;
+                    (*cur).context.regs[reg::A1] = MessageInfo::new(2, 0, 0, 0).0;
                     (*cur).context.regs[reg::A2] = 0;
                     (*cur).context.regs[reg::A3] = 0;
                     (*cur).context.regs[reg::A4] = 0;

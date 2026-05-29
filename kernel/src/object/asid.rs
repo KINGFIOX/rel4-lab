@@ -66,5 +66,7 @@ pub fn lookup(asid: u16) -> u64 {
     if (asid as usize) >= ASID_TABLE_LEN || asid == 0 {
         return 0;
     }
-    ASID_TABLE[asid as usize].root_pt_kva.load(Ordering::Acquire)
+    ASID_TABLE[asid as usize]
+        .root_pt_kva
+        .load(Ordering::Acquire)
 }

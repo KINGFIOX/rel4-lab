@@ -300,6 +300,8 @@ impl Tcb {
                 pc: 0,
                 sstatus: 0,
                 _reserved: 0,
+                fregs: [0; 32],
+                fcsr: 0,
             },
             state: 0,
             priority: 0,
@@ -331,25 +333,23 @@ impl Tcb {
 #[inline]
 pub fn from_cap(cap: Cap) -> *mut Tcb {
     let p = cap.thread_ptr();
-    if p == 0 {
-        null_mut()
-    } else {
-        p as *mut Tcb
-    }
+    if p == 0 { null_mut() } else { p as *mut Tcb }
 }
 
 /// Initialise a freshly-retyped 2 KiB TCB slab.
 ///
 /// `Untyped_Retype` already zeroed the memory; we only stamp the bits
 /// where 0 isn't the right resting value (currently just sstatus so a
-/// future `restore_user_context` returns to U-mode with interrupts on).
+/// future `restore_user_context` returns to U-mode with interrupts and
+/// the FPU enabled.
 pub unsafe fn init(tcb_kva: u64) {
     let t = tcb_kva as *mut Tcb;
     // sstatus.SPIE = 1 -> sret re-enables interrupts in U-mode.
     // sstatus.SPP  = 0 -> sret enters U-mode (already 0).
+    // sstatus.FS   = Dirty -> user floating-point instructions are legal.
     unsafe {
         (*t).state = ThreadState::Inactive as u8;
-        (*t).context.sstatus = 1 << 5;
+        (*t).context.sstatus = crate::arch::riscv64::trap::USER_SSTATUS;
     }
 }
 

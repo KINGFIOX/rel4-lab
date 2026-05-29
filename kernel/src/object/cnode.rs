@@ -173,25 +173,21 @@ unsafe fn is_mdb_parent_of(a: *mut Cte, b: *mut Cte) -> bool {
             tag_b == CapTag::Endpoint && cap_a.endpoint_ptr() == cap_b.endpoint_ptr()
         }
         CapTag::Notification => {
-            tag_b == CapTag::Notification
-                && cap_a.notification_ptr() == cap_b.notification_ptr()
+            tag_b == CapTag::Notification && cap_a.notification_ptr() == cap_b.notification_ptr()
         }
         CapTag::CNode => {
             tag_b == CapTag::CNode
                 && cap_a.cnode_ptr() == cap_b.cnode_ptr()
                 && cap_a.cnode_radix() == cap_b.cnode_radix()
         }
-        CapTag::Thread => {
-            tag_b == CapTag::Thread && cap_a.thread_ptr() == cap_b.thread_ptr()
-        }
+        CapTag::Thread => tag_b == CapTag::Thread && cap_a.thread_ptr() == cap_b.thread_ptr(),
         CapTag::Frame => {
             tag_b == CapTag::Frame
                 && cap_a.frame_base_ptr() == cap_b.frame_base_ptr()
                 && cap_a.frame_size() == cap_b.frame_size()
         }
         CapTag::PageTable => {
-            tag_b == CapTag::PageTable
-                && cap_a.page_table_base_ptr() == cap_b.page_table_base_ptr()
+            tag_b == CapTag::PageTable && cap_a.page_table_base_ptr() == cap_b.page_table_base_ptr()
         }
         // Domain / IrqControl / AsidControl / AsidPool: there's no real
         // tree below them yet — treat as "no children" for M3.

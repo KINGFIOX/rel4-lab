@@ -89,8 +89,8 @@ const _: () = {
 /// ```
 #[repr(C)]
 pub struct IPCBuffer {
-    pub tag: Word,             // packed seL4_MessageInfo
-    pub msg: [Word; 120],      // seL4_MsgMaxLength
+    pub tag: Word,        // packed seL4_MessageInfo
+    pub msg: [Word; 120], // seL4_MsgMaxLength
     pub user_data: Word,
     pub caps_or_badges: [Word; 3],
     pub receive_cnode: Word,

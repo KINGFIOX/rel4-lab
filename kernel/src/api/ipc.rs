@@ -41,7 +41,7 @@
 use crate::abi::types::MessageInfo;
 use crate::api::cspace::lookup_cap;
 use crate::api::thread;
-use crate::arch::riscv64::trap::{reg, UserContext};
+use crate::arch::riscv64::trap::{UserContext, reg};
 use crate::object::cap::{Cap, CapTag};
 use crate::object::endpoint::{self, EpState};
 use crate::object::tcb::{self, ThreadState};
@@ -249,8 +249,7 @@ pub fn recv(uc: &mut UserContext, blocking: bool) {
             unsafe {
                 let bound = (*cur).bound_notification;
                 if bound != 0 {
-                    let n =
-                        bound as *mut crate::object::notification::Notification;
+                    let n = bound as *mut crate::object::notification::Notification;
                     if (*n).state() == crate::object::notification::NtfnState::Active {
                         let badge = (*n).badge();
                         (*n).set_badge(0);

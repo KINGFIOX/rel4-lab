@@ -12,8 +12,8 @@ use crate::abi::constants::{
 };
 use crate::arch::riscv64::csr;
 use crate::arch::riscv64::sv39::{
-    PAGE_SIZE, PageTable, Pte, PTE_A, PTE_D, PTE_G, PTE_R, PTE_U, PTE_V, PTE_W, PTE_X,
-    make_satp, pt_index,
+    PAGE_SIZE, PTE_A, PTE_D, PTE_G, PTE_R, PTE_U, PTE_V, PTE_W, PTE_X, PageTable, Pte, make_satp,
+    pt_index,
 };
 
 /// Convert a kernel-window (PSpace) virtual address to its physical
@@ -139,8 +139,7 @@ pub unsafe fn free_pt_page(p: *mut PageTable) {
     if !is_boot_pool_pt(p) {
         return;
     }
-    let idx = ((p as usize) - (pool_base() as usize))
-        / core::mem::size_of::<PageTable>();
+    let idx = ((p as usize) - (pool_base() as usize)) / core::mem::size_of::<PageTable>();
     unsafe {
         let head = BOOT_PT_FREELIST_HEAD.load(Ordering::SeqCst);
         (*p).entries[0] = Pte::from_raw(head as u64);
@@ -316,9 +315,15 @@ pub unsafe fn switch_satp(satp_val: u64) {
 /// `seL4` user permissions ⇒ Sv39 PTE flag bits (for U-mode, 4K page).
 pub fn user_flags(read: bool, write: bool, exec: bool) -> u64 {
     let mut f = PTE_V | PTE_U | PTE_A | PTE_D;
-    if read { f |= PTE_R; }
-    if write { f |= PTE_W; }
-    if exec { f |= PTE_X; }
+    if read {
+        f |= PTE_R;
+    }
+    if write {
+        f |= PTE_W;
+    }
+    if exec {
+        f |= PTE_X;
+    }
     f
 }
 
