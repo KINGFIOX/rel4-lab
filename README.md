@@ -261,11 +261,12 @@ xv6-host: exit(0)
 Implemented host-side compatibility now has an explicit handler for every xv6
 syscall number 1..21. The currently functional subset is process exit,
 console/file read-write where meaningful, `open`/`close`/`dup`/`fstat`,
-`sbrk`, `getpid`, `uptime`, `pause`, and root-only `chdir`. Calls that require
-real multi-process state or a mutable filesystem (`fork`, `wait`, `pipe`,
-`exec`, `mknod`, `unlink`, `link`, `mkdir`) return `-1` consistently instead
-of falling through as unknown syscalls. Running `init`, `sh`, real
-`fork`/`exec`, pipes, mutable files, and `usertests` still requires a fuller
+`sbrk`, `getpid`, `uptime`, `pause`, root-only `chdir`, `mknod("console")`,
+and a single-process in-memory `pipe` ring buffer. Calls that require real
+multi-process state or a mutable filesystem (`fork`, `wait`, `exec`, `unlink`,
+`link`, `mkdir`, and non-console `mknod`) return `-1` consistently instead of
+falling through as unknown syscalls. Running `init`, `sh`, real `fork`/`exec`,
+cross-process pipes, mutable files, and `usertests` still requires a fuller
 Unix service with process state and a filesystem image.
 
 

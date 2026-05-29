@@ -9,6 +9,28 @@ use crate::util::*;
 
 static mut FD_TABLE: [FdEntry; MAX_FD] = [FdEntry::closed(); MAX_FD];
 static mut TICKS: u64 = 0;
+static mut PIPES: [Pipe; MAX_PIPES] = [Pipe::closed(); MAX_PIPES];
+
+#[derive(Copy, Clone)]
+struct Pipe {
+    buf: [u8; PIPE_BUF],
+    read_pos: usize,
+    len: usize,
+    readers: usize,
+    writers: usize,
+}
+
+impl Pipe {
+    const fn closed() -> Self {
+        Self {
+            buf: [0; PIPE_BUF],
+            read_pos: 0,
+            len: 0,
+            readers: 0,
+            writers: 0,
+        }
+    }
+}
 
 const ROOT_DIRENTS: [u8; 64] = [
     1, 0, b'.', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, b'.', b'.', 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -51,8 +73,9 @@ pub(crate) fn handle_xv6_syscall(alloc: &mut Allocator, child: &mut Child, mrs: 
         }
         SYS_KILL => sys_kill(a0 as i64),
         SYS_CHDIR => sys_chdir(a0),
-        SYS_PIPE | SYS_EXEC | SYS_MKNOD | SYS_UNLINK | SYS_LINK | SYS_MKDIR | SYS_FORK
-        | SYS_WAIT => -1,
+        SYS_PIPE => sys_pipe(a0),
+        SYS_MKNOD => sys_mknod(a0),
+        SYS_EXEC | SYS_UNLINK | SYS_LINK | SYS_MKDIR | SYS_FORK | SYS_WAIT => -1,
         _ => -1,
     }
 }
@@ -61,9 +84,6 @@ fn sys_write(fd: usize, buf: u64, len: usize) -> i64 {
     if len == 0 {
         return 0;
     }
-    if fd >= MAX_FD || unsafe { FD_TABLE[fd].kind } != FD_CONSOLE || fd == 0 {
-        return -1;
-    }
     let mut scratch = [0u8; 128];
     let mut done = 0usize;
     while done < len {
@@ -71,12 +91,27 @@ fn sys_write(fd: usize, buf: u64, len: usize) -> i64 {
         if !copy_from_child(buf + done as u64, &mut scratch[..n]) {
             return -1;
         }
-        for b in &scratch[..n] {
-            putchar(*b);
+        let wrote = unsafe {
+            if fd >= MAX_FD {
+                return -1;
+            }
+            match FD_TABLE[fd].kind {
+                FD_CONSOLE if fd != 0 => {
+                    for b in &scratch[..n] {
+                        putchar(*b);
+                    }
+                    n
+                }
+                FD_PIPE_WRITE => pipe_write(FD_TABLE[fd].aux, &scratch[..n]),
+                _ => return -1,
+            }
+        };
+        if wrote == 0 {
+            break;
         }
-        done += n;
+        done += wrote;
     }
-    len as i64
+    done as i64
 }
 
 fn sys_read(fd: usize, dst: u64, len: usize) -> i64 {
@@ -111,6 +146,7 @@ fn sys_read(fd: usize, dst: u64, len: usize) -> i64 {
                 FD_TABLE[fd].offset += n;
                 n as i64
             }
+            FD_PIPE_READ => pipe_read(entry.aux, dst, len),
             _ => -1,
         }
     }
@@ -153,9 +189,30 @@ fn sys_close(fd: usize) -> i64 {
         if FD_TABLE[fd].kind == FD_CLOSED {
             return -1;
         }
+        close_fd(fd);
+        return 0;
+    }
+}
+
+unsafe fn close_fd(fd: usize) {
+    unsafe {
+        match FD_TABLE[fd].kind {
+            FD_PIPE_READ => {
+                let pipe = FD_TABLE[fd].aux;
+                if pipe < MAX_PIPES && PIPES[pipe].readers > 0 {
+                    PIPES[pipe].readers -= 1;
+                }
+            }
+            FD_PIPE_WRITE => {
+                let pipe = FD_TABLE[fd].aux;
+                if pipe < MAX_PIPES && PIPES[pipe].writers > 0 {
+                    PIPES[pipe].writers -= 1;
+                }
+            }
+            _ => {}
+        }
         FD_TABLE[fd] = FdEntry::closed();
     }
-    0
 }
 
 fn sys_dup(fd: usize) -> i64 {
@@ -170,6 +227,11 @@ fn sys_dup(fd: usize) -> i64 {
         for i in 0..MAX_FD {
             if FD_TABLE[i].kind == FD_CLOSED {
                 FD_TABLE[i] = entry;
+                match entry.kind {
+                    FD_PIPE_READ if entry.aux < MAX_PIPES => PIPES[entry.aux].readers += 1,
+                    FD_PIPE_WRITE if entry.aux < MAX_PIPES => PIPES[entry.aux].writers += 1,
+                    _ => {}
+                }
                 return i as i64;
             }
         }
@@ -186,6 +248,7 @@ fn sys_fstat(fd: usize, dst: u64) -> i64 {
         FD_CONSOLE => (T_DEVICE, CONSOLE_INO, 0u64),
         FD_README => (T_FILE, README_INO, README_BYTES.len() as u64),
         FD_ROOTDIR => (T_DIR, ROOT_INO, ROOT_DIRENTS.len() as u64),
+        FD_PIPE_READ | FD_PIPE_WRITE => (T_FILE, 4 + entry.aux as u32, 0u64),
         _ => return -1,
     };
     let mut st = [0u8; 24];
@@ -238,6 +301,65 @@ fn sys_chdir(path_ptr: u64) -> i64 {
     }
 }
 
+fn sys_pipe(fds_ptr: u64) -> i64 {
+    unsafe {
+        let mut pipe_idx = MAX_PIPES;
+        for i in 0..MAX_PIPES {
+            if PIPES[i].readers == 0 && PIPES[i].writers == 0 {
+                pipe_idx = i;
+                break;
+            }
+        }
+        if pipe_idx == MAX_PIPES {
+            return -1;
+        }
+
+        let Some(read_fd) = find_free_fd() else {
+            return -1;
+        };
+        FD_TABLE[read_fd] = FdEntry {
+            kind: FD_PIPE_READ,
+            offset: 0,
+            aux: pipe_idx,
+        };
+        let Some(write_fd) = find_free_fd() else {
+            FD_TABLE[read_fd] = FdEntry::closed();
+            return -1;
+        };
+
+        PIPES[pipe_idx] = Pipe::closed();
+        PIPES[pipe_idx].readers = 1;
+        PIPES[pipe_idx].writers = 1;
+        FD_TABLE[write_fd] = FdEntry {
+            kind: FD_PIPE_WRITE,
+            offset: 0,
+            aux: pipe_idx,
+        };
+
+        let mut out = [0u8; 8];
+        write_i32(&mut out, 0, read_fd as i32);
+        write_i32(&mut out, 4, write_fd as i32);
+        if !copy_to_child(fds_ptr, &out) {
+            close_fd(read_fd);
+            close_fd(write_fd);
+            return -1;
+        }
+        0
+    }
+}
+
+fn sys_mknod(path_ptr: u64) -> i64 {
+    let mut path = [0u8; 128];
+    let Some(len) = copy_cstr_from_child(path_ptr, &mut path) else {
+        return -1;
+    };
+    if basename(&path[..len]) == b"console" {
+        0
+    } else {
+        -1
+    }
+}
+
 pub(crate) fn init_fds() {
     unsafe {
         let mut i = 0;
@@ -248,28 +370,96 @@ pub(crate) fn init_fds() {
         FD_TABLE[0] = FdEntry {
             kind: FD_CONSOLE,
             offset: 0,
+            aux: 0,
         };
         FD_TABLE[1] = FdEntry {
             kind: FD_CONSOLE,
             offset: 0,
+            aux: 0,
         };
         FD_TABLE[2] = FdEntry {
             kind: FD_CONSOLE,
             offset: 0,
+            aux: 0,
         };
+        let mut p = 0;
+        while p < MAX_PIPES {
+            PIPES[p] = Pipe::closed();
+            p += 1;
+        }
     }
 }
 
 fn alloc_fd(kind: u8) -> i64 {
     unsafe {
-        for i in 0..MAX_FD {
-            if FD_TABLE[i].kind == FD_CLOSED {
-                FD_TABLE[i] = FdEntry { kind, offset: 0 };
-                return i as i64;
-            }
+        if let Some(i) = find_free_fd() {
+            FD_TABLE[i] = FdEntry {
+                kind,
+                offset: 0,
+                aux: 0,
+            };
+            return i as i64;
         }
     }
     -1
+}
+
+fn find_free_fd() -> Option<usize> {
+    unsafe {
+        for i in 0..MAX_FD {
+            if FD_TABLE[i].kind == FD_CLOSED {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+unsafe fn pipe_write(pipe_idx: usize, src: &[u8]) -> usize {
+    unsafe {
+        if pipe_idx >= MAX_PIPES || PIPES[pipe_idx].readers == 0 {
+            return 0;
+        }
+        let pipe = &mut PIPES[pipe_idx];
+        let mut n = 0;
+        while n < src.len() && pipe.len < PIPE_BUF {
+            let write_pos = (pipe.read_pos + pipe.len) % PIPE_BUF;
+            pipe.buf[write_pos] = src[n];
+            pipe.len += 1;
+            n += 1;
+        }
+        n
+    }
+}
+
+unsafe fn pipe_read(pipe_idx: usize, dst: u64, len: usize) -> i64 {
+    unsafe {
+        if pipe_idx >= MAX_PIPES {
+            return -1;
+        }
+        let pipe = &mut PIPES[pipe_idx];
+        if pipe.len == 0 {
+            return 0;
+        }
+
+        let mut total = 0usize;
+        let mut scratch = [0u8; 128];
+        while total < len && pipe.len > 0 {
+            let n = min(scratch.len(), min(len - total, pipe.len));
+            let mut i = 0;
+            while i < n {
+                scratch[i] = pipe.buf[pipe.read_pos];
+                pipe.read_pos = (pipe.read_pos + 1) % PIPE_BUF;
+                pipe.len -= 1;
+                i += 1;
+            }
+            if !copy_to_child(dst + total as u64, &scratch[..n]) {
+                return -1;
+            }
+            total += n;
+        }
+        total as i64
+    }
 }
 
 fn basename(path: &[u8]) -> &[u8] {

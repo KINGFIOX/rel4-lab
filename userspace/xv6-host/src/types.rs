@@ -56,6 +56,7 @@ pub(crate) struct Mapping {
 pub(crate) struct FdEntry {
     pub(crate) kind: u8,
     pub(crate) offset: usize,
+    pub(crate) aux: usize,
 }
 
 impl FdEntry {
@@ -63,6 +64,7 @@ impl FdEntry {
         Self {
             kind: FD_CLOSED,
             offset: 0,
+            aux: 0,
         }
     }
 }

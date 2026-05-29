@@ -51,6 +51,10 @@ pub(crate) const FD_CLOSED: u8 = 0;
 pub(crate) const FD_CONSOLE: u8 = 1;
 pub(crate) const FD_README: u8 = 2;
 pub(crate) const FD_ROOTDIR: u8 = 3;
+pub(crate) const FD_PIPE_READ: u8 = 4;
+pub(crate) const FD_PIPE_WRITE: u8 = 5;
+pub(crate) const MAX_PIPES: usize = 8;
+pub(crate) const PIPE_BUF: usize = 512;
 
 pub(crate) const FAULT_UNKNOWN_SYSCALL: u64 = 2;
 
