@@ -20,6 +20,12 @@ Latest verified checkpoints:
 - RV64 SMP-compatible build (`SMP=ON`, `NUM_NODES=2`, QEMU `SMP=2`):
   `env SMP=2 TIMEOUT=480 ./tools/run-tests.sh` passes with
   **125 enabled tests passing, 42 upstream-disabled tests remaining**.
+- xv6 user-program compatibility smoke path: xv6 user ELFs from
+  `third_party/xv6-riscv/user` can be linked as a temporary rootserver and
+  run on the Rust kernel via `./tools/run-xv6-user.sh`. Verified:
+  `echo hello from xv6` prints through the xv6 `write(1, ...)` syscall and
+  `forktest` handles unsupported `fork()` as `-1`, both ending in
+  `xv6compat: exit(0)`.
 
 M4.4b unlocked the first timer-gated disabled group on the current RV64,
 non-MCS, single-core, QEMU configuration: `TIMER0001`, `TIMER0002`,
@@ -54,6 +60,17 @@ scheduling, IPIs, and cross-hart TLB shootdown remain future work.
 The upstream OpenSBI packaging helper is also pinned to
 `rv64imafdc_zicsr_zifencei` so the current GCC/binutils toolchain can
 rebuild the SMP image after CMake regeneration.
+
+M5.1 starts a deliberately thin xv6 compatibility layer. A generated wrapper
+links one xv6 user program at `0x10000000`, passes a baked-in `argc/argv`, and
+packs it as the elfloader rootserver. The Rust kernel detects that rootserver
+shape and dispatches xv6's positive syscall numbers separately from the seL4
+ABI. Implemented syscall surface is currently enough for single-process smoke
+programs: console `write`, nonblocking console `read`, `sbrk`, `getpid`,
+`uptime`, `open("console")`, `dup`, `close`, `fstat`, and graceful `-1`
+returns for process/filesystem calls that need real services. `fork`, `exec`,
+pipes, wait semantics, and a filesystem are not implemented yet; those should
+move into a user-space Unix/xv6 server rather than bloating the kernel path.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -90,6 +107,7 @@ rebuild the SMP image after CMake regeneration.
 | M4.4d | `SCHED0021` equal-priority preemption under QEMU simulation: Rust scheduler uses per-TCB time-slice accounting, and sel4test uses a simulation-specific timing upper bound while preserving the original non-simulation bound. Full suite now reports **123 passed / 44 disabled**. | ✅ Done |
 | M4.4e | RISC-V `CACHEFLUSH0004`: enable the non-ARM cache/retype test and validate that retyped frames are zeroed after `Untyped_Revoke`. Full suite now reports **124 passed / 43 disabled**. | ✅ Done |
 | M4.4f | SMP-compatible RV64 build/run: secondary harts park before shared init; SMP invocation-label shift and `TCBSetAffinity` are handled; QEMU wrappers accept `SMP=2`; `FPU0002` and `MULTICORE0001..0005` pass in the full SMP run. Current SMP full suite reports **125 passed / 42 disabled**. | ✅ Done |
+| M5.1 | xv6 user-program smoke path: build an xv6 user ELF as rootserver, route xv6 positive syscalls through a small compatibility module, and pass `echo` / `forktest` under QEMU. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
@@ -187,6 +205,37 @@ Test suite passed. 124 tests passed. 43 tests disabled.
 All is well in the universe
 ```
 
+### xv6 Compatibility Checkpoint (M5.1)
+
+The current xv6 path is a smoke-test bridge, not a full Unix server yet. The
+helper builds one xv6 user program from `third_party/xv6-riscv/user`, links it
+at `0x10000000` with a generated `argc/argv` entry stub, injects it as the
+elfloader rootserver, and boots it under QEMU. With the current SMP upstream
+build, use two harts (the helper defaults to `SMP=2`):
+
+```sh
+nix develop --command ./tools/run-xv6-user.sh echo hello from xv6
+nix develop --command ./tools/run-xv6-user.sh forktest
+```
+
+Verified output includes:
+
+```text
+hello from xv6
+xv6compat: exit(0)
+
+fork test
+fork test OK
+xv6compat: exit(0)
+```
+
+Implemented kernel-side compatibility is intentionally tiny: console
+read/write, heap growth via `sbrk`, time/pid stubs, console fd operations, and
+graceful `-1` for process/filesystem calls. Running `init`, `sh`, `ls`, `cat`
+against a real file, pipes, and `usertests` requires the next layer: a
+user-space xv6/Unix service process that owns process state, program loading,
+and a filesystem image.
+
 
 ## Repository layout
 
@@ -235,18 +284,22 @@ microkernel/
 │       │   │                  #   256-bin runqueue + bitmap, init on Retype,
 │       │   │                  #   finalize on revoke
 │       │   └── asid.rs        # 64-entry ASID → root-PT-KVA table
-│       └── api/
-│           ├── thread.rs      # rootserver thread record (CSpace/VSpace/IPCBuf)
-│           ├── cspace.rs      # single-level CSpace lookup (CPtr → Cte*)
-│           ├── syscall.rs     # seL4_Call dispatch + error reply encoding +
-│           │                  #   Send/Recv slow-path on Notification caps
-│           └── invocation.rs  # Untyped_Retype, Page_Map, PageTable_Map, CNode
-│                              #   ops, isCapRevocable, finalize_cap(Frame/CNode)
+│       ├── api/
+│       │   ├── thread.rs      # rootserver thread record (CSpace/VSpace/IPCBuf)
+│       │   ├── cspace.rs      # single-level CSpace lookup (CPtr → Cte*)
+│       │   ├── syscall.rs     # seL4_Call dispatch + error reply encoding +
+│       │   │                  #   Send/Recv slow-path on Notification caps
+│       │   └── invocation.rs  # Untyped_Retype, Page_Map, PageTable_Map, CNode
+│       │                      #   ops, isCapRevocable, finalize_cap(Frame/CNode)
+│       └── xv6_compat.rs      # temporary single-process xv6 syscall shim
+├── third_party/
+│   └── xv6-riscv/             # upstream xv6 tree used for user programs
 └── tools/
-    ├── pack-image.sh      # rebuild Rust kernel + ninja repackage + emit image
-    ├── simulate.sh        # qemu wrapper (standalone or packed image)
-    └── run-tests.sh       # one-shot CI runner: boots image, watches for
-                           #   "Test suite passed", exits 0/1/2
+    ├── pack-image.sh              # rebuild Rust kernel + ninja repackage
+    ├── simulate.sh                # qemu wrapper (standalone or packed image)
+    ├── run-tests.sh               # CI runner for sel4test image
+    ├── build-xv6-user-rootserver.sh # link one xv6 user program as rootserver
+    └── run-xv6-user.sh            # pack + boot xv6 user-program smoke image
 ```
 
 ## Quick start
@@ -274,6 +327,10 @@ MODE=standalone ./tools/simulate.sh
 ./tools/run-tests.sh -v        # stream QEMU output as it runs
 TIMEOUT=60 ./tools/run-tests.sh
 SMP=2 TIMEOUT=480 ./tools/run-tests.sh  # SMP-compatible sel4test build
+
+# xv6 user-program smoke path:
+./tools/run-xv6-user.sh echo hello from xv6
+./tools/run-xv6-user.sh forktest
 ```
 
 ## Key ABI / layout constants (frozen against upstream)

@@ -28,9 +28,10 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SEL4_BUILD_DIR="${SEL4_BUILD_DIR:-/Users/wangfiox/sel4/sel4test/build-riscv64}"
 RUST_TARGET_DIR="${ROOT_DIR}/target/riscv64gc-unknown-none-elf/release"
 RUST_KERNEL_ELF="${RUST_TARGET_DIR}/kernel"
+ROOTSERVER_ELF="${ROOTSERVER_ELF:-}"
 
 OUT_DIR="${ROOT_DIR}/images"
-OUT_IMAGE="${OUT_DIR}/sel4test-driver-image-riscv-qemu-riscv-virt"
+OUT_IMAGE="${OUT_IMAGE:-${OUT_DIR}/sel4test-driver-image-riscv-qemu-riscv-virt}"
 
 log() { printf '[pack-image] %s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -42,30 +43,50 @@ log "building Rust kernel..."
 
 # 2. Sanity-check the seL4 build dir exists.
 [[ -d "${SEL4_BUILD_DIR}" ]] || die "SEL4_BUILD_DIR not found: ${SEL4_BUILD_DIR}"
-[[ -f "${SEL4_BUILD_DIR}/elfloader/rootserver" ]] || \
-    die "elfloader/rootserver missing — run upstream seL4 build first"
 [[ -f "${SEL4_BUILD_DIR}/kernel/kernel.dtb" ]] || \
     die "kernel/kernel.dtb missing — run upstream seL4 build first"
+if [[ -n "${ROOTSERVER_ELF}" && ! -f "${ROOTSERVER_ELF}" ]]; then
+    die "ROOTSERVER_ELF not found: ${ROOTSERVER_ELF}"
+fi
 
 # 3. Let upstream rebuild anything it thinks is stale before we inject the
 # Rust kernel. This intentionally goes all the way to the stock image target:
 # if CMake regeneration, rootserver relinks, or the C kernel strip rule need to
 # run, they must happen before we replace elfloader/kernel.elf.
+if [[ -z "${ROOTSERVER_ELF}" ]]; then
+    # A previous custom-rootserver run leaves elfloader/rootserver newer than
+    # the upstream copy. Remove it so the normal sel4test image can regenerate
+    # from the real rootserver instead of accidentally reusing the custom one.
+    rm -f "${SEL4_BUILD_DIR}/elfloader/rootserver"
+fi
 log "refreshing upstream image prerequisites..."
 (cd "${SEL4_BUILD_DIR}" && ninja images/sel4test-driver-image-riscv-qemu-riscv-virt)
+[[ -f "${SEL4_BUILD_DIR}/elfloader/rootserver" ]] || \
+    die "elfloader/rootserver missing after upstream refresh"
 
 # 4. Install our (stripped) kernel.elf where the elfloader cpio expects it.
 log "installing Rust kernel into elfloader staging..."
 STRIP="${STRIP:-riscv64-none-elf-strip}"
 TMP_STRIPPED="$(mktemp -t rust-kernel.elf.XXXXXX)"
-trap 'rm -f "${TMP_STRIPPED}"' EXIT
+TMP_ROOTSERVER_STRIPPED=""
+trap 'rm -f "${TMP_STRIPPED}" ${TMP_ROOTSERVER_STRIPPED:+"${TMP_ROOTSERVER_STRIPPED}"}' EXIT
 "${STRIP}" "${RUST_KERNEL_ELF}" -o "${TMP_STRIPPED}"
 install -m 0644 "${TMP_STRIPPED}" "${SEL4_BUILD_DIR}/elfloader/kernel.elf"
+
+if [[ -n "${ROOTSERVER_ELF}" ]]; then
+    log "installing custom rootserver: ${ROOTSERVER_ELF}"
+    TMP_ROOTSERVER_STRIPPED="$(mktemp -t rootserver.elf.XXXXXX)"
+    "${STRIP}" "${ROOTSERVER_ELF}" -o "${TMP_ROOTSERVER_STRIPPED}"
+    install -m 0644 "${TMP_ROOTSERVER_STRIPPED}" "${SEL4_BUILD_DIR}/elfloader/rootserver"
+fi
 
 # Bump mtime so ninja considers the C-kernel strip step up-to-date and doesn't
 # re-overwrite the staging file. The sleep avoids same-second filesystems.
 sleep 1
 touch "${SEL4_BUILD_DIR}/elfloader/kernel.elf"
+if [[ -n "${ROOTSERVER_ELF}" ]]; then
+    touch "${SEL4_BUILD_DIR}/elfloader/rootserver"
+fi
 
 # 5. Wipe downstream so ninja regenerates them from our kernel.elf.
 log "invalidating downstream artifacts..."
@@ -80,6 +101,9 @@ log "running ninja to re-pack image..."
 
 if ! cmp -s "${TMP_STRIPPED}" "${SEL4_BUILD_DIR}/elfloader/kernel.elf"; then
     die "elfloader/kernel.elf was overwritten after Rust injection"
+fi
+if [[ -n "${ROOTSERVER_ELF}" ]] && ! cmp -s "${TMP_ROOTSERVER_STRIPPED}" "${SEL4_BUILD_DIR}/elfloader/rootserver"; then
+    die "elfloader/rootserver was overwritten after custom rootserver injection"
 fi
 
 # 7. Copy into our local images/ directory.
