@@ -79,6 +79,8 @@ mod scause_code {
 
 const SIE_STIE: usize = 1 << 5;
 const TIMER_INTERVAL_TICKS: u64 = 20_000;
+const FAULT_CAP_FAULT: u64 = 1;
+const FAULT_UNKNOWN_SYSCALL: u64 = 2;
 const FAULT_USER_EXCEPTION: u64 = 3;
 const FAULT_VM_FAULT: u64 = 5;
 
@@ -145,7 +147,8 @@ pub extern "C" fn handle_trap_rust(uc: &mut UserContext) -> *mut UserContext {
     kernel_exit(uc)
 }
 
-fn fault_message(code: usize, stval: u64, uc: &UserContext) -> (u64, [u64; 4]) {
+fn fault_message(code: usize, stval: u64, uc: &UserContext) -> (u64, u64, [u64; 16]) {
+    let mut mrs = [0; 16];
     match code {
         1 | 5 | 7 | 12 | 13 | 15 => {
             let instruction_fault = matches!(code, 1 | 12) as u64;
@@ -155,15 +158,19 @@ fn fault_message(code: usize, stval: u64, uc: &UserContext) -> (u64, [u64; 4]) {
                 7 | 15 => 7,  // RISCVStoreAccessFault
                 _ => code as u64,
             };
-            (
-                FAULT_VM_FAULT,
-                [uc.pc, stval, instruction_fault, fsr],
-            )
+            mrs[0] = uc.pc;
+            mrs[1] = stval;
+            mrs[2] = instruction_fault;
+            mrs[3] = fsr;
+            (FAULT_VM_FAULT, 4, mrs)
         }
-        _ => (
-            FAULT_USER_EXCEPTION,
-            [uc.pc, uc.regs[reg::SP], code as u64, 0],
-        ),
+        _ => {
+            mrs[0] = uc.pc;
+            mrs[1] = uc.regs[reg::SP];
+            mrs[2] = code as u64;
+            mrs[3] = 0;
+            (FAULT_USER_EXCEPTION, 4, mrs)
+        }
     }
 }
 
@@ -199,30 +206,43 @@ fn send_fault_ipc(uc: &mut UserContext, code: usize, stval: u64) -> bool {
         return false;
     }
 
-    let (label, mrs) = fault_message(code, stval, uc);
-    uc.regs[reg::A0] = fault_ep_cptr;
-    uc.regs[reg::A1] = MessageInfo::new(label, 0, 0, 4).0;
-    uc.regs[reg::A2] = mrs[0];
-    uc.regs[reg::A3] = mrs[1];
-    uc.regs[reg::A4] = mrs[2];
-    uc.regs[reg::A5] = mrs[3];
-
+    let (label, len, mrs) = fault_message(code, stval, uc);
     unsafe {
+        (*cur).sender_is_fault = 1;
+        (*cur).fault_label = label;
+        (*cur).fault_len = len;
+        (*cur).fault_mrs = mrs;
         match (*ep).state() {
             EpState::Receiving => {
                 let receiver = endpoint::pop_head(ep);
                 if receiver.is_null() {
-                    block_fault_sender(cur, ep, handler_cap.endpoint_badge());
+                    block_fault_sender(
+                        cur,
+                        ep,
+                        handler_cap.endpoint_badge(),
+                        handler_cap.endpoint_can_grant(),
+                        handler_cap.endpoint_can_grant_reply(),
+                        label,
+                        len,
+                        mrs,
+                    );
                     return true;
                 }
                 (*receiver).context.regs[reg::A0] = handler_cap.endpoint_badge();
-                (*receiver).context.regs[reg::A1] = uc.regs[reg::A1];
+                (*receiver).context.regs[reg::A1] = MessageInfo::new(label, 0, 0, len).0;
                 (*receiver).context.regs[reg::A2] = mrs[0];
                 (*receiver).context.regs[reg::A3] = mrs[1];
                 (*receiver).context.regs[reg::A4] = mrs[2];
                 (*receiver).context.regs[reg::A5] = mrs[3];
+                if len > 4 && (*receiver).ipc_buffer_kva != 0 {
+                    let rbuf = (*receiver).ipc_buffer_kva as *mut u64;
+                    for i in 4..len as usize {
+                        *rbuf.add(1 + i) = mrs[i];
+                    }
+                }
                 (*receiver).waiting_on = 0;
                 (*receiver).caller = cur as u64;
+                (*receiver).caller_can_grant = handler_cap.endpoint_can_grant() as u8;
                 (*receiver).state = ThreadState::Running as u8;
                 tcb::enqueue(receiver);
 
@@ -231,7 +251,131 @@ fn send_fault_ipc(uc: &mut UserContext, code: usize, stval: u64) -> bool {
                 (*cur).waiting_on = 0;
             }
             EpState::Idle | EpState::Sending => {
-                block_fault_sender(cur, ep, handler_cap.endpoint_badge());
+                block_fault_sender(
+                    cur,
+                    ep,
+                    handler_cap.endpoint_badge(),
+                    handler_cap.endpoint_can_grant(),
+                    handler_cap.endpoint_can_grant_reply(),
+                    label,
+                    len,
+                    mrs,
+                );
+            }
+        }
+    }
+    true
+}
+
+pub fn send_cap_fault_ipc(uc: &mut UserContext, addr: u64, in_recv_phase: bool) -> bool {
+    let mut mrs = [0; 16];
+    mrs[0] = uc.pc;
+    mrs[1] = addr;
+    mrs[2] = in_recv_phase as u64;
+    mrs[3] = 1; // MissingCapability-style lookup failure.
+    mrs[4] = 0; // BitsLeft.
+    send_synthetic_fault_ipc(FAULT_CAP_FAULT, 5, mrs)
+}
+
+fn send_unknown_syscall_fault(uc: &mut UserContext, sysno: SyscallNo) -> bool {
+    let mut mrs = [0; 16];
+    mrs[0] = uc.pc.wrapping_sub(4);
+    mrs[1] = uc.regs[reg::SP];
+    mrs[2] = uc.regs[reg::RA];
+    mrs[3] = uc.regs[reg::A0];
+    mrs[4] = uc.regs[reg::A1];
+    mrs[5] = uc.regs[reg::A2];
+    mrs[6] = uc.regs[reg::A3];
+    mrs[7] = uc.regs[reg::A4];
+    mrs[8] = uc.regs[reg::A5];
+    mrs[9] = uc.regs[reg::A6];
+    mrs[10] = sysno as u64;
+    send_synthetic_fault_ipc(FAULT_UNKNOWN_SYSCALL, 11, mrs)
+}
+
+fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: [u64; 16]) -> bool {
+    use crate::object::cap::CapTag;
+    use crate::object::endpoint::{self, EpState};
+    use crate::object::tcb::{self, ThreadState};
+
+    let cur = tcb::current();
+    if cur.is_null() {
+        return false;
+    }
+    let fault_ep_cptr = unsafe { (*cur).fault_ep_cptr };
+    if fault_ep_cptr == 0 {
+        return false;
+    }
+    let thread = unsafe { crate::api::thread::current() };
+    let (handler_cap, _) = match crate::api::cspace::lookup_cap(thread, fault_ep_cptr) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    if handler_cap.tag() != Some(CapTag::Endpoint)
+        || !handler_cap.endpoint_can_send()
+        || !(handler_cap.endpoint_can_grant() || handler_cap.endpoint_can_grant_reply())
+    {
+        return false;
+    }
+    let ep = handler_cap.endpoint_ptr() as *mut endpoint::Endpoint;
+    if ep.is_null() {
+        return false;
+    }
+
+    unsafe {
+        (*cur).sender_is_fault = 1;
+        (*cur).fault_label = label;
+        (*cur).fault_len = len;
+        (*cur).fault_mrs = mrs;
+        match (*ep).state() {
+            EpState::Receiving => {
+                let receiver = endpoint::pop_head(ep);
+                if receiver.is_null() {
+                    block_fault_sender(
+                        cur,
+                        ep,
+                        handler_cap.endpoint_badge(),
+                        handler_cap.endpoint_can_grant(),
+                        handler_cap.endpoint_can_grant_reply(),
+                        label,
+                        len,
+                        mrs,
+                    );
+                    return true;
+                }
+                (*receiver).context.regs[reg::A0] = handler_cap.endpoint_badge();
+                (*receiver).context.regs[reg::A1] = MessageInfo::new(label, 0, 0, len).0;
+                let mr_reg_n = len.min(4) as usize;
+                for i in 0..mr_reg_n {
+                    (*receiver).context.regs[reg::A2 + i] = mrs[i];
+                }
+                if len > 4 && (*receiver).ipc_buffer_kva != 0 {
+                    let rbuf = (*receiver).ipc_buffer_kva as *mut u64;
+                    for i in 4..len as usize {
+                        *rbuf.add(1 + i) = mrs[i];
+                    }
+                }
+                (*receiver).waiting_on = 0;
+                (*receiver).caller = cur as u64;
+                (*receiver).caller_can_grant = handler_cap.endpoint_can_grant() as u8;
+                (*receiver).state = ThreadState::Running as u8;
+                tcb::enqueue(receiver);
+
+                tcb::dequeue(cur);
+                (*cur).state = ThreadState::BlockedOnReply as u8;
+                (*cur).waiting_on = 0;
+            }
+            EpState::Idle | EpState::Sending => {
+                block_fault_sender(
+                    cur,
+                    ep,
+                    handler_cap.endpoint_badge(),
+                    handler_cap.endpoint_can_grant(),
+                    handler_cap.endpoint_can_grant_reply(),
+                    label,
+                    len,
+                    mrs,
+                );
             }
         }
     }
@@ -242,6 +386,11 @@ unsafe fn block_fault_sender(
     cur: *mut crate::object::tcb::Tcb,
     ep: *mut crate::object::endpoint::Endpoint,
     badge: u64,
+    can_grant: bool,
+    can_grant_reply: bool,
+    label: u64,
+    len: u64,
+    mrs: [u64; 16],
 ) {
     use crate::object::endpoint::{self, EpState};
     use crate::object::tcb::{self, ThreadState};
@@ -251,7 +400,13 @@ unsafe fn block_fault_sender(
         (*cur).state = ThreadState::BlockedOnSend as u8;
         (*cur).waiting_on = ep as u64;
         (*cur).sender_badge = badge;
+        (*cur).sender_can_grant = if can_grant { 1 } else { 0 };
+        (*cur).sender_can_grant_reply = if can_grant_reply { 1 } else { 0 };
         (*cur).sender_is_call = 1;
+        (*cur).sender_is_fault = 1;
+        (*cur).fault_label = label;
+        (*cur).fault_len = len;
+        (*cur).fault_mrs = mrs;
         endpoint::enqueue_waiter(ep, cur, EpState::Sending);
     }
 }
@@ -450,14 +605,16 @@ fn handle_syscall(uc: &mut UserContext) {
             panic!("unimplemented syscall {}", n);
         }
         n => {
-            crate::println!(
-                "unknown syscall number {} (regs: a0={:#x} a1={:#x} a7={:#x})",
-                n,
-                uc.regs[reg::A0],
-                uc.regs[reg::A1],
-                uc.regs[reg::A7]
-            );
-            panic!("unknown syscall {}", n);
+            if !send_unknown_syscall_fault(uc, n) {
+                crate::println!(
+                    "unknown syscall number {} (regs: a0={:#x} a1={:#x} a7={:#x})",
+                    n,
+                    uc.regs[reg::A0],
+                    uc.regs[reg::A1],
+                    uc.regs[reg::A7]
+                );
+                park_current_thread();
+            }
         }
     }
 }

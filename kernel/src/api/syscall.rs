@@ -88,12 +88,16 @@ pub fn do_call(uc: &mut UserContext) {
         }
         Some(CapTag::Null) => Err(SyscallError::InvalidCapability),
         Some(CapTag::Domain) => invocation::handle_domain(t, cap, label, info.length(), uc),
-        Some(CapTag::IrqControl) | Some(CapTag::AsidControl) | Some(CapTag::AsidPool) => {
+        Some(CapTag::AsidControl) => {
+            invocation::handle_asid_control(t, cap, label, info.length(), uc)
+        }
+        Some(CapTag::AsidPool) => {
+            invocation::handle_asid_pool(t, cap, label, info.length(), uc)
+        }
+        Some(CapTag::IrqControl) => {
             // Still-stubbed cap kinds: report success so the rootserver's
             // optional features fail soft instead of aborting. Each of
             // these will become its own `handle_*` in M4.
-            //   - AsidPool_Assign: needed by `assign_asid_pool`
-            //   - Domain_Set:      single-domain build, nothing to do
             //   - IrqControl_Get:  unblocks `seL4_IRQControl_Get`
             Ok(())
         }
@@ -132,7 +136,7 @@ fn write_error_reply(uc: &mut UserContext, e: SyscallError) {
 pub fn do_send(uc: &mut UserContext, nb: bool) {
     let cptr = uc.regs[reg::A0];
     let t = unsafe { thread::current() };
-    let (cap, _slot) = match lookup_cap(t, cptr) {
+    let (cap, slot) = match lookup_cap(t, cptr) {
         Ok(v) => v,
         Err(_) => return,
     };
@@ -151,6 +155,14 @@ pub fn do_send(uc: &mut UserContext, nb: bool) {
         Some(CapTag::Endpoint) => {
             crate::api::ipc::send(uc, !nb);
         }
+        Some(CapTag::Reply) => unsafe {
+            let caller = cap.reply_tcb_ptr() as *mut crate::object::tcb::Tcb;
+            crate::api::ipc::reply_to_tcb(uc, caller);
+            if !caller.is_null() && (*caller).reply_slot == slot as u64 {
+                (*caller).reply_slot = 0;
+            }
+            (*slot).cap = crate::object::cap::Cap::null();
+        },
         _ => {}
     }
 }

@@ -164,6 +164,7 @@ unsafe fn is_mdb_parent_of(a: *mut Cte, b: *mut Cte) -> bool {
                 CapTag::Thread => (cap_b.thread_ptr(), 11),
                 CapTag::Endpoint => (cap_b.endpoint_ptr(), 4),
                 CapTag::Notification => (cap_b.notification_ptr(), 6),
+                CapTag::AsidPool => (cap_b.asid_pool_ptr(), 12),
                 _ => return false,
             };
             let b_top = b_base + (1u64 << b_size_bits) - 1;

@@ -8,7 +8,8 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::abi::constants::{
-    KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE, PPTR_TOP, RISCV_PG_SHIFT,
+    KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE, PPTR_TOP, PT_INDEX_BITS,
+    RISCV_PG_SHIFT,
 };
 use crate::arch::riscv64::csr;
 use crate::arch::riscv64::sv39::{
@@ -227,6 +228,81 @@ pub unsafe fn map_user_4k(root: *mut PageTable, vaddr: usize, paddr: usize, mut 
     }
 }
 
+#[inline]
+pub const fn frame_size_bytes(size_class: u64) -> usize {
+    match size_class {
+        1 => 1 << (RISCV_PG_SHIFT + PT_INDEX_BITS),
+        2 => 1 << (RISCV_PG_SHIFT + PT_INDEX_BITS * 2),
+        _ => PAGE_SIZE,
+    }
+}
+
+/// Map a RISC-V frame cap at its natural Sv39 level:
+///
+/// * size class 0: 4 KiB leaf at level 0
+/// * size class 1: 2 MiB leaf at level 1
+/// * size class 2: 1 GiB leaf at level 2
+pub unsafe fn map_user_frame(
+    root: *mut PageTable,
+    vaddr: usize,
+    paddr: usize,
+    size_class: u64,
+    flags: u64,
+) {
+    match size_class {
+        0 => unsafe { map_user_4k(root, vaddr, paddr, flags) },
+        1 | 2 => unsafe { map_user_leaf(root, vaddr, paddr, size_class as usize, flags) },
+        _ => unsafe { map_user_4k(root, vaddr, paddr, flags) },
+    }
+}
+
+unsafe fn map_user_leaf(
+    root: *mut PageTable,
+    vaddr: usize,
+    paddr: usize,
+    level: usize,
+    mut flags: u64,
+) {
+    let size = 1usize << (RISCV_PG_SHIFT + PT_INDEX_BITS * level);
+    debug_assert!(vaddr & (size - 1) == 0, "vaddr not frame-aligned");
+    debug_assert!(paddr & (size - 1) == 0, "paddr not frame-aligned");
+    flags |= PTE_U | PTE_V | PTE_A | PTE_D;
+
+    let mut pt = root;
+    for walk_level in ((level + 1)..=2).rev() {
+        let i = pt_index(vaddr, walk_level);
+        let entry = unsafe { (*pt).entries[i] };
+        let next_pt = if !entry.is_valid() {
+            let new_pt = alloc_pt_page();
+            let new_pt_pa = kpptr_to_paddr(new_pt as usize) as u64;
+            unsafe {
+                (*pt).entries[i] = Pte::next(new_pt_pa);
+            }
+            new_pt
+        } else if entry.is_leaf() {
+            panic!(
+                "map_user_frame: leaf collision at level {} for VA {:#x}",
+                walk_level, vaddr
+            );
+        } else {
+            paddr_to_kpptr(entry.next_pt_paddr() as usize) as *mut PageTable
+        };
+        pt = next_pt;
+    }
+
+    let i = pt_index(vaddr, level);
+    let entry = unsafe { (*pt).entries[i] };
+    if entry.is_valid() && !entry.is_leaf() {
+        panic!(
+            "map_user_frame: page-table collision at level {} for VA {:#x}",
+            level, vaddr
+        );
+    }
+    unsafe {
+        (*pt).entries[i] = Pte::leaf(paddr as u64, flags);
+    }
+}
+
 /// Remove the 4 KiB user mapping at `vaddr` if present and trim any
 /// interior PT levels that become empty as a result.  Returns the
 /// physical address the page used to map to, or `None` if no mapping
@@ -288,6 +364,70 @@ pub unsafe fn unmap_user_4k(root: *mut PageTable, vaddr: usize) -> Option<usize>
             (*parent).entries[parent_i] = Pte::NULL;
             free_pt_page(child);
         }
+    }
+    Some(pa)
+}
+
+/// Remove a user frame mapping at the natural Sv39 level for the cap's
+/// size class, pruning now-empty boot-pool page-table pages on the way
+/// back up.
+pub unsafe fn unmap_user_frame(
+    root: *mut PageTable,
+    vaddr: usize,
+    size_class: u64,
+) -> Option<usize> {
+    match size_class {
+        0 => unsafe { unmap_user_4k(root, vaddr) },
+        1 | 2 => unsafe { unmap_user_leaf(root, vaddr, size_class as usize) },
+        _ => unsafe { unmap_user_4k(root, vaddr) },
+    }
+}
+
+unsafe fn unmap_user_leaf(
+    root: *mut PageTable,
+    vaddr: usize,
+    level: usize,
+) -> Option<usize> {
+    let size = 1usize << (RISCV_PG_SHIFT + PT_INDEX_BITS * level);
+    debug_assert!(vaddr & (size - 1) == 0, "vaddr not frame-aligned");
+
+    let mut pts: [*mut PageTable; 3] = [core::ptr::null_mut(); 3];
+    pts[2] = root;
+    let mut pt = root;
+    for walk_level in ((level + 1)..=2).rev() {
+        let i = pt_index(vaddr, walk_level);
+        let entry = unsafe { (*pt).entries[i] };
+        if !entry.is_valid() || entry.is_leaf() {
+            return None;
+        }
+        pt = paddr_to_kpptr(entry.next_pt_paddr() as usize) as *mut PageTable;
+        pts[walk_level - 1] = pt;
+    }
+
+    let i = pt_index(vaddr, level);
+    let entry = unsafe { (*pt).entries[i] };
+    if !entry.is_valid() || !entry.is_leaf() {
+        return None;
+    }
+    let pa = entry.leaf_pa() as usize;
+    unsafe {
+        (*pt).entries[i] = Pte::NULL;
+    }
+    csr::sfence_vma_va(vaddr);
+
+    let mut child_level = level;
+    while child_level < 2 {
+        let child = pts[child_level];
+        if child.is_null() || unsafe { !pt_is_empty(child) } {
+            break;
+        }
+        let parent = pts[child_level + 1];
+        let parent_i = pt_index(vaddr, child_level + 1);
+        unsafe {
+            (*parent).entries[parent_i] = Pte::NULL;
+            free_pt_page(child);
+        }
+        child_level += 1;
     }
     Some(pa)
 }

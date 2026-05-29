@@ -175,10 +175,13 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
             64 - ROOT_CNODE_SIZE_BITS as u64,
         ),
     );
+    let mut init_vspace_cap = Cap::new_page_table(root_pt as u64);
+    init_vspace_cap.set_page_table_mapped_asid(1);
+    crate::object::asid::init_root(root_pt as u64);
     install_initial_cap(
         cnode,
         bi_slot::CAP_INIT_THREAD_VSPACE as usize,
-        Cap::new_page_table(root_pt as u64),
+        init_vspace_cap,
     );
     install_initial_cap(
         cnode,
@@ -366,7 +369,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     unsafe {
         let rs = &raw mut ROOTSERVER_TCB;
         (*rs).cspace_cap = cnode_cap_for_thread;
-        (*rs).vspace_cap = Cap::new_page_table(root_pt as u64);
+        (*rs).vspace_cap = init_vspace_cap;
         (*rs).ipc_buffer_uva = USER_IPC_BUFFER_VA as u64;
         (*rs).ipc_buffer_kva = ipc_kva as u64;
         // The IPC-buffer Frame cap isn't required by `do_recv`'s MR

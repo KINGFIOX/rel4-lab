@@ -259,6 +259,16 @@ impl Cap {
         c
     }
 
+    #[inline]
+    pub const fn asid_pool_base(self) -> u16 {
+        ((self.words[0] >> 43) & 0xFFFF) as u16
+    }
+
+    #[inline]
+    pub const fn asid_pool_ptr(self) -> u64 {
+        sign_extend_ptr((self.words[0] & 0x1F_FFFF_FFFF) << 2)
+    }
+
     // ---- Frame cap (RISC-V 4K/Mega/Giga) ----------------------------------
     //
     // words[0]: [tag:59..64] [capFSize:57..59] [capFVMRights:55..57]
@@ -325,6 +335,29 @@ impl Cap {
     }
 
     #[inline]
+    pub fn set_page_table_mapped_asid(&mut self, asid: u16) {
+        self.words[0] |= 1u64 << 39;
+        self.words[1] &= !(0xFFFFu64 << 48);
+        self.words[1] |= ((asid as u64) & 0xFFFF) << 48;
+    }
+
+    #[inline]
+    pub const fn page_table_mapped_asid(self) -> u16 {
+        ((self.words[1] >> 48) & 0xFFFF) as u16
+    }
+
+    #[inline]
+    pub const fn page_table_is_mapped(self) -> bool {
+        ((self.words[0] >> 39) & 0x1) != 0
+    }
+
+    #[inline]
+    pub fn clear_page_table_mapping(&mut self) {
+        self.words[0] &= !(1u64 << 39);
+        self.words[1] &= !(0xFFFFu64 << 48);
+    }
+
+    #[inline]
     pub const fn page_table_base_ptr(self) -> u64 {
         sign_extend_ptr((self.words[1] >> 9) & PTR_LOW_MASK)
     }
@@ -377,6 +410,16 @@ impl Cap {
     }
 
     #[inline]
+    pub const fn new_reply(tcb_ptr: u64, can_grant: bool, master: bool) -> Cap {
+        let mut c = Cap::null();
+        c.words[0] = ((CapTag::Reply as u64) << 59)
+            | (((can_grant as u64) & 0x1) << 1)
+            | ((master as u64) & 0x1);
+        c.words[1] = tcb_ptr;
+        c
+    }
+
+    #[inline]
     pub const fn endpoint_ptr(self) -> u64 {
         sign_extend_ptr(self.words[0] & PTR_LOW_MASK)
     }
@@ -408,6 +451,16 @@ impl Cap {
     #[inline]
     pub const fn endpoint_can_grant_reply(self) -> bool {
         (self.words[0] >> 58) & 1 != 0
+    }
+
+    #[inline]
+    pub const fn reply_tcb_ptr(self) -> u64 {
+        self.words[1]
+    }
+
+    #[inline]
+    pub const fn reply_can_grant(self) -> bool {
+        (self.words[0] >> 1) & 1 != 0
     }
 
     #[inline]

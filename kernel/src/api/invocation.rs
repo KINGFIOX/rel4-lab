@@ -132,6 +132,8 @@ pub fn handle_untyped(
     let obj_bits = object_size_bits(new_type, user_size).ok_or(SyscallError::IllegalOperation)?;
 
     if node_window < 1 || node_window > 256 {
+        uc.regs[reg::A2] = 1;
+        uc.regs[reg::A3] = 256;
         return Err(SyscallError::RangeError);
     }
 
@@ -157,9 +159,13 @@ pub fn handle_untyped(
     }
     let dest_radix = dest_cnode_cap.cnode_radix();
     if node_offset >= (1u64 << dest_radix) {
+        uc.regs[reg::A2] = 0;
+        uc.regs[reg::A3] = (1u64 << dest_radix) - 1;
         return Err(SyscallError::RangeError);
     }
     if node_window > (1u64 << dest_radix) - node_offset {
+        uc.regs[reg::A2] = 1;
+        uc.regs[reg::A3] = (1u64 << dest_radix) - node_offset;
         return Err(SyscallError::RangeError);
     }
     let dest_base_kva = dest_cnode_cap.cnode_ptr();
@@ -333,10 +339,11 @@ pub fn handle_frame(
             // case (table exhausted).
             let asid = crate::object::asid::assign(root_pt_kva);
             unsafe {
-                vspace::map_user_4k(
+                vspace::map_user_frame(
                     root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
                     vaddr as usize,
                     frame_pa as usize,
+                    cap.frame_size(),
                     vspace::user_flags(can_read, can_write, !exec_never),
                 );
                 (*_slot).cap.set_frame_mapped_addr(vaddr);
@@ -362,9 +369,10 @@ pub fn handle_frame(
                 return Ok(());
             }
             unsafe {
-                let _ = vspace::unmap_user_4k(
+                let _ = vspace::unmap_user_frame(
                     root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
                     frame_va as usize,
+                    cap.frame_size(),
                 );
                 (*_slot).cap.set_frame_mapped_addr(0);
                 (*_slot).cap.set_frame_mapped_asid(0);
@@ -415,6 +423,104 @@ pub fn handle_page_table(
             Err(SyscallError::IllegalOperation)
         }
     }
+}
+
+pub fn handle_asid_control(
+    thread: &Thread,
+    _cap: Cap,
+    label_id: u64,
+    length: u64,
+    uc: &UserContext,
+) -> Result<(), SyscallError> {
+    const RISCV_ASID_CONTROL_MAKE_POOL: u64 = 38;
+    if label_id != RISCV_ASID_CONTROL_MAKE_POOL {
+        return Err(SyscallError::IllegalOperation);
+    }
+    if length < 2 {
+        return Err(SyscallError::TruncatedMessage);
+    }
+
+    let untyped_cptr = read_extra_cap(thread, 0);
+    let root_cptr = read_extra_cap(thread, 1);
+    let (untyped_cap, untyped_slot) =
+        cspace::lookup_cap(thread, untyped_cptr).map_err(|_| SyscallError::InvalidCapability)?;
+    if untyped_cap.tag() != Some(CapTag::Untyped) {
+        return Err(SyscallError::InvalidCapability);
+    }
+    let (root_cap, _) =
+        cspace::lookup_cap(thread, root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
+    if root_cap.tag() != Some(CapTag::CNode) {
+        return Err(SyscallError::InvalidCapability);
+    }
+    if untyped_cap.untyped_block_size_bits() != crate::abi::constants::SEL4_ASID_POOL_BITS as u64
+        || untyped_cap.untyped_is_device()
+    {
+        return Err(SyscallError::InvalidCapability);
+    }
+    unsafe {
+        if crate::object::cnode::mdb_has_children(untyped_slot) {
+            return Err(SyscallError::RevokeFirst);
+        }
+    }
+
+    let dest_index = uc.regs[reg::A2];
+    let dest_depth = uc.regs[reg::A3] as u32 & 0xff;
+    let dest = resolve_slot(root_cap, dest_index, dest_depth)?;
+    unsafe {
+        if !(*dest).cap.is_null() {
+            return Err(SyscallError::DeleteFirst);
+        }
+        let pool_ptr = untyped_cap.untyped_ptr();
+        let base = crate::object::asid::alloc_pool_base(pool_ptr).ok_or(SyscallError::DeleteFirst)?;
+        ptr::write_bytes(
+            pool_ptr as *mut u8,
+            0,
+            1usize << crate::abi::constants::SEL4_ASID_POOL_BITS,
+        );
+        (*dest).cap = Cap::new_asid_pool(base as u64, pool_ptr);
+        (*dest).mdb = MdbNode::new(0, 0, true, true);
+        crate::object::cnode::mdb_insert_after(untyped_slot, dest);
+        // Make sure the backing untyped looks fully consumed, just like
+        // the C kernel's `performASIDControlInvocation`.
+        let s = &mut *untyped_slot;
+        s.cap.set_untyped_free_index(1u64 << (crate::abi::constants::SEL4_ASID_POOL_BITS - 4));
+    }
+    Ok(())
+}
+
+pub fn handle_asid_pool(
+    thread: &Thread,
+    cap: Cap,
+    label_id: u64,
+    _length: u64,
+    _uc: &UserContext,
+) -> Result<(), SyscallError> {
+    const RISCV_ASID_POOL_ASSIGN: u64 = 39;
+    if label_id != RISCV_ASID_POOL_ASSIGN {
+        return Err(SyscallError::IllegalOperation);
+    }
+
+    let vspace_cptr = read_extra_cap(thread, 0);
+    let (vspace_cap, vspace_slot) =
+        cspace::lookup_cap(thread, vspace_cptr).map_err(|_| SyscallError::InvalidCapability)?;
+    if vspace_cap.tag() != Some(CapTag::PageTable) {
+        return Err(SyscallError::InvalidCapability);
+    }
+    if vspace_cap.page_table_is_mapped() || vspace_cap.page_table_mapped_asid() != 0 {
+        return Err(SyscallError::InvalidCapability);
+    }
+
+    let root_pt_kva = vspace_cap.page_table_base_ptr();
+    let asid = crate::object::asid::assign_from_pool(
+        cap.asid_pool_base(),
+        cap.asid_pool_ptr(),
+        root_pt_kva,
+    )
+        .ok_or(SyscallError::DeleteFirst)?;
+    unsafe {
+        (*vspace_slot).cap.set_page_table_mapped_asid(asid);
+    }
+    Ok(())
 }
 
 /// DomainSet invocations.
@@ -605,7 +711,14 @@ pub fn handle_thread(
                 return Err(SyscallError::TruncatedMessage);
             }
             let prio = uc.regs[reg::A2];
-            if prio > 255 {
+            let auth_cap = lookup_extra_cap(thread, 0)?;
+            require_tag(auth_cap, CapTag::Thread)?;
+            let auth_tcb = tcb::from_cap(auth_cap);
+            if auth_tcb.is_null() {
+                return Err(SyscallError::InvalidCapability);
+            }
+            let auth_mcp = unsafe { (*auth_tcb).mcp as u64 };
+            if prio > 255 || prio > auth_mcp {
                 return Err(SyscallError::RangeError);
             }
             unsafe { tcb::set_priority(tcb_ptr, prio as u8) };
@@ -617,7 +730,14 @@ pub fn handle_thread(
                 return Err(SyscallError::TruncatedMessage);
             }
             let mcp = uc.regs[reg::A2];
-            if mcp > 255 {
+            let auth_cap = lookup_extra_cap(thread, 0)?;
+            require_tag(auth_cap, CapTag::Thread)?;
+            let auth_tcb = tcb::from_cap(auth_cap);
+            if auth_tcb.is_null() {
+                return Err(SyscallError::InvalidCapability);
+            }
+            let auth_mcp = unsafe { (*auth_tcb).mcp as u64 };
+            if mcp > 255 || mcp > auth_mcp {
                 return Err(SyscallError::RangeError);
             }
             unsafe { tcb::set_mcp(tcb_ptr, mcp as u8) };
@@ -632,7 +752,14 @@ pub fn handle_thread(
             }
             let mcp = uc.regs[reg::A2];
             let prio = uc.regs[reg::A3];
-            if mcp > 255 || prio > 255 {
+            let auth_cap = lookup_extra_cap(thread, 0)?;
+            require_tag(auth_cap, CapTag::Thread)?;
+            let auth_tcb = tcb::from_cap(auth_cap);
+            if auth_tcb.is_null() {
+                return Err(SyscallError::InvalidCapability);
+            }
+            let auth_mcp = unsafe { (*auth_tcb).mcp as u64 };
+            if mcp > 255 || prio > 255 || mcp > auth_mcp || prio > auth_mcp {
                 return Err(SyscallError::RangeError);
             }
             unsafe {
@@ -1141,10 +1268,19 @@ fn cnode_op_save_caller(
         if !(*dest).cap.is_null() {
             return Err(SyscallError::DeleteFirst);
         }
+        let cur = crate::object::tcb::current();
+        if cur.is_null() || (*cur).caller == 0 {
+            return Ok(());
+        }
+        let caller = (*cur).caller as *mut crate::object::tcb::Tcb;
+        (*dest).cap = Cap::new_reply((*cur).caller, (*cur).caller_can_grant != 0, false);
+        (*dest).mdb = MdbNode::new(0, 0, true, true);
+        if !caller.is_null() {
+            (*caller).reply_slot = dest as u64;
+        }
+        (*cur).caller = 0;
+        (*cur).caller_can_grant = 0;
     }
-    // No real reply-cap object yet — we don't track caller via a CTE,
-    // so there's nothing to move. Returning Ok matches the C kernel's
-    // "Reply cap not present" branch, which is also a successful no-op.
     Ok(())
 }
 
@@ -1197,7 +1333,7 @@ fn cnode_op_copy_or_mint(
     let dest_depth = uc.regs[reg::A3] as u32 & 0xff;
     let src_index = uc.regs[reg::A4];
     let src_depth = uc.regs[reg::A5] as u32 & 0xff;
-    let _rights = read_mr(thread, uc, 4);
+    let rights = read_mr(thread, uc, 4);
     let badge = if is_mint { read_mr(thread, uc, 5) } else { 0 };
 
     let src_root_cptr = read_extra_cap(thread, 0);
@@ -1219,7 +1355,7 @@ fn cnode_op_copy_or_mint(
             return Err(SyscallError::FailedLookup);
         }
         let src_cap = (*src).cap;
-        let mut new_cap = src_cap;
+        let mut new_cap = mask_cap_rights(src_cap, rights);
         if is_mint {
             new_cap = apply_badge(new_cap, badge);
         }
@@ -1254,13 +1390,51 @@ fn is_pspace_kva(va: u64) -> bool {
 fn is_cap_revocable(new_cap: Cap, src_cap: Cap) -> bool {
     match new_cap.tag() {
         // Arch caps (Frame / PageTable / ASIDPool / …) are never revocable.
-        Some(CapTag::Frame) | Some(CapTag::PageTable) => false,
+        Some(CapTag::Frame) | Some(CapTag::PageTable) | Some(CapTag::AsidPool) => false,
         Some(CapTag::Untyped) => true,
         Some(CapTag::Endpoint) => new_cap.endpoint_badge() != src_cap.endpoint_badge(),
         Some(CapTag::Notification) => new_cap.notification_badge() != src_cap.notification_badge(),
         Some(CapTag::IrqHandler) => src_cap.tag() == Some(CapTag::IrqControl),
         _ => false,
     }
+}
+
+/// Apply `seL4_CapRights_t` to caps produced by CNode Copy/Mint. The
+/// packed rights bits are:
+///   bit 0: allow write, bit 1: allow read,
+///   bit 2: allow grant, bit 3: allow grant-reply.
+fn mask_cap_rights(mut cap: Cap, rights: u64) -> Cap {
+    let allow_write = (rights & 0x1) != 0;
+    let allow_read = (rights & 0x2) != 0;
+    let allow_grant = (rights & 0x4) != 0;
+    let allow_grant_reply = (rights & 0x8) != 0;
+
+    match cap.tag() {
+        Some(CapTag::Endpoint) => {
+            if !allow_write {
+                cap.words[0] &= !(1u64 << 55);
+            }
+            if !allow_read {
+                cap.words[0] &= !(1u64 << 56);
+            }
+            if !allow_grant {
+                cap.words[0] &= !(1u64 << 57);
+            }
+            if !allow_grant_reply {
+                cap.words[0] &= !(1u64 << 58);
+            }
+        }
+        Some(CapTag::Notification) => {
+            if !allow_write {
+                cap.words[0] &= !(1u64 << 57);
+            }
+            if !allow_read {
+                cap.words[0] &= !(1u64 << 58);
+            }
+        }
+        _ => {}
+    }
+    cap
 }
 
 fn cnode_op_move_or_mutate(
@@ -1418,6 +1592,9 @@ fn same_object_as(a: Cap, b: Cap) -> bool {
         (Some(CapTag::PageTable), Some(CapTag::PageTable)) => {
             a.page_table_base_ptr() == b.page_table_base_ptr()
         }
+        (Some(CapTag::AsidPool), Some(CapTag::AsidPool)) => {
+            a.asid_pool_ptr() == b.asid_pool_ptr()
+        }
         (Some(CapTag::Frame), Some(CapTag::Frame)) => {
             a.frame_base_ptr() == b.frame_base_ptr() && a.frame_size() == b.frame_size()
         }
@@ -1450,14 +1627,28 @@ fn finalize_cap(cap: &mut Cap, is_final: bool) {
                 let root_pt_kva = crate::object::asid::lookup(asid);
                 if root_pt_kva != 0 {
                     unsafe {
-                        let _ = crate::arch::riscv64::vspace::unmap_user_4k(
+                        let _ = crate::arch::riscv64::vspace::unmap_user_frame(
                             root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
                             va as usize,
+                            cap.frame_size(),
                         );
                     }
                 }
                 cap.set_frame_mapped_addr(0);
                 cap.set_frame_mapped_asid(0);
+            }
+        }
+        Some(CapTag::PageTable) => {
+            if is_final && cap.page_table_is_mapped() {
+                let asid = cap.page_table_mapped_asid();
+                let root_pt_kva = cap.page_table_base_ptr();
+                crate::object::asid::delete(asid, root_pt_kva);
+                cap.clear_page_table_mapping();
+            }
+        }
+        Some(CapTag::AsidPool) => {
+            if is_final {
+                crate::object::asid::delete_pool(cap.asid_pool_base(), cap.asid_pool_ptr());
             }
         }
         Some(CapTag::Thread) => {
@@ -1469,6 +1660,14 @@ fn finalize_cap(cap: &mut Cap, is_final: bool) {
             if p != 0 && is_pspace_kva(p) {
                 unsafe {
                     crate::object::tcb::finalize(p as *mut crate::object::tcb::Tcb);
+                }
+            }
+        }
+        Some(CapTag::Reply) => {
+            let caller = cap.reply_tcb_ptr() as *mut crate::object::tcb::Tcb;
+            if !caller.is_null() {
+                unsafe {
+                    (*caller).reply_slot = 0;
                 }
             }
         }
@@ -1512,6 +1711,9 @@ fn finalize_cap(cap: &mut Cap, is_final: bool) {
             }
         }
         Some(CapTag::CNode) => {
+            if !is_final {
+                return;
+            }
             // Mirrors the C kernel `finaliseCap` returning a Zombie for a
             // CNode: every slot inside the CNode must be cleaned up before
             // we reuse the storage. Without this, caps held by a test
@@ -1535,11 +1737,14 @@ fn finalize_cap(cap: &mut Cap, is_final: bool) {
                             let inner = &mut slots[i];
                             if !inner.cap.is_null() {
                                 let inner_ptr = inner as *mut Cte;
-                                // Pull the inner cap out of the global
-                                // MDB chain; we intentionally do *not*
-                                // recurse into nested CNodes here — the
-                                // outer Revoke walk will visit those
-                                // through their own derivation links.
+                                revoke_descendants(inner_ptr);
+                                let inner_is_self_cnode =
+                                    inner.cap.tag() == Some(CapTag::CNode)
+                                        && inner.cap.cnode_ptr() == base;
+                                if !inner_is_self_cnode {
+                                    let is_final = is_final_capability(inner_ptr);
+                                    finalize_cap(&mut inner.cap, is_final);
+                                }
                                 crate::object::cnode::mdb_unlink(inner_ptr);
                                 inner.cap = Cap::null();
                             }

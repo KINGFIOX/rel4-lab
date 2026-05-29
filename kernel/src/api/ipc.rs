@@ -49,6 +49,8 @@ use crate::object::tcb::{self, ThreadState};
 /// `seL4_MsgMaxLength` (libsel4/include/sel4/constants.h).
 const MSG_MAX_LENGTH: u64 = 120;
 const MR_REG_COUNT: u64 = 4;
+const FAULT_UNKNOWN_SYSCALL: u64 = 2;
+const FAULT_USER_EXCEPTION: u64 = 3;
 
 /// Copy MRs from `sender` into `receiver`, set the receiver's badge +
 /// reply MessageInfo. `length` is the truncated MR count to deliver.
@@ -91,6 +93,36 @@ unsafe fn transfer_message(
     }
 }
 
+unsafe fn transfer_fault_message(sender: *mut tcb::Tcb, receiver: *mut tcb::Tcb, badge: u64) {
+    let mut length = unsafe { (*sender).fault_len };
+    if length > MSG_MAX_LENGTH {
+        length = MSG_MAX_LENGTH;
+    }
+    let info_out = unsafe { MessageInfo::new((*sender).fault_label, 0, 0, length) };
+
+    unsafe {
+        (*receiver).context.regs[reg::A0] = badge;
+        (*receiver).context.regs[reg::A1] = info_out.0;
+
+        let mr_reg_n = length.min(MR_REG_COUNT) as usize;
+        for i in 0..mr_reg_n {
+            (*receiver).context.regs[reg::A2 + i] = (*sender).fault_mrs[i];
+        }
+
+        if length > MR_REG_COUNT {
+            let rbuf = (*receiver).ipc_buffer_kva;
+            if rbuf != 0 {
+                let rbuf = rbuf as *mut u64;
+                let extra = length - MR_REG_COUNT;
+                for i in 0..extra as usize {
+                    let off = 1 + MR_REG_COUNT as usize + i;
+                    *rbuf.add(off) = (*sender).fault_mrs[MR_REG_COUNT as usize + i];
+                }
+            }
+        }
+    }
+}
+
 /// Look up the cap and badge / permission bits for an Endpoint
 /// reference at `cptr`. Returns `None` if the cap is missing or not
 /// an Endpoint.
@@ -110,7 +142,13 @@ fn lookup_endpoint(cptr: u64) -> Option<(Cap, *mut endpoint::Endpoint, u64)> {
 /// Block the current TCB on `ep` as a sender. Caller stashes the cap
 /// badge / "is this a Call?" bit so the rendezvous logic can deliver
 /// the right semantics.
-unsafe fn block_sender(ep: *mut endpoint::Endpoint, is_call: bool, badge: u64) {
+unsafe fn block_sender(
+    ep: *mut endpoint::Endpoint,
+    is_call: bool,
+    badge: u64,
+    can_grant: bool,
+    can_grant_reply: bool,
+) {
     let cur = tcb::current();
     if cur.is_null() {
         return;
@@ -120,13 +158,16 @@ unsafe fn block_sender(ep: *mut endpoint::Endpoint, is_call: bool, badge: u64) {
         (*cur).state = ThreadState::BlockedOnSend as u8;
         (*cur).waiting_on = ep as u64;
         (*cur).sender_badge = badge;
+        (*cur).sender_can_grant = if can_grant { 1 } else { 0 };
+        (*cur).sender_can_grant_reply = if can_grant_reply { 1 } else { 0 };
         (*cur).sender_is_call = if is_call { 1 } else { 0 };
+        (*cur).sender_is_fault = 0;
         endpoint::enqueue_waiter(ep, cur, EpState::Sending);
     }
 }
 
 /// Block the current TCB on `ep` as a receiver. No payload to stash.
-unsafe fn block_receiver(ep: *mut endpoint::Endpoint) {
+unsafe fn block_receiver(ep: *mut endpoint::Endpoint, can_grant: bool) {
     let cur = tcb::current();
     if cur.is_null() {
         return;
@@ -135,6 +176,7 @@ unsafe fn block_receiver(ep: *mut endpoint::Endpoint) {
         tcb::dequeue(cur);
         (*cur).state = ThreadState::BlockedOnReceive as u8;
         (*cur).waiting_on = ep as u64;
+        (*cur).receiver_can_grant = if can_grant { 1 } else { 0 };
         endpoint::enqueue_waiter(ep, cur, EpState::Receiving);
     }
 }
@@ -164,7 +206,15 @@ pub fn send(uc: &mut UserContext, blocking: bool) {
             let receiver = unsafe { endpoint::pop_head(ep) };
             if receiver.is_null() {
                 if blocking {
-                    unsafe { block_sender(ep, false, badge) };
+                    unsafe {
+                        block_sender(
+                            ep,
+                            false,
+                            badge,
+                            cap.endpoint_can_grant(),
+                            cap.endpoint_can_grant_reply(),
+                        )
+                    };
                 }
                 return;
             }
@@ -179,7 +229,15 @@ pub fn send(uc: &mut UserContext, blocking: bool) {
             if !blocking {
                 return;
             }
-            unsafe { block_sender(ep, false, badge) };
+            unsafe {
+                block_sender(
+                    ep,
+                    false,
+                    badge,
+                    cap.endpoint_can_grant(),
+                    cap.endpoint_can_grant_reply(),
+                )
+            };
         }
     }
 }
@@ -197,7 +255,9 @@ pub fn recv(uc: &mut UserContext, blocking: bool) {
         }
     };
     if !cap.endpoint_can_receive() {
-        write_empty_reply(uc);
+        if !crate::arch::riscv64::trap::send_cap_fault_ipc(uc, cptr, true) {
+            write_empty_reply(uc);
+        }
         return;
     }
 
@@ -212,7 +272,7 @@ pub fn recv(uc: &mut UserContext, blocking: bool) {
             let sender = unsafe { endpoint::pop_head(ep) };
             if sender.is_null() {
                 if blocking {
-                    unsafe { block_receiver(ep) };
+                    unsafe { block_receiver(ep, cap.endpoint_can_grant()) };
                 } else {
                     write_empty_reply(uc);
                 }
@@ -221,16 +281,29 @@ pub fn recv(uc: &mut UserContext, blocking: bool) {
             let info_in = unsafe { MessageInfo((*sender).context.regs[reg::A1]) };
             let badge = unsafe { (*sender).sender_badge };
             let is_call = unsafe { (*sender).sender_is_call } != 0;
+            let can_reply = unsafe {
+                (*sender).sender_can_grant != 0 || (*sender).sender_can_grant_reply != 0
+            };
+            let is_fault = unsafe { (*sender).sender_is_fault } != 0;
             unsafe {
-                transfer_message(sender, cur, info_in, badge);
+                if is_fault {
+                    transfer_fault_message(sender, cur, badge);
+                } else {
+                    transfer_message(sender, cur, info_in, badge);
+                }
                 (*sender).waiting_on = 0;
-                if is_call {
+                if is_call && can_reply {
                     // Park the caller on Reply; record the reply
                     // target on the receiver so seL4_Reply later
                     // wakes the right TCB.
                     (*sender).state = ThreadState::BlockedOnReply as u8;
                     (*sender).sender_is_call = 0;
                     (*cur).caller = sender as u64;
+                    (*cur).caller_can_grant = cap.endpoint_can_grant() as u8;
+                } else if is_call {
+                    (*sender).context.pc = (*sender).context.pc.wrapping_sub(4);
+                    (*sender).state = ThreadState::Inactive as u8;
+                    (*sender).sender_is_call = 0;
                 } else {
                     // Plain Send: wake the sender, drop its badge.
                     (*sender).state = ThreadState::Running as u8;
@@ -274,7 +347,7 @@ pub fn recv(uc: &mut UserContext, blocking: bool) {
                 }
             }
             if blocking {
-                unsafe { block_receiver(ep) };
+                unsafe { block_receiver(ep, cap.endpoint_can_grant()) };
             } else {
                 write_empty_reply(uc);
             }
@@ -309,23 +382,46 @@ pub fn call(uc: &mut UserContext) {
             if receiver.is_null() {
                 // Queue saw a receiver but pop returned null — treat
                 // as no-receiver and queue the caller.
-                unsafe { block_sender(ep, true, badge) };
+                unsafe {
+                    block_sender(
+                        ep,
+                        true,
+                        badge,
+                        cap.endpoint_can_grant(),
+                        cap.endpoint_can_grant_reply(),
+                    )
+                };
                 return;
             }
             unsafe {
                 transfer_message(cur, receiver, info, badge);
                 (*receiver).waiting_on = 0;
-                (*receiver).caller = cur as u64;
                 (*receiver).state = ThreadState::Running as u8;
                 tcb::enqueue(receiver);
-                // Park the caller until Reply comes back.
                 tcb::dequeue(cur);
-                (*cur).state = ThreadState::BlockedOnReply as u8;
+                if cap.endpoint_can_grant() || cap.endpoint_can_grant_reply() {
+                    (*receiver).caller = cur as u64;
+                    (*receiver).caller_can_grant = (*receiver).receiver_can_grant;
+                    // Park the caller until Reply comes back.
+                    (*cur).state = ThreadState::BlockedOnReply as u8;
+                } else {
+                    (*cur).context.pc = (*cur).context.pc.wrapping_sub(4);
+                    (*cur).state = ThreadState::Inactive as u8;
+                }
                 (*cur).waiting_on = 0;
+                (*cur).sender_is_fault = 0;
             }
         }
         EpState::Idle | EpState::Sending => {
-            unsafe { block_sender(ep, true, badge) };
+            unsafe {
+                block_sender(
+                    ep,
+                    true,
+                    badge,
+                    cap.endpoint_can_grant(),
+                    cap.endpoint_can_grant_reply(),
+                )
+            };
         }
     }
 }
@@ -342,13 +438,90 @@ pub fn reply(uc: &mut UserContext) {
     if caller.is_null() {
         return;
     }
+    unsafe { reply_to_tcb(uc, caller) };
+    unsafe {
+        (*cur).caller = 0;
+        (*cur).caller_can_grant = 0;
+    }
+}
+
+pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb) {
+    if caller.is_null() {
+        return;
+    }
+    let cur = tcb::current();
+    if cur.is_null() {
+        return;
+    }
     let info = MessageInfo(uc.regs[reg::A1]);
     unsafe {
-        transfer_message(cur, caller, info, 0);
-        (*caller).state = ThreadState::Running as u8;
+        let mut wake_caller = true;
+        if (*caller).sender_is_fault == 0 {
+            transfer_message(cur, caller, info, 0);
+        } else {
+            if info.label() == 0 {
+                match (*caller).fault_label {
+                    FAULT_UNKNOWN_SYSCALL => apply_unknown_syscall_reply(cur, uc, caller),
+                    FAULT_USER_EXCEPTION => {
+                        (*caller).context.pc = reply_mr(cur, uc, 0);
+                        (*caller).context.regs[reg::SP] = reply_mr(cur, uc, 1);
+                    }
+                    _ => {}
+                }
+            } else if (*caller).fault_label == FAULT_UNKNOWN_SYSCALL
+                || (*caller).fault_label == FAULT_USER_EXCEPTION
+            {
+                wake_caller = false;
+            }
+            (*caller).sender_is_fault = 0;
+            (*caller).fault_label = 0;
+            (*caller).fault_len = 0;
+            (*caller).fault_mrs = [0; 16];
+        }
         (*caller).waiting_on = 0;
-        tcb::enqueue(caller);
-        (*cur).caller = 0;
+        if wake_caller {
+            (*caller).state = ThreadState::Running as u8;
+            tcb::enqueue(caller);
+        } else {
+            (*caller).state = ThreadState::Inactive as u8;
+        }
+    }
+}
+
+unsafe fn reply_mr(sender: *mut tcb::Tcb, uc: &UserContext, i: usize) -> u64 {
+    match i {
+        0 => uc.regs[reg::A2],
+        1 => uc.regs[reg::A3],
+        2 => uc.regs[reg::A4],
+        3 => uc.regs[reg::A5],
+        _ => unsafe {
+            let buf = (*sender).ipc_buffer_kva;
+            if buf == 0 {
+                0
+            } else {
+                *((buf as *const u64).add(1 + i))
+            }
+        },
+    }
+}
+
+unsafe fn apply_unknown_syscall_reply(
+    sender: *mut tcb::Tcb,
+    uc: &UserContext,
+    caller: *mut tcb::Tcb,
+) {
+    unsafe {
+        (*caller).context.pc = reply_mr(sender, uc, 0);
+        (*caller).context.regs[reg::SP] = reply_mr(sender, uc, 1);
+        (*caller).context.regs[reg::RA] = reply_mr(sender, uc, 2);
+        (*caller).context.regs[reg::A0] = reply_mr(sender, uc, 3);
+        (*caller).context.regs[reg::A1] = reply_mr(sender, uc, 4);
+        (*caller).context.regs[reg::A2] = reply_mr(sender, uc, 5);
+        (*caller).context.regs[reg::A3] = reply_mr(sender, uc, 6);
+        (*caller).context.regs[reg::A4] = reply_mr(sender, uc, 7);
+        (*caller).context.regs[reg::A5] = reply_mr(sender, uc, 8);
+        (*caller).context.regs[reg::A6] = reply_mr(sender, uc, 9);
+        (*caller).context.regs[reg::A7] = reply_mr(sender, uc, 10);
     }
 }
 
