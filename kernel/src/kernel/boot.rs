@@ -433,6 +433,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         (*t).state = crate::object::tcb::ThreadState::Running as u8;
         (*t).priority = 255;
         (*t).mcp = 255;
+        (*t).time_slice_ticks = tcb::DEFAULT_TIME_SLICE_TICKS;
         tcb::set_current(t);
         // Seed the scheduler's runqueue with the rootserver, so
         // `schedule()` always has a runnable TCB to return.

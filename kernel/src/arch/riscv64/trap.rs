@@ -81,9 +81,7 @@ mod scause_code {
 const SIE_STIE: usize = 1 << 5;
 const SCOUNTEREN_TM: usize = 1 << 1;
 const TIMER_INTERVAL_TICKS: u64 = 20_000;
-const TIME_SLICE_TICKS: u64 = 5;
 static NEXT_TIMER_DEADLINE: AtomicU64 = AtomicU64::new(0);
-static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 const FAULT_CAP_FAULT: u64 = 1;
 const FAULT_UNKNOWN_SYSCALL: u64 = 2;
 const FAULT_USER_EXCEPTION: u64 = 3;
@@ -440,14 +438,15 @@ fn handle_timer_interrupt() {
     unsafe {
         crate::object::irq::signal_irq(crate::object::irq::KERNEL_TIMER_IRQ as u64);
     }
-    let tick = TIMER_TICKS.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
-    if tick % TIME_SLICE_TICKS != 0 {
-        return;
-    }
     unsafe {
         let cur = crate::object::tcb::current();
         if !cur.is_null() && (*cur).state == crate::object::tcb::ThreadState::Running as u8 {
-            crate::object::tcb::rotate_to_tail(cur);
+            if (*cur).time_slice_ticks > 1 {
+                (*cur).time_slice_ticks -= 1;
+            } else {
+                (*cur).time_slice_ticks = crate::object::tcb::DEFAULT_TIME_SLICE_TICKS;
+                crate::object::tcb::rotate_to_tail(cur);
+            }
         }
     }
 }

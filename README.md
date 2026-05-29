@@ -14,7 +14,7 @@ multi-size frame map/unmap, DomainSet, fault IPC, and ASID pool creation
 are implemented far enough for the full suite to run to completion.
 
 Latest verified checkpoint: `./tools/run-tests.sh` passes:
-**122 enabled tests passing, 45 upstream-disabled tests remaining**.
+**123 enabled tests passing, 44 upstream-disabled tests remaining**.
 M4.4b unlocked the first timer-gated disabled group on the current RV64,
 non-MCS, single-core, QEMU configuration: `TIMER0001`, `TIMER0002`,
 `SCHED0000`, `DOMAINS0004`, and `PREEMPT_REVOKE`. The Rust kernel now
@@ -30,6 +30,10 @@ M4.4c then enabled `PAGEFAULT1005` on RISC-V by fixing the upstream test's
 cross-address-space bad-instruction path: the handler no longer
 dereferences the faulter's user stack pointer, and the faulter-side
 restart stub writes back `GOOD_MAGIC` before restoring its original SP.
+M4.4d enables `SCHED0021` under the current QEMU simulation build: the
+Rust scheduler now tracks a C-kernel-style per-TCB time-slice counter,
+and the upstream test keeps the original strict bound for non-simulation
+while using a bounded simulation-specific timing margin.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -63,19 +67,20 @@ restart stub writes back `GOOD_MAGIC` before restoring its original SP.
 | M4.4a | Minimal IRQControl/IRQHandler ABI support: issue one handler cap per IRQ, derive it under IRQControl in the MDB, bind/clear Notification caps, finalize handler state on last delete, and signal the kernel timer IRQ notification from the SBI timer trap. `Ack` is accepted as a no-op and RISC-V trigger configuration is parsed but not programmed. | ✅ Done |
 | M4.4b | qemu-riscv-virt userspace ltimer + first timer-gated disabled group: `TIMER0001`, `TIMER0002`, `SCHED0000`, `DOMAINS0004`, `PREEMPT_REVOKE`. Full suite now reports **121 passed / 46 disabled**. | ✅ Done |
 | M4.4c | RISC-V `PAGEFAULT1005` inter-AS undefined-instruction test: avoid cross-VSpace pointer dereference in the handler and let the faulter restart stub perform the writeback. Full suite now reports **122 passed / 45 disabled**. | ✅ Done |
+| M4.4d | `SCHED0021` equal-priority preemption under QEMU simulation: Rust scheduler uses per-TCB time-slice accounting, and sel4test uses a simulation-specific timing upper bound while preserving the original non-simulation bound. Full suite now reports **123 passed / 44 disabled**. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, MCS/SMP/multi-domain/VTX/cache coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
-### Disabled-test accounting (M4.4c)
+### Disabled-test accounting (M4.4d)
 
-The pre-M4.4b disabled set contained 51 tests in the compiled ELF. Six
+The pre-M4.4b disabled set contained 51 tests in the compiled ELF. Seven
 have since been enabled and are now passing:
 
 ```text
 TIMER0001, TIMER0002, SCHED0000, DOMAINS0004, PREEMPT_REVOKE
-PAGEFAULT1005
+PAGEFAULT1005, SCHED0021
 ```
 
-The remaining 45 disabled tests, as of the `122 passed / 45 disabled`
+The remaining 44 disabled tests, as of the `123 passed / 44 disabled`
 run, fall into these primary buckets:
 
 | Bucket | Count | Tests |
@@ -85,7 +90,6 @@ run, fall into these primary buckets:
 | Multi-domain | 3 | `DOMAINS0000`, `DOMAINS9999`, `DOMAINS0005` |
 | VTX / VM-entry | 1 | `UNKNOWN_SYSCALL_001` |
 | Cache maintenance | 1 | `CACHEFLUSH0004` |
-| Current-simulation-disabled | 1 | `SCHED0021` |
 
 A live run (kernel boots, the rootserver's `allocman` carves up untyped
 memory via dozens of `Untyped_Retype` calls, maps frames via
@@ -125,8 +129,8 @@ Starting test 70:  PREEMPT_REVOKE
 Starting test 75:  SCHED0000
 ...
 Starting test 119: VSPACE0006
-Starting test 122: Test all tests ran
-Test suite passed. 122 tests passed. 45 tests disabled.
+Starting test 123: Test all tests ran
+Test suite passed. 123 tests passed. 44 tests disabled.
 All is well in the universe
 ```
 
@@ -259,10 +263,10 @@ QEMU virt
 
 ## Next steps (M4)
 
-With the first timer-gated disabled group and `PAGEFAULT1005` green, the
-remaining work is about the 45 disabled tests that are outside the current
-RV64/non-MCS/single-core/QEMU slice, plus semantics that are implemented
-only as far as sel4test currently needs:
+With the first timer-gated disabled group, `PAGEFAULT1005`, and
+`SCHED0021` green, the remaining work is about the 44 disabled tests that
+are outside the current RV64/non-MCS/single-core/QEMU slice, plus
+semantics that are implemented only as far as sel4test currently needs:
 
 1. **MCS model.** Scheduling contexts, timeout faults, SC donation, MCS
    IPC, and MCS scheduler tests are still intentionally out of scope for
@@ -270,8 +274,8 @@ only as far as sel4test currently needs:
 2. **SMP / multicore.** Cross-core scheduling, remote deletion, affinity,
    multicore IRQs, and FPU migration remain disabled under `-smp 1`.
 3. **Other disabled buckets.** Multi-domain scheduling, VTX/VM-entry,
-   cache maintenance, and simulation-disabled `SCHED0021` are tracked
-   separately from the timer work that landed in M4.4b.
+   and cache maintenance are tracked separately from the timer work that
+   landed in M4.4b.
 4. **Full cap-transfer/generalisation pass.** The current IPC transfer
    path intentionally covers the pre-MCS single receive-slot case. The
    next conformance pass should cover multi-cap edge cases, endpoint

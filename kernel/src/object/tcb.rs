@@ -57,6 +57,7 @@ pub fn set_current(tcb: *mut Tcb) -> *mut Tcb {
 // safe behind the kernel's "interrupts off during trap" guarantee.
 
 pub const NUM_PRIORITIES: usize = 256;
+pub const DEFAULT_TIME_SLICE_TICKS: u8 = 5;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -230,6 +231,8 @@ pub struct Tcb {
     pub priority: u8,
     pub mcp: u8,
     pub domain: u8,
+    pub time_slice_ticks: u8,
+    pub _sched_pad: [u8; 3],
     pub flags: u32,
 
     /// Cap roots. The full caps (not just pointers) so that the future
@@ -321,6 +324,8 @@ impl Tcb {
             priority: 0,
             mcp: 0,
             domain: 0,
+            time_slice_ticks: 0,
+            _sched_pad: [0; 3],
             flags: 0,
             cspace_cap: Cap::null(),
             vspace_cap: Cap::null(),
@@ -372,6 +377,7 @@ pub unsafe fn init(tcb_kva: u64) {
     // sstatus.FS   = Dirty -> user floating-point instructions are legal.
     unsafe {
         (*t).state = ThreadState::Inactive as u8;
+        (*t).time_slice_ticks = DEFAULT_TIME_SLICE_TICKS;
         (*t).context.sstatus = crate::arch::riscv64::trap::USER_SSTATUS;
     }
 }
@@ -436,6 +442,9 @@ pub unsafe fn resume(tcb: *mut Tcb) {
         return;
     }
     unsafe {
+        if (*tcb).time_slice_ticks == 0 {
+            (*tcb).time_slice_ticks = DEFAULT_TIME_SLICE_TICKS;
+        }
         (*tcb).state = ThreadState::Running as u8;
         enqueue(tcb);
     }
