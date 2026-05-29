@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 #
-# Build one xv6 user program as a standalone seL4 rootserver payload.
+# Build one xv6 user program as a payload embedded in the xv6-host seL4
+# rootserver.
 #
-# The program is still the xv6 user object linked with xv6's ulib/usys stubs.
-# We add a tiny generated entry point that calls main(argc, argv), because xv6
-# normally relies on exec() to lay out argv before jumping to user space.
+# The xv6 program is still linked with xv6's ulib/usys stubs. A tiny generated
+# entry point calls main(argc, argv), because xv6 normally relies on exec() to
+# lay out argv. The resulting ELF is not booted directly; xv6-host loads it
+# into a child TCB/VSpace and handles its positive syscalls via fault IPC.
 
 set -euo pipefail
 
@@ -61,7 +63,8 @@ make -C "${XV6_DIR}" TOOLPREFIX="${TOOLPREFIX}" \
 
 ARGS_C="${OUT_DIR}/${PROGRAM}_argv.c"
 ARGS_O="${OUT_DIR}/${PROGRAM}_argv.o"
-OUT_ELF="${OUT_DIR}/_${PROGRAM}-rootserver"
+PAYLOAD_ELF="${OUT_DIR}/_${PROGRAM}-payload"
+HOST_ELF="${OUT_DIR}/xv6-host-${PROGRAM}-rootserver"
 LINKER_SCRIPT="${OUT_DIR}/user-${XV6_USER_BASE}.ld"
 
 args=("${PROGRAM}" "$@")
@@ -102,9 +105,9 @@ CFLAGS=(
 perl -0pe "s/\\. = 0x0;/\\. = ${XV6_USER_BASE};/" \
     "${XV6_DIR}/user/user.ld" >"${LINKER_SCRIPT}"
 
-log "linking ${OUT_ELF}"
+log "linking payload ${PAYLOAD_ELF}"
 "${LD}" -z max-page-size=4096 -T "${LINKER_SCRIPT}" -e _xv6_compat_start \
-    -o "${OUT_ELF}" \
+    -o "${PAYLOAD_ELF}" \
     "${ARGS_O}" \
     "${XV6_DIR}/user/${PROGRAM}.o" \
     "${XV6_DIR}/user/ulib.o" \
@@ -112,4 +115,20 @@ log "linking ${OUT_ELF}"
     "${XV6_DIR}/user/printf.o" \
     "${XV6_DIR}/user/umalloc.o"
 
-printf '%s\n' "${OUT_ELF}"
+log "building xv6-host rootserver ${HOST_ELF}"
+XV6_PAYLOAD_ELF="${PAYLOAD_ELF}" rustc \
+    --edition=2021 \
+    --target riscv64gc-unknown-none-elf \
+    -C panic=abort \
+    -C opt-level=2 \
+    -C code-model=medium \
+    -C relocation-model=static \
+    -C force-frame-pointers=yes \
+    -C linker=rust-lld \
+    -C link-arg=-T"${ROOT_DIR}/userspace/xv6-host/linker.ld" \
+    -C link-arg=--no-relax \
+    -C link-arg=-zmax-page-size=4096 \
+    -o "${HOST_ELF}" \
+    "${ROOT_DIR}/userspace/xv6-host/src/main.rs"
+
+printf '%s\n' "${HOST_ELF}"

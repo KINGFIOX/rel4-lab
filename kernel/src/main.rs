@@ -24,7 +24,6 @@ mod arch;
 mod kernel;
 mod machine;
 mod object;
-mod xv6_compat;
 
 pub use arch::riscv64::boot::_start;
 pub use arch::riscv64::boot::init_kernel;

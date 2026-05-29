@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Build an xv6 user program, pack it as the rootserver above the Rust kernel,
-# and run the resulting image under QEMU.
+# Build an xv6 user program, embed it into the xv6-host rootserver, pack that
+# rootserver above the Rust kernel, and run the resulting image under QEMU.
 
 set -euo pipefail
 
@@ -91,7 +91,7 @@ trap cleanup EXIT INT TERM
 deadline=$(( $(date +%s) + TIMEOUT ))
 status=2
 while [[ $(date +%s) -lt ${deadline} ]]; do
-    if grep -qE 'xv6compat: exit\(' "${LOG_FILE}" 2>/dev/null; then
+    if grep -qE 'xv6-host: exit\(' "${LOG_FILE}" 2>/dev/null; then
         status=0
         break
     fi
@@ -101,7 +101,7 @@ while [[ $(date +%s) -lt ${deadline} ]]; do
     fi
     if ! kill -0 "${qemu_pid}" 2>/dev/null; then
         wait "${qemu_pid}" 2>/dev/null || true
-        if grep -qE 'xv6compat: exit\(' "${LOG_FILE}" 2>/dev/null; then
+        if grep -qE 'xv6-host: exit\(' "${LOG_FILE}" 2>/dev/null; then
             status=0
         else
             status=1
@@ -116,7 +116,7 @@ trap - EXIT INT TERM
 
 case "${status}" in
     0)
-        exit_line="$(grep -E 'xv6compat: exit\(' "${LOG_FILE}" | tail -1)"
+        exit_line="$(grep -E 'xv6-host: exit\(' "${LOG_FILE}" | tail -1)"
         echo "PASS: ${exit_line}"
         echo "      log: ${LOG_FILE}"
         ;;

@@ -21,10 +21,11 @@ Latest verified checkpoints:
   `env SMP=2 TIMEOUT=480 ./tools/run-tests.sh` passes with
   **125 enabled tests passing, 42 upstream-disabled tests remaining**.
 - xv6 user-program compatibility smoke path: xv6 user ELFs from
-  `third_party/xv6-riscv/user` can be linked as a temporary rootserver and
-  run on the Rust kernel via `./tools/run-xv6-user.sh`. Verified:
+  `third_party/xv6-riscv/user` are embedded into the `xv6-host` rootserver,
+  loaded into a child TCB/VSpace, and handled through seL4 fault IPC via
+  `./tools/run-xv6-user.sh`. Verified:
   `echo`, `forktest`, `cat README`, `ls .`, `wc README`, and
-  `grep xv6 README` end in `xv6compat: exit(0)`.
+  `grep xv6 README` end in `xv6-host: exit(0)`.
 
 M4.4b unlocked the first timer-gated disabled group on the current RV64,
 non-MCS, single-core, QEMU configuration: `TIMER0001`, `TIMER0002`,
@@ -60,21 +61,17 @@ The upstream OpenSBI packaging helper is also pinned to
 `rv64imafdc_zicsr_zifencei` so the current GCC/binutils toolchain can
 rebuild the SMP image after CMake regeneration.
 
-M5.1 starts a deliberately thin xv6 compatibility layer. A generated wrapper
-links one xv6 user program at `0x10000000`, passes a baked-in `argc/argv`, and
-packs it as the elfloader rootserver. The Rust kernel detects that rootserver
-shape and dispatches xv6's positive syscall numbers separately from the seL4
-ABI. Implemented syscall surface is currently enough for single-process smoke
-programs: console `write`, nonblocking console `read`, `sbrk`, `getpid`,
-`uptime`, `open("console")`, `dup`, `close`, `fstat`, and graceful `-1`
-returns for process/filesystem calls that need real services. `fork`, `exec`,
-pipes, wait semantics, and a filesystem are not implemented yet; those should
-move into a user-space Unix/xv6 server rather than bloating the kernel path.
-M5.2 adds a tiny read-only pseudo-filesystem to that bridge: the xv6
-`README` is embedded as a readable file, `.` / `/` expose xv6-format
-directory entries, `console` appears as a device, and fd state now tracks
-per-open offsets plus `struct stat` metadata. This is enough for `cat`,
-`ls`, `wc`, and `grep` against `README`.
+M5.1/M5.2 were the temporary in-kernel xv6 bridge: a generated wrapper linked
+one xv6 user program at `0x10000000`, and the Rust kernel directly dispatched
+xv6's positive syscall numbers. That path proved the smoke workload but is now
+retired.
+
+M5.3 moves xv6 compatibility back to a seL4-style design. The elfloader
+rootserver is now `userspace/xv6-host`, a no_std Rust server that parses
+BootInfo, allocates seL4 objects from untyped caps, creates a child TCB/CNode/
+VSpace/fault endpoint, maps the xv6 payload into the child, and handles xv6
+syscalls as `UnknownSyscall` fault IPC. The kernel no longer owns Unix fd,
+heap, or pseudo-filesystem state.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -111,8 +108,9 @@ per-open offsets plus `struct stat` metadata. This is enough for `cat`,
 | M4.4d | `SCHED0021` equal-priority preemption under QEMU simulation: Rust scheduler uses per-TCB time-slice accounting, and sel4test uses a simulation-specific timing upper bound while preserving the original non-simulation bound. Full suite now reports **123 passed / 44 disabled**. | ✅ Done |
 | M4.4e | RISC-V `CACHEFLUSH0004`: enable the non-ARM cache/retype test and validate that retyped frames are zeroed after `Untyped_Revoke`. Full suite now reports **124 passed / 43 disabled**. | ✅ Done |
 | M4.4f | SMP-compatible RV64 build/run: secondary harts park before shared init; SMP invocation-label shift and `TCBSetAffinity` are handled; QEMU wrappers accept `SMP=2`; `FPU0002` and `MULTICORE0001..0005` pass in the full SMP run. Current SMP full suite reports **125 passed / 42 disabled**. | ✅ Done |
-| M5.1 | xv6 user-program smoke path: build an xv6 user ELF as rootserver, route xv6 positive syscalls through a small compatibility module, and pass `echo` / `forktest` under QEMU. | ✅ Done |
-| M5.2 | xv6 read-only pseudo-fs: expose `README`, `.`, `/`, and `console`; implement fd offsets and `fstat`; pass `cat README`, `ls .`, `wc README`, and `grep xv6 README`. | ✅ Done |
+| M5.1 | xv6 user-program smoke path: build an xv6 user ELF as rootserver and route xv6 positive syscalls through a temporary kernel compatibility module. | ✅ Superseded |
+| M5.2 | Temporary kernel-side xv6 read-only pseudo-fs: expose `README`, `.`, `/`, and `console`; implement fd offsets and `fstat`. | ✅ Superseded |
+| M5.3 | seL4-style xv6 host: embed the xv6 user ELF into a no_std Rust rootserver, spawn it as a child TCB/VSpace with a fault endpoint, and handle xv6 syscalls via `UnknownSyscall` fault IPC. Smoke set passes: `echo`, `forktest`, `cat README`, `ls .`, `wc README`, `grep xv6 README`. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
@@ -210,13 +208,18 @@ Test suite passed. 124 tests passed. 43 tests disabled.
 All is well in the universe
 ```
 
-### xv6 Compatibility Checkpoint (M5.1)
+### xv6 Compatibility Checkpoint (M5.3)
 
-The current xv6 path is a smoke-test bridge, not a full Unix server yet. The
-helper builds one xv6 user program from `third_party/xv6-riscv/user`, links it
-at `0x10000000` with a generated `argc/argv` entry stub, injects it as the
-elfloader rootserver, and boots it under QEMU. With the current SMP upstream
-build, use two harts (the helper defaults to `SMP=2`):
+The current xv6 path is a user-space compatibility server, not a full Unix
+server yet. The helper builds one xv6 user program from
+`third_party/xv6-riscv/user`, links it at `0x10000000` with a generated
+`argc/argv` entry stub, embeds that ELF into `userspace/xv6-host`, and boots
+the host as the elfloader rootserver. The host then uses seL4 APIs to create a
+child TCB/CNode/VSpace/fault endpoint and services the child's positive xv6
+syscalls via `UnknownSyscall` fault IPC.
+
+With the current SMP upstream build, use two harts (the helper defaults to
+`SMP=2`):
 
 ```sh
 nix develop --command ./tools/run-xv6-user.sh echo hello from xv6
@@ -231,25 +234,25 @@ Verified output includes:
 
 ```text
 hello from xv6
-xv6compat: exit(0)
+xv6-host: exit(0)
 
 fork test
 fork test OK
-xv6compat: exit(0)
+xv6-host: exit(0)
 
 .              1 1 64
 ..             1 1 64
 README         2 2 2441
 console        3 3 0
-xv6compat: exit(0)
+xv6-host: exit(0)
 ```
 
-Implemented kernel-side compatibility is intentionally tiny: console
-read/write, heap growth via `sbrk`, time/pid stubs, console fd operations, a
-read-only pseudo-fs containing `README`, and graceful `-1` for process and
-write-side filesystem calls. Running `init`, `sh`, pipes, `exec`, mutable files,
-and `usertests` requires the next layer: a user-space xv6/Unix service process
-that owns process state, program loading, and a filesystem image.
+Implemented host-side compatibility is intentionally tiny: console read/write,
+heap growth via `sbrk`, time/pid stubs, console fd operations, a read-only
+pseudo-fs containing `README`, and graceful `-1` for unsupported process and
+write-side filesystem calls. Running `init`, `sh`, real `fork`/`exec`, pipes,
+mutable files, and `usertests` still requires a fuller Unix service with
+process state and a filesystem image.
 
 
 ## Repository layout
@@ -306,14 +309,15 @@ microkernel/
 │       │   │                  #   Send/Recv slow-path on Notification caps
 │       │   └── invocation.rs  # Untyped_Retype, Page_Map, PageTable_Map, CNode
 │       │                      #   ops, isCapRevocable, finalize_cap(Frame/CNode)
-│       └── xv6_compat.rs      # temporary single-process xv6 syscall shim
+├── userspace/
+│   └── xv6-host/              # no_std seL4 rootserver that hosts xv6 user ELFs
 ├── third_party/
 │   └── xv6-riscv/             # upstream xv6 tree used for user programs
 └── tools/
     ├── pack-image.sh              # rebuild Rust kernel + ninja repackage
     ├── simulate.sh                # qemu wrapper (standalone or packed image)
     ├── run-tests.sh               # CI runner for sel4test image
-    ├── build-xv6-user-rootserver.sh # link one xv6 user program as rootserver
+    ├── build-xv6-user-rootserver.sh # link xv6 payload + build xv6-host rootserver
     └── run-xv6-user.sh            # pack + boot xv6 user-program smoke image
 ```
 

@@ -635,9 +635,6 @@ fn handle_syscall(uc: &mut UserContext) {
         syscall::SYS_REPLY_RECV => {
             crate::api::ipc::reply_recv(uc);
         }
-        n if crate::xv6_compat::is_xv6_syscall(n) => {
-            crate::xv6_compat::handle_syscall(uc, n);
-        }
         n if syscall::is_known(n) => {
             crate::println!(
                 "syscall {} not implemented yet (a0={:#x}, a1={:#x})",

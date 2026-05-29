@@ -109,8 +109,6 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     // Map the rootserver image: PA = VA + pv_offset (elfloader convention).
     let user_va_start = args.user_pstart.wrapping_sub(args.pv_offset);
     let user_va_end = args.user_pend.wrapping_sub(args.pv_offset);
-    let xv6_rootserver =
-        crate::xv6_compat::looks_like_xv6_rootserver(user_va_start, args.user_ventry);
     map_range_4k_identity_from_elfloader(
         root_pt,
         user_va_start,
@@ -147,9 +145,6 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         let pa = kpptr_to_paddr(kva);
         let va = USER_STACK_TOP - (i + 1) * PAGE_SIZE;
         unsafe { map_user_4k(root_pt, va, pa, user_flags(true, true, false)) };
-    }
-    if xv6_rootserver {
-        crate::xv6_compat::init(root_pt, user_va_end);
     }
 
     // --- Root CNode -------------------------------------------------------
@@ -433,12 +428,8 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         //          SPP=0  (sret enters U-mode).
         (*t).context.pc = args.user_ventry as u64;
         (*t).context.sstatus = crate::arch::riscv64::trap::ROOTSERVER_SSTATUS;
-        (*t).context.regs[10] = if xv6_rootserver {
-            0
-        } else {
-            USER_BOOTINFO_VA as u64
-        }; // a0 = bootinfo for seL4 rootservers, argc placeholder for xv6
-        (*t).context.regs[11] = 0; // argv placeholder for direct xv6 entry points
+        (*t).context.regs[10] = USER_BOOTINFO_VA as u64; // a0 = bootinfo
+        (*t).context.regs[11] = 0;
         (*t).context.regs[2] = USER_STACK_TOP as u64; // sp
         (*t).state = crate::object::tcb::ThreadState::Running as u8;
         (*t).priority = 255;
