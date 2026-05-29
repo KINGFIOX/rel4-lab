@@ -15,7 +15,7 @@ use crate::arch::riscv64::{csr, sbi};
 ///
 /// Field order is load-bearing: `regs[i]` lives at offset `i * 8`, with
 /// `regs[0]` ignored (x0 is hardwired zero), then `pc`, `sstatus`,
-/// `sscratch_saved`, and the floating-point state.
+/// and one reserved slot.
 #[repr(C)]
 #[derive(Default)]
 pub struct UserContext {
@@ -27,15 +27,11 @@ pub struct UserContext {
     pub sstatus: u64,
     /// Reserved slot — keeps the trampoline asm offsets clean.
     pub _reserved: u64,
-    /// f0..f31, saved as raw IEEE-754 bits.
-    pub fregs: [u64; 32],
-    /// Floating-point control/status register.
-    pub fcsr: u64,
 }
 
 const _: () = {
-    // 32 GPRs + pc + sstatus + reserved + 32 FPRs + fcsr = 68 words.
-    assert!(core::mem::size_of::<UserContext>() == 68 * 8);
+    // 32 GPRs + pc + sstatus + reserved = 35 words.
+    assert!(core::mem::size_of::<UserContext>() == 35 * 8);
 };
 
 /// Register name → index in `UserContext.regs`.
@@ -57,9 +53,8 @@ pub mod reg {
 }
 
 pub const SSTATUS_SPIE: u64 = 1 << 5;
-pub const SSTATUS_FS_DIRTY: u64 = 0b11 << 13;
 pub const SSTATUS_SUM: u64 = 1 << 18;
-pub const USER_SSTATUS: u64 = SSTATUS_SPIE | SSTATUS_FS_DIRTY;
+pub const USER_SSTATUS: u64 = SSTATUS_SPIE;
 pub const ROOTSERVER_SSTATUS: u64 = USER_SSTATUS | SSTATUS_SUM;
 
 global_asm!(include_str!("trap.S"));

@@ -1197,16 +1197,14 @@ pub fn handle_thread(
             }
             let clear = uc.regs[reg::A2] as u32;
             let set = uc.regs[reg::A3] as u32;
-            const TCB_FLAG_MASK: u32 = 0x1; // seL4_TCBFlag_fpuDisabled
             unsafe {
                 let cur = (*tcb_ptr).flags;
-                let flags = (cur & !clear) | (set & TCB_FLAG_MASK);
+                // The Rust kernel no longer owns floating-point context.
+                // Keep the ABI-visible flag disabled regardless of attempts
+                // to clear it, and leave sstatus.FS off.
+                let flags = ((cur & !clear) | (set & tcb::TCB_FLAG_FPU_DISABLED))
+                    | tcb::TCB_FLAG_FPU_DISABLED;
                 (*tcb_ptr).flags = flags;
-                if (flags & TCB_FLAG_MASK) != 0 {
-                    (*tcb_ptr).context.sstatus &= !crate::arch::riscv64::trap::SSTATUS_FS_DIRTY;
-                } else {
-                    (*tcb_ptr).context.sstatus |= crate::arch::riscv64::trap::SSTATUS_FS_DIRTY;
-                }
                 uc.regs[reg::A2] = flags as u64;
                 if !thread.ipc_buffer_kva.is_null() {
                     *thread.ipc_buffer_kva.add(1) = flags as u64;

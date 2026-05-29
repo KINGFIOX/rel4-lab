@@ -423,7 +423,6 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     unsafe {
         let t = &raw mut ROOTSERVER_TCB;
         // sstatus: SPIE=1 (sret re-enables interrupts),
-        //          FS=Dirty (user FPU instructions are legal),
         //          SUM=1  (kernel can touch user memory),
         //          SPP=0  (sret enters U-mode).
         (*t).context.pc = args.user_ventry as u64;

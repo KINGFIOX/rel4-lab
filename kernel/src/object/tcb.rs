@@ -58,6 +58,7 @@ pub fn set_current(tcb: *mut Tcb) -> *mut Tcb {
 
 pub const NUM_PRIORITIES: usize = 256;
 pub const DEFAULT_TIME_SLICE_TICKS: u8 = 5;
+pub const TCB_FLAG_FPU_DISABLED: u32 = 0x1;
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct Queue {
@@ -301,7 +302,7 @@ pub struct Tcb {
 
 // Compile-time sanity: must fit inside the 2 KiB Untyped slab (= 2048
 // bytes for SEL4_TCB_BITS = 11). Keep a generous margin so future
-// fields (FPU context, MCS scheduler data) don't break the layout.
+// fields (MCS scheduler data, extra IPC bookkeeping) don't break the layout.
 const _: () = {
     assert!(core::mem::size_of::<Tcb>() <= 1024);
 };
@@ -317,8 +318,6 @@ impl Tcb {
                 pc: 0,
                 sstatus: 0,
                 _reserved: 0,
-                fregs: [0; 32],
-                fcsr: 0,
             },
             state: 0,
             priority: 0,
@@ -327,7 +326,7 @@ impl Tcb {
             affinity: 0,
             time_slice_ticks: 0,
             _sched_pad: [0; 2],
-            flags: 0,
+            flags: TCB_FLAG_FPU_DISABLED,
             cspace_cap: Cap::null(),
             vspace_cap: Cap::null(),
             ipc_buffer_cap: Cap::null(),
@@ -369,16 +368,15 @@ pub fn from_cap(cap: Cap) -> *mut Tcb {
 ///
 /// `Untyped_Retype` already zeroed the memory; we only stamp the bits
 /// where 0 isn't the right resting value (currently just sstatus so a
-/// future `restore_user_context` returns to U-mode with interrupts and
-/// the FPU enabled.
+/// future `restore_user_context` returns to U-mode with interrupts enabled).
 pub unsafe fn init(tcb_kva: u64) {
     let t = tcb_kva as *mut Tcb;
     // sstatus.SPIE = 1 -> sret re-enables interrupts in U-mode.
     // sstatus.SPP  = 0 -> sret enters U-mode (already 0).
-    // sstatus.FS   = Dirty -> user floating-point instructions are legal.
     unsafe {
         (*t).state = ThreadState::Inactive as u8;
         (*t).time_slice_ticks = DEFAULT_TIME_SLICE_TICKS;
+        (*t).flags = TCB_FLAG_FPU_DISABLED;
         (*t).context.sstatus = crate::arch::riscv64::trap::USER_SSTATUS;
     }
 }

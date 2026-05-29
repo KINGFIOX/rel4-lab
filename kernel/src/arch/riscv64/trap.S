@@ -74,49 +74,6 @@ trap_entry:
     csrr    t0, sstatus
     sd      t0, 33*8(sp)
 
-    // Enable S-mode access to FPRs while saving them. The trapped user
-    // context may have had FS=Off (e.g. fpuDisabled tests), and an fsd
-    // with FS=Off would itself fault in the kernel.
-    li      t1, 0x6000             // sstatus.FS = Dirty
-    csrs    sstatus, t1
-
-    // Save floating-point state. The kernel runs user contexts with
-    // sstatus.FS=Dirty, so these instructions are legal in S-mode.
-    fsd     f0,  35*8(sp)
-    fsd     f1,  36*8(sp)
-    fsd     f2,  37*8(sp)
-    fsd     f3,  38*8(sp)
-    fsd     f4,  39*8(sp)
-    fsd     f5,  40*8(sp)
-    fsd     f6,  41*8(sp)
-    fsd     f7,  42*8(sp)
-    fsd     f8,  43*8(sp)
-    fsd     f9,  44*8(sp)
-    fsd     f10, 45*8(sp)
-    fsd     f11, 46*8(sp)
-    fsd     f12, 47*8(sp)
-    fsd     f13, 48*8(sp)
-    fsd     f14, 49*8(sp)
-    fsd     f15, 50*8(sp)
-    fsd     f16, 51*8(sp)
-    fsd     f17, 52*8(sp)
-    fsd     f18, 53*8(sp)
-    fsd     f19, 54*8(sp)
-    fsd     f20, 55*8(sp)
-    fsd     f21, 56*8(sp)
-    fsd     f22, 57*8(sp)
-    fsd     f23, 58*8(sp)
-    fsd     f24, 59*8(sp)
-    fsd     f25, 60*8(sp)
-    fsd     f26, 61*8(sp)
-    fsd     f27, 62*8(sp)
-    fsd     f28, 63*8(sp)
-    fsd     f29, 64*8(sp)
-    fsd     f30, 65*8(sp)
-    fsd     f31, 66*8(sp)
-    frcsr   t0
-    sd      t0, 67*8(sp)
-
     // a0 = pointer to UserContext (== current sp).
     mv      a0, sp
 
@@ -136,50 +93,11 @@ restore_user_context:
     // a0 = pointer to UserContext to restore.
     mv      sp, a0
 
-    // Load sepc and temporarily enable FPR access for restore. The
-    // final user sstatus is written after fld/fscsr so FS=Off contexts
-    // can still have their saved FPR image restored.
+    // Load sepc and sstatus. The kernel intentionally does not save or
+    // restore floating-point state; user contexts run with sstatus.FS=Off.
     ld      t0, 32*8(sp)
     csrw    sepc, t0
     ld      t2, 33*8(sp)
-    li      t1, 0x6000             // sstatus.FS = Dirty
-    csrs    sstatus, t1
-
-    // Restore floating-point state before returning to user.
-    fld     f0,  35*8(sp)
-    fld     f1,  36*8(sp)
-    fld     f2,  37*8(sp)
-    fld     f3,  38*8(sp)
-    fld     f4,  39*8(sp)
-    fld     f5,  40*8(sp)
-    fld     f6,  41*8(sp)
-    fld     f7,  42*8(sp)
-    fld     f8,  43*8(sp)
-    fld     f9,  44*8(sp)
-    fld     f10, 45*8(sp)
-    fld     f11, 46*8(sp)
-    fld     f12, 47*8(sp)
-    fld     f13, 48*8(sp)
-    fld     f14, 49*8(sp)
-    fld     f15, 50*8(sp)
-    fld     f16, 51*8(sp)
-    fld     f17, 52*8(sp)
-    fld     f18, 53*8(sp)
-    fld     f19, 54*8(sp)
-    fld     f20, 55*8(sp)
-    fld     f21, 56*8(sp)
-    fld     f22, 57*8(sp)
-    fld     f23, 58*8(sp)
-    fld     f24, 59*8(sp)
-    fld     f25, 60*8(sp)
-    fld     f26, 61*8(sp)
-    fld     f27, 62*8(sp)
-    fld     f28, 63*8(sp)
-    fld     f29, 64*8(sp)
-    fld     f30, 65*8(sp)
-    fld     f31, 66*8(sp)
-    ld      t0, 67*8(sp)
-    fscsr   t0
     csrw    sstatus, t2
 
     // Put the UserContext pointer into sscratch so the next trap entry

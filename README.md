@@ -9,7 +9,7 @@ binary boots unmodified on top of it.
 The `sel4test-driver` rootserver boots, spawns helper TCBs and per-test
 child processes in their own VSpaces, and runs them on the Rust kernel
 through the official `libsel4` ABI. Endpoint IPC, notifications, reply
-caps, FPU save/restore, timer preemption, several CNode/Untyped paths,
+caps, timer preemption, several CNode/Untyped paths,
 multi-size frame map/unmap, DomainSet, fault IPC, and ASID pool creation
 are implemented far enough for the full suite to run to completion.
 
@@ -55,11 +55,17 @@ now be built with `CONFIG_ENABLE_SMP_SUPPORT`/`CONFIG_MAX_NUM_NODES=2`,
 QEMU can boot with two harts, and the Rust kernel accepts the SMP-shifted
 invocation ABI plus `TCBSetAffinity`. The current kernel still parks
 secondary harts and simulates enough affinity/progress semantics on the
-primary hart to pass `FPU0002` and `MULTICORE0001..0005`; real per-hart
-scheduling, IPIs, and cross-hart TLB shootdown remain future work.
+primary hart to pass `MULTICORE0001..0005`; real per-hart scheduling, IPIs,
+and cross-hart TLB shootdown remain future work.
 The upstream OpenSBI packaging helper is also pinned to
 `rv64imafdc_zicsr_zifencei` so the current GCC/binutils toolchain can
 rebuild the SMP image after CMake regeneration.
+
+M4.4g removes kernel-owned floating-point context support. The trap entry no
+longer executes F/D instructions, `UserContext` no longer contains FPR/FCSR
+state, user `sstatus.FS` is left off, and the seL4 TCB FPU flag is reported as
+disabled. This intentionally drops the previous FPU sel4test coverage in favor
+of keeping the Rust kernel free of floating-point save/restore machinery.
 
 M5.1/M5.2 were the temporary in-kernel xv6 bridge: a generated wrapper linked
 one xv6 user program at `0x10000000`, and the Rust kernel directly dispatched
@@ -112,7 +118,8 @@ flags. The host crate also denies the Rust 2024 unsafe migration lints
 | M4.4c | RISC-V `PAGEFAULT1005` inter-AS undefined-instruction test: avoid cross-VSpace pointer dereference in the handler and let the faulter restart stub perform the writeback. Full suite now reports **122 passed / 45 disabled**. | ✅ Done |
 | M4.4d | `SCHED0021` equal-priority preemption under QEMU simulation: Rust scheduler uses per-TCB time-slice accounting, and sel4test uses a simulation-specific timing upper bound while preserving the original non-simulation bound. Full suite now reports **123 passed / 44 disabled**. | ✅ Done |
 | M4.4e | RISC-V `CACHEFLUSH0004`: enable the non-ARM cache/retype test and validate that retyped frames are zeroed after `Untyped_Revoke`. Full suite now reports **124 passed / 43 disabled**. | ✅ Done |
-| M4.4f | SMP-compatible RV64 build/run: secondary harts park before shared init; SMP invocation-label shift and `TCBSetAffinity` are handled; QEMU wrappers accept `SMP=2`; `FPU0002` and `MULTICORE0001..0005` pass in the full SMP run. Current SMP full suite reports **125 passed / 42 disabled**. | ✅ Done |
+| M4.4f | SMP-compatible RV64 build/run: secondary harts park before shared init; SMP invocation-label shift and `TCBSetAffinity` are handled; QEMU wrappers accept `SMP=2`; `MULTICORE0001..0005` pass in the full SMP run. Current SMP full suite previously reported **125 passed / 42 disabled** before FPU support was removed. | ✅ Done |
+| M4.4g | Remove kernel floating-point context handling: no FPR/FCSR fields in `UserContext`, no `fsd`/`fld`/FCSR instructions in trap entry/exit, and TCB FPU state is permanently disabled. | ✅ Done |
 | M5.1 | xv6 user-program smoke path: build an xv6 user ELF as rootserver and route xv6 positive syscalls through a temporary kernel compatibility module. | ✅ Superseded |
 | M5.2 | Temporary kernel-side xv6 read-only pseudo-fs: expose `README`, `.`, `/`, and `console`; implement fd offsets and `fstat`. | ✅ Superseded |
 | M5.3 | seL4-style xv6 host: embed the xv6 user ELF into a no_std Rust 2024 Cargo rootserver, spawn it as a child TCB/VSpace with a fault endpoint, and handle xv6 syscalls via `UnknownSyscall` fault IPC. Smoke set passes: `echo`, `forktest`, `cat README`, `ls .`, `wc README`, `grep xv6 README`. | ✅ Done |
@@ -142,7 +149,8 @@ run, fall into these primary buckets:
 
 The current SMP validation uses the upstream sel4test tree configured with
 `SMP=ON` and `NUM_NODES=2`, then boots the Rust kernel under QEMU with
-`SMP=2`. This enables and passes the non-MCS SMP group:
+`SMP=2`. Before M4.4g removed FPU context support, this enabled and passed the
+non-MCS SMP group:
 
 ```text
 FPU0002, MULTICORE0001, MULTICORE0002, MULTICORE0003,
@@ -155,7 +163,7 @@ not a true multi-hart scheduler: secondary harts are parked before BSS/global
 init, while the primary hart provides affinity-compatible behavior sufficient
 for the current tests.
 
-Latest SMP full-run summary:
+Historical SMP full-run summary before M4.4g:
 
 ```text
 ELF-loader started on (HART 0) (NODES 2)
