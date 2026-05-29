@@ -1711,9 +1711,6 @@ fn finalize_cap(cap: &mut Cap, is_final: bool) {
             }
         }
         Some(CapTag::CNode) => {
-            if !is_final {
-                return;
-            }
             // Mirrors the C kernel `finaliseCap` returning a Zombie for a
             // CNode: every slot inside the CNode must be cleaned up before
             // we reuse the storage. Without this, caps held by a test
@@ -1737,14 +1734,13 @@ fn finalize_cap(cap: &mut Cap, is_final: bool) {
                             let inner = &mut slots[i];
                             if !inner.cap.is_null() {
                                 let inner_ptr = inner as *mut Cte;
-                                revoke_descendants(inner_ptr);
-                                let inner_is_self_cnode =
-                                    inner.cap.tag() == Some(CapTag::CNode)
-                                        && inner.cap.cnode_ptr() == base;
-                                if !inner_is_self_cnode {
-                                    let is_final = is_final_capability(inner_ptr);
-                                    finalize_cap(&mut inner.cap, is_final);
-                                }
+                                // Drop the CNode's internal cap slots so
+                                // their MDB links stop pinning untypeds.
+                                // The owning Untyped_Revoke path will
+                                // finalise physical descendants in CDT
+                                // order; doing that recursively here can
+                                // destroy caps that are still live through
+                                // another CSpace root.
                                 crate::object::cnode::mdb_unlink(inner_ptr);
                                 inner.cap = Cap::null();
                             }
