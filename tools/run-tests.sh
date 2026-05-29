@@ -8,7 +8,7 @@
 #   tools/run-tests.sh             # quiet — only prints summary + exit code
 #   tools/run-tests.sh --verbose   # stream QEMU output as the test runs
 #   TIMEOUT=300 tools/run-tests.sh # override hard timeout (seconds)
-#   SMP=2 tools/run-tests.sh       # boot QEMU with two harts
+#   SMP=1 tools/run-tests.sh       # override for a non-SMP upstream build
 #
 # Exit codes:
 #   0  - "Test suite passed." appears before EOF / timeout
@@ -23,7 +23,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PACKED_IMAGE="${ROOT_DIR}/images/sel4test-driver-image-riscv-qemu-riscv-virt"
 LOG_FILE="${LOG_FILE:-${ROOT_DIR}/target/sel4test-last-run.log}"
 TIMEOUT="${TIMEOUT:-180}"
-SMP="${SMP:-1}"
+SMP="${SMP:-2}"
 
 VERBOSE=0
 for arg in "$@"; do

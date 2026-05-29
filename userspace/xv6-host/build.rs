@@ -14,6 +14,7 @@ fn main() {
     println!("cargo:rustc-link-arg-bin=xv6-host=-zmax-page-size=4096");
 
     println!("cargo:rerun-if-env-changed=XV6_PAYLOAD_ELF");
+    println!("cargo:rerun-if-env-changed=XV6_EXEC_CATALOG_RS");
     let payload = env::var("XV6_PAYLOAD_ELF").unwrap_or_else(|_| {
         panic!(
             "XV6_PAYLOAD_ELF must point to a linked xv6 user payload; \
@@ -22,4 +23,13 @@ fn main() {
     });
     println!("cargo:rerun-if-changed={payload}");
     println!("cargo:rustc-env=XV6_PAYLOAD_ELF={payload}");
+
+    let catalog = env::var("XV6_EXEC_CATALOG_RS").unwrap_or_else(|_| {
+        panic!(
+            "XV6_EXEC_CATALOG_RS must point to the generated xv6 exec catalog; \
+             use tools/build-xv6-user-rootserver.sh PROGRAM [ARG...]"
+        )
+    });
+    println!("cargo:rerun-if-changed={catalog}");
+    println!("cargo:rustc-env=XV6_EXEC_CATALOG_RS={catalog}");
 }

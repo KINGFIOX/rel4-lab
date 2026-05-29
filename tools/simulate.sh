@@ -17,7 +17,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-KERNEL_ELF="${ROOT_DIR}/target/riscv64gc-unknown-none-elf/release/kernel"
+RUST_TARGET="${RUST_TARGET:-riscv64imac-unknown-none-elf}"
+KERNEL_ELF="${ROOT_DIR}/target/${RUST_TARGET}/release/kernel"
 PACKED_IMAGE="${ROOT_DIR}/images/sel4test-driver-image-riscv-qemu-riscv-virt"
 SMP="${SMP:-1}"
 

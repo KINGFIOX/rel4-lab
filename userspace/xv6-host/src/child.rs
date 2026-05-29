@@ -3,25 +3,34 @@ use core::ptr;
 
 use crate::allocator::Allocator;
 use crate::consts::*;
-use crate::sel4::{call_checked, cap_rights, cnode_cap_data};
+use crate::sel4::{
+    call_checked, cap_rights, cnode_cap_data, msg_info, msg_label, read_ipc_mr, sel4_call,
+};
 use crate::types::{Child, Mapping};
 use crate::util::*;
 
 static mut MAPPINGS: [Mapping; MAX_MAPPINGS] = [Mapping {
+    pid: 0,
     child_page: 0,
     alias_page: 0,
+    writable: false,
+    executable: false,
 }; MAX_MAPPINGS];
 static mut MAPPING_COUNT: usize = 0;
 
-pub(crate) fn create_child(alloc: &mut Allocator) -> Child {
+pub(crate) fn create_child(
+    alloc: &mut Allocator,
+    pid: u64,
+    parent_pid: u64,
+    fault_ep: u64,
+) -> Child {
     let tcb = alloc.retype_one(OBJ_TCB, 0);
     let cnode = alloc.retype_one(OBJ_CAP_TABLE, CHILD_CNODE_BITS);
     let vspace = alloc.retype_one(OBJ_PAGE_TABLE, 0);
-    let fault_ep = alloc.retype_one(OBJ_ENDPOINT, 0);
     let ipc_frame = alloc.retype_one(OBJ_4K, 0);
 
     call_checked(INIT_ASID_POOL, LABEL_RISCV_ASID_POOL_ASSIGN, &[vspace], &[]);
-    map_existing_frame(alloc, ipc_frame, vspace, CHILD_IPC_BUFFER, true, false);
+    map_existing_frame(alloc, pid, ipc_frame, vspace, CHILD_IPC_BUFFER, true, false);
 
     let mrs = [
         CHILD_FAULT_EP,
@@ -29,7 +38,7 @@ pub(crate) fn create_child(alloc: &mut Allocator) -> Child {
         fault_ep,
         ROOT_CNODE_DEPTH,
         cap_rights(true, true, true, true),
-        0,
+        pid,
     ];
     call_checked(cnode, LABEL_CNODE_MINT, &[ROOT_CNODE], &mrs);
 
@@ -39,17 +48,27 @@ pub(crate) fn create_child(alloc: &mut Allocator) -> Child {
     call_checked(tcb, LABEL_TCB_SET_PRIORITY, &[INIT_TCB], &[254]);
 
     Child {
+        pid,
+        parent_pid,
+        state: PROC_RUNNABLE,
+        exit_status: 0,
         tcb,
         vspace,
         fault_ep,
         entry: 0,
         brk: 0,
         heap_mapped_end: 0,
+        wait_status_ptr: 0,
+        wait_reply_slot: 0,
+        wait_reply_mrs: [0; 11],
     }
 }
 
 pub(crate) fn load_payload(alloc: &mut Allocator, child: &mut Child) {
-    let elf = PAYLOAD_ELF;
+    load_elf(alloc, child, PAYLOAD_ELF);
+}
+
+pub(crate) fn load_elf(alloc: &mut Allocator, child: &mut Child, elf: &[u8]) {
     if elf.len() < 64 || &elf[0..4] != b"\x7fELF" || elf[4] != 2 || elf[5] != 1 {
         log("xv6-host: bad payload ELF\n");
         halt_loop();
@@ -83,10 +102,10 @@ pub(crate) fn load_payload(alloc: &mut Allocator, child: &mut Child) {
         let end = align_up(p_vaddr.saturating_add(p_memsz));
         let mut page = start;
         while page < end {
-            map_fresh_child_page(alloc, child.vspace, page, true, true);
+            map_fresh_child_page(alloc, child, page, true, true);
             page += PAGE_SIZE;
         }
-        if p_filesz > 0 && !copy_to_child(p_vaddr, &elf[p_offset..p_offset + p_filesz]) {
+        if p_filesz > 0 && !copy_to_child(child, p_vaddr, &elf[p_offset..p_offset + p_filesz]) {
             log("xv6-host: failed to copy payload\n");
             halt_loop();
         }
@@ -103,42 +122,72 @@ pub(crate) fn load_payload(alloc: &mut Allocator, child: &mut Child) {
     log("\n");
 }
 
+pub(crate) fn reset_process_mappings(pid: u64) {
+    unsafe {
+        let mut i = 0;
+        while i < MAPPING_COUNT {
+            if MAPPINGS[i].pid == pid && MAPPINGS[i].child_page != CHILD_IPC_BUFFER {
+                MAPPINGS[i].pid = 0;
+            }
+            i += 1;
+        }
+    }
+}
+
+pub(crate) fn clear_process_mappings(pid: u64) {
+    unsafe {
+        let mut i = 0;
+        while i < MAPPING_COUNT {
+            if MAPPINGS[i].pid == pid {
+                MAPPINGS[i].pid = 0;
+            }
+            i += 1;
+        }
+    }
+}
+
 pub(crate) fn map_stack(alloc: &mut Allocator, child: &Child) {
     for i in 0..CHILD_STACK_PAGES {
         let va = CHILD_STACK_TOP - ((i as u64 + 1) * PAGE_SIZE);
-        map_fresh_child_page(alloc, child.vspace, va, true, false);
+        map_fresh_child_page(alloc, child, va, true, false);
     }
 }
 
 pub(crate) fn start_child(child: &Child) {
-    let mut regs = [0u64; 34];
-    regs[0] = 1;
-    regs[1] = 34;
-    regs[2] = child.entry;
-    regs[3] = 0;
-    regs[4] = CHILD_STACK_TOP;
-    regs[18] = 0;
-    regs[19] = 0;
-    call_checked(child.tcb, LABEL_TCB_WRITE_REGISTERS, &[], &regs);
+    let mut ctx = [0u64; USER_CONTEXT_WORDS];
+    ctx[0] = child.entry;
+    ctx[2] = CHILD_STACK_TOP;
+    ctx[16] = 0;
+    ctx[17] = 0;
+    write_user_context(child.tcb, &ctx, true);
 }
 
 pub(crate) fn map_fresh_child_page(
     alloc: &mut Allocator,
-    vspace: u64,
+    child: &Child,
     child_va: u64,
     writable: bool,
     executable: bool,
 ) -> u64 {
     let page = align_down(child_va);
-    if let Some(alias) = lookup_alias(page) {
+    if let Some(alias) = lookup_alias(child.pid, page) {
         return alias;
     }
     let frame_slot = alloc.retype_one(OBJ_4K, 0);
-    map_existing_frame(alloc, frame_slot, vspace, page, writable, executable)
+    map_existing_frame(
+        alloc,
+        child.pid,
+        frame_slot,
+        child.vspace,
+        page,
+        writable,
+        executable,
+    )
 }
 
 fn map_existing_frame(
     alloc: &mut Allocator,
+    pid: u64,
     frame_slot: u64,
     vspace: u64,
     child_va: u64,
@@ -146,7 +195,7 @@ fn map_existing_frame(
     executable: bool,
 ) -> u64 {
     let alias_slot = alloc.copy_cap(frame_slot, cap_rights(false, false, true, true));
-    let alias_va = register_mapping(child_va);
+    let alias_va = register_mapping(pid, child_va, writable, executable);
     page_map(alias_slot, INIT_VSPACE, alias_va, true, false);
     zero_page(alias_va);
     page_map(frame_slot, vspace, child_va, writable, executable);
@@ -164,29 +213,46 @@ fn page_map(frame_slot: u64, vspace: u64, va: u64, writable: bool, executable: b
     );
 }
 
-fn register_mapping(child_page: u64) -> u64 {
+fn register_mapping(pid: u64, child_page: u64, writable: bool, executable: bool) -> u64 {
     unsafe {
-        if MAPPING_COUNT >= MAX_MAPPINGS {
+        let mut slot = MAPPING_COUNT;
+        let mut i = 0;
+        while i < MAPPING_COUNT {
+            if MAPPINGS[i].pid == 0 {
+                slot = i;
+                break;
+            }
+            i += 1;
+        }
+        if slot >= MAX_MAPPINGS {
             log("xv6-host: mapping table full\n");
             halt_loop();
         }
-        let alias = HOST_ALIAS_BASE + (MAPPING_COUNT as u64) * PAGE_SIZE;
-        MAPPINGS[MAPPING_COUNT] = Mapping {
+        let alias = if slot == MAPPING_COUNT {
+            let alias = HOST_ALIAS_BASE + (MAPPING_COUNT as u64) * PAGE_SIZE;
+            MAPPING_COUNT += 1;
+            alias
+        } else {
+            MAPPINGS[slot].alias_page
+        };
+        MAPPINGS[slot] = Mapping {
+            pid,
             child_page: align_down(child_page),
             alias_page: alias,
+            writable,
+            executable,
         };
-        MAPPING_COUNT += 1;
         alias
     }
 }
 
-fn lookup_alias(child_page: u64) -> Option<u64> {
+fn lookup_alias(pid: u64, child_page: u64) -> Option<u64> {
     unsafe {
         let page = align_down(child_page);
         let mut i = 0;
         while i < MAPPING_COUNT {
             let m = MAPPINGS[i];
-            if m.child_page == page {
+            if m.pid == pid && m.child_page == page {
                 return Some(m.alias_page);
             }
             i += 1;
@@ -195,19 +261,19 @@ fn lookup_alias(child_page: u64) -> Option<u64> {
     }
 }
 
-fn child_ptr(va: u64) -> Option<*mut u8> {
+fn child_ptr(child: &Child, va: u64) -> Option<*mut u8> {
     let page = align_down(va);
     let off = va - page;
-    lookup_alias(page).map(|alias| (alias + off) as *mut u8)
+    lookup_alias(child.pid, page).map(|alias| (alias + off) as *mut u8)
 }
 
-pub(crate) fn copy_from_child(va: u64, out: &mut [u8]) -> bool {
+pub(crate) fn copy_from_child(child: &Child, va: u64, out: &mut [u8]) -> bool {
     let mut done = 0usize;
     while done < out.len() {
         let cur = va + done as u64;
         let page_left = (PAGE_SIZE - (cur & (PAGE_SIZE - 1))) as usize;
         let n = min(page_left, out.len() - done);
-        let Some(src) = child_ptr(cur) else {
+        let Some(src) = child_ptr(child, cur) else {
             return false;
         };
         unsafe { ptr::copy_nonoverlapping(src as *const u8, out[done..].as_mut_ptr(), n) };
@@ -216,13 +282,13 @@ pub(crate) fn copy_from_child(va: u64, out: &mut [u8]) -> bool {
     true
 }
 
-pub(crate) fn copy_to_child(va: u64, src: &[u8]) -> bool {
+pub(crate) fn copy_to_child(child: &Child, va: u64, src: &[u8]) -> bool {
     let mut done = 0usize;
     while done < src.len() {
         let cur = va + done as u64;
         let page_left = (PAGE_SIZE - (cur & (PAGE_SIZE - 1))) as usize;
         let n = min(page_left, src.len() - done);
-        let Some(dst) = child_ptr(cur) else {
+        let Some(dst) = child_ptr(child, cur) else {
             return false;
         };
         unsafe { ptr::copy_nonoverlapping(src[done..].as_ptr(), dst, n) };
@@ -231,10 +297,10 @@ pub(crate) fn copy_to_child(va: u64, src: &[u8]) -> bool {
     true
 }
 
-pub(crate) fn copy_cstr_from_child(va: u64, out: &mut [u8]) -> Option<usize> {
+pub(crate) fn copy_cstr_from_child(child: &Child, va: u64, out: &mut [u8]) -> Option<usize> {
     for i in 0..out.len() {
         let mut b = [0u8; 1];
-        if !copy_from_child(va + i as u64, &mut b) {
+        if !copy_from_child(child, va + i as u64, &mut b) {
             return None;
         }
         out[i] = b[0];
@@ -243,6 +309,67 @@ pub(crate) fn copy_cstr_from_child(va: u64, out: &mut [u8]) -> Option<usize> {
         }
     }
     None
+}
+
+pub(crate) fn clone_address_space(alloc: &mut Allocator, parent: &Child, child: &Child) {
+    unsafe {
+        let mut i = 0;
+        while i < MAPPING_COUNT {
+            let m = MAPPINGS[i];
+            if m.pid == parent.pid && m.child_page != CHILD_IPC_BUFFER {
+                let dst_alias =
+                    map_fresh_child_page(alloc, child, m.child_page, m.writable, m.executable);
+                ptr::copy_nonoverlapping(
+                    m.alias_page as *const u8,
+                    dst_alias as *mut u8,
+                    PAGE_SIZE as usize,
+                );
+            }
+            i += 1;
+        }
+    }
+}
+
+pub(crate) const USER_CONTEXT_WORDS: usize = 32;
+
+pub(crate) fn read_user_context(tcb: u64) -> [u64; USER_CONTEXT_WORDS] {
+    let reply = unsafe {
+        sel4_call(
+            tcb,
+            msg_info(LABEL_TCB_READ_REGISTERS, 0, 0, 2),
+            &[0, USER_CONTEXT_WORDS as u64],
+        )
+    };
+    let err = msg_label(reply.info);
+    if err != 0 {
+        log("xv6-host: TCB_ReadRegisters failed err=");
+        print_u64(err);
+        log("\n");
+        halt_loop();
+    }
+    let mut ctx = [0u64; USER_CONTEXT_WORDS];
+    let mut i = 0;
+    while i < USER_CONTEXT_WORDS {
+        ctx[i] = if i < 4 {
+            reply.mrs[i]
+        } else {
+            unsafe { read_ipc_mr(i) }
+        };
+        i += 1;
+    }
+    ctx
+}
+
+pub(crate) fn write_user_context(tcb: u64, ctx: &[u64; USER_CONTEXT_WORDS], resume: bool) {
+    let mut mrs = [0u64; USER_CONTEXT_WORDS + 2];
+    mrs[0] = resume as u64;
+    mrs[1] = USER_CONTEXT_WORDS as u64;
+    let mut i = 0;
+    while i < USER_CONTEXT_WORDS {
+        mrs[i + 2] = ctx[i];
+        i += 1;
+    }
+    call_checked(tcb, LABEL_TCB_WRITE_REGISTERS, &[], &mrs);
 }
 
 fn zero_page(va: u64) {

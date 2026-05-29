@@ -26,7 +26,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SEL4_BUILD_DIR="${SEL4_BUILD_DIR:-/Users/wangfiox/sel4/sel4test/build-riscv64}"
-RUST_TARGET_DIR="${ROOT_DIR}/target/riscv64gc-unknown-none-elf/release"
+RUST_TARGET="${RUST_TARGET:-riscv64imac-unknown-none-elf}"
+RUST_TARGET_DIR="${ROOT_DIR}/target/${RUST_TARGET}/release"
 RUST_KERNEL_ELF="${RUST_TARGET_DIR}/kernel"
 ROOTSERVER_ELF="${ROOTSERVER_ELF:-}"
 
@@ -38,7 +39,7 @@ die() { log "ERROR: $*"; exit 1; }
 
 # 1. Build the Rust kernel.
 log "building Rust kernel..."
-(cd "${ROOT_DIR}" && cargo build --release)
+(cd "${ROOT_DIR}" && cargo build --release --target "${RUST_TARGET}" -p kernel)
 [[ -f "${RUST_KERNEL_ELF}" ]] || die "Rust kernel ELF missing: ${RUST_KERNEL_ELF}"
 
 # 2. Sanity-check the seL4 build dir exists.

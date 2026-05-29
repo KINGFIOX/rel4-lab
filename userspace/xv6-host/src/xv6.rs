@@ -1,15 +1,27 @@
 use core::cmp::min;
 
 use crate::allocator::Allocator;
-use crate::child::{copy_cstr_from_child, copy_from_child, copy_to_child, map_fresh_child_page};
+use crate::child::{
+    clear_process_mappings, clone_address_space, copy_cstr_from_child, copy_from_child,
+    copy_to_child, create_child, load_elf, map_fresh_child_page, map_stack, read_user_context,
+    reset_process_mappings, write_user_context,
+};
 use crate::consts::*;
-use crate::sel4::sel4_yield;
+use crate::sel4::{call_checked, msg_info, sel4_send, sel4_yield};
 use crate::types::{Child, FdEntry};
 use crate::util::*;
 
 static mut FD_TABLE: [FdEntry; MAX_FD] = [FdEntry::closed(); MAX_FD];
 static mut TICKS: u64 = 0;
 static mut PIPES: [Pipe; MAX_PIPES] = [Pipe::closed(); MAX_PIPES];
+static mut NEXT_PID: u64 = 2;
+
+pub(crate) enum SyscallResult {
+    Reply(i64),
+    ReplyFrame([u64; 11]),
+    Block,
+    Stop,
+}
 
 #[derive(Copy, Clone)]
 struct Pipe {
@@ -44,43 +56,49 @@ pub(crate) fn tick() {
     }
 }
 
-pub(crate) fn handle_xv6_syscall(alloc: &mut Allocator, child: &mut Child, mrs: &[u64; 16]) -> i64 {
+pub(crate) fn handle_xv6_syscall(
+    alloc: &mut Allocator,
+    procs: &mut [Child; MAX_PROCS],
+    proc_idx: usize,
+    mrs: &[u64; 64],
+) -> SyscallResult {
     let sysno = mrs[10];
     let a0 = mrs[3];
     let a1 = mrs[4];
     let a2 = mrs[5];
     tick();
 
-    match sysno {
+    let ret = match sysno {
+        SYS_FORK => return SyscallResult::Reply(sys_fork(alloc, procs, proc_idx, mrs)),
         SYS_EXIT => {
-            log("xv6-host: exit(");
-            print_i64(a0 as i64);
-            log(")\n");
-            halt_loop();
+            return sys_exit(procs, proc_idx, a0 as i32);
         }
-        SYS_WRITE => sys_write(a0 as usize, a1, a2 as usize),
-        SYS_READ => sys_read(a0 as usize, a1, a2 as usize),
-        SYS_OPEN => sys_open(a0, a1 as u32),
+        SYS_WAIT => return sys_wait(alloc, procs, proc_idx, a0, mrs),
+        SYS_WRITE => sys_write(&procs[proc_idx], a0 as usize, a1, a2 as usize),
+        SYS_READ => sys_read(&procs[proc_idx], a0 as usize, a1, a2 as usize),
+        SYS_OPEN => sys_open(&procs[proc_idx], a0, a1 as u32),
         SYS_CLOSE => sys_close(a0 as usize),
         SYS_DUP => sys_dup(a0 as usize),
-        SYS_FSTAT => sys_fstat(a0 as usize, a1),
-        SYS_SBRK => sys_sbrk(alloc, child, a0 as i64),
-        SYS_GETPID => 1,
+        SYS_FSTAT => sys_fstat(&procs[proc_idx], a0 as usize, a1),
+        SYS_SBRK => sys_sbrk(alloc, &mut procs[proc_idx], a0 as i64),
+        SYS_GETPID => procs[proc_idx].pid as i64,
         SYS_UPTIME => unsafe { TICKS as i64 },
         SYS_PAUSE => {
             unsafe { sel4_yield() };
             0
         }
-        SYS_KILL => sys_kill(a0 as i64),
-        SYS_CHDIR => sys_chdir(a0),
-        SYS_PIPE => sys_pipe(a0),
-        SYS_MKNOD => sys_mknod(a0),
-        SYS_EXEC | SYS_UNLINK | SYS_LINK | SYS_MKDIR | SYS_FORK | SYS_WAIT => -1,
+        SYS_KILL => sys_kill(procs, a0 as i64),
+        SYS_CHDIR => sys_chdir(&procs[proc_idx], a0),
+        SYS_PIPE => sys_pipe(&procs[proc_idx], a0),
+        SYS_MKNOD => sys_mknod(&procs[proc_idx], a0),
+        SYS_EXEC => return sys_exec(alloc, &mut procs[proc_idx], a0, a1),
+        SYS_UNLINK | SYS_LINK | SYS_MKDIR => -1,
         _ => -1,
-    }
+    };
+    SyscallResult::Reply(ret)
 }
 
-fn sys_write(fd: usize, buf: u64, len: usize) -> i64 {
+fn sys_write(child: &Child, fd: usize, buf: u64, len: usize) -> i64 {
     if len == 0 {
         return 0;
     }
@@ -88,7 +106,7 @@ fn sys_write(fd: usize, buf: u64, len: usize) -> i64 {
     let mut done = 0usize;
     while done < len {
         let n = min(scratch.len(), len - done);
-        if !copy_from_child(buf + done as u64, &mut scratch[..n]) {
+        if !copy_from_child(child, buf + done as u64, &mut scratch[..n]) {
             return -1;
         }
         let wrote = unsafe {
@@ -114,7 +132,7 @@ fn sys_write(fd: usize, buf: u64, len: usize) -> i64 {
     done as i64
 }
 
-fn sys_read(fd: usize, dst: u64, len: usize) -> i64 {
+fn sys_read(child: &Child, fd: usize, dst: u64, len: usize) -> i64 {
     if fd >= MAX_FD || len == 0 {
         return if fd < MAX_FD { 0 } else { -1 };
     }
@@ -128,7 +146,7 @@ fn sys_read(fd: usize, dst: u64, len: usize) -> i64 {
                     return 0;
                 }
                 let n = min(len, data.len() - entry.offset);
-                if !copy_to_child(dst, &data[entry.offset..entry.offset + n]) {
+                if !copy_to_child(child, dst, &data[entry.offset..entry.offset + n]) {
                     return -1;
                 }
                 FD_TABLE[fd].offset += n;
@@ -140,21 +158,21 @@ fn sys_read(fd: usize, dst: u64, len: usize) -> i64 {
                     return 0;
                 }
                 let n = min(len, data.len() - entry.offset);
-                if !copy_to_child(dst, &data[entry.offset..entry.offset + n]) {
+                if !copy_to_child(child, dst, &data[entry.offset..entry.offset + n]) {
                     return -1;
                 }
                 FD_TABLE[fd].offset += n;
                 n as i64
             }
-            FD_PIPE_READ => pipe_read(entry.aux, dst, len),
+            FD_PIPE_READ => pipe_read(child, entry.aux, dst, len),
             _ => -1,
         }
     }
 }
 
-fn sys_open(path_ptr: u64, flags: u32) -> i64 {
+fn sys_open(child: &Child, path_ptr: u64, flags: u32) -> i64 {
     let mut path = [0u8; 128];
-    let Some(len) = copy_cstr_from_child(path_ptr, &mut path) else {
+    let Some(len) = copy_cstr_from_child(child, path_ptr, &mut path) else {
         return -1;
     };
     let name = basename(&path[..len]);
@@ -239,7 +257,7 @@ fn sys_dup(fd: usize) -> i64 {
     -1
 }
 
-fn sys_fstat(fd: usize, dst: u64) -> i64 {
+fn sys_fstat(child: &Child, fd: usize, dst: u64) -> i64 {
     if fd >= MAX_FD {
         return -1;
     }
@@ -257,7 +275,7 @@ fn sys_fstat(fd: usize, dst: u64) -> i64 {
     write_u16(&mut st, 8, typ);
     write_u16(&mut st, 10, 1);
     write_u64_bytes(&mut st, 16, size);
-    if !copy_to_child(dst, &st) {
+    if !copy_to_child(child, dst, &st) {
         return -1;
     }
     0
@@ -276,7 +294,7 @@ fn sys_sbrk(alloc: &mut Allocator, child: &mut Child, increment: i64) -> i64 {
     if new_brk > child.heap_mapped_end {
         let mut page = align_up(child.heap_mapped_end);
         while page < align_up(new_brk) {
-            map_fresh_child_page(alloc, child.vspace, page, true, false);
+            map_fresh_child_page(alloc, child, page, true, false);
             page += PAGE_SIZE;
         }
         child.heap_mapped_end = align_up(new_brk);
@@ -285,13 +303,291 @@ fn sys_sbrk(alloc: &mut Allocator, child: &mut Child, increment: i64) -> i64 {
     old as i64
 }
 
-fn sys_kill(pid: i64) -> i64 {
-    if pid == 1 { 0 } else { -1 }
+fn sys_fork(
+    alloc: &mut Allocator,
+    procs: &mut [Child; MAX_PROCS],
+    parent_idx: usize,
+    mrs: &[u64; 64],
+) -> i64 {
+    let Some(slot) = find_free_proc(procs) else {
+        return -1;
+    };
+    let parent = procs[parent_idx];
+    let pid = unsafe {
+        let pid = NEXT_PID;
+        NEXT_PID = NEXT_PID.wrapping_add(1);
+        pid
+    };
+
+    let mut child = create_child(alloc, pid, parent.pid, parent.fault_ep);
+    child.entry = parent.entry;
+    child.brk = parent.brk;
+    child.heap_mapped_end = parent.heap_mapped_end;
+    clone_address_space(alloc, &parent, &child);
+
+    let mut ctx = read_user_context(parent.tcb);
+    ctx[0] = mrs[0].wrapping_add(4);
+    ctx[16] = 0;
+    write_user_context(child.tcb, &ctx, true);
+    procs[slot] = child;
+
+    log("xv6-host: fork parent=");
+    print_u64(parent.pid);
+    log(" child=");
+    print_u64(pid);
+    log("\n");
+    pid as i64
 }
 
-fn sys_chdir(path_ptr: u64) -> i64 {
+fn sys_exit(procs: &mut [Child; MAX_PROCS], proc_idx: usize, status: i32) -> SyscallResult {
+    let pid = procs[proc_idx].pid;
+    log("xv6-host: exit(");
+    print_i64(status as i64);
+    log(") pid=");
+    print_u64(pid);
+    log("\n");
+    if procs[proc_idx].parent_pid == 0 {
+        halt_loop();
+    }
+    procs[proc_idx].state = PROC_ZOMBIE;
+    procs[proc_idx].exit_status = status;
+    reply_waiting_parent(procs, proc_idx);
+    SyscallResult::Stop
+}
+
+fn sys_wait(
+    alloc: &mut Allocator,
+    procs: &mut [Child; MAX_PROCS],
+    proc_idx: usize,
+    status_ptr: u64,
+    mrs: &[u64; 64],
+) -> SyscallResult {
+    let parent_pid = procs[proc_idx].pid;
+    let mut has_child = false;
+    for i in 0..MAX_PROCS {
+        if procs[i].parent_pid != parent_pid || procs[i].state == PROC_UNUSED {
+            continue;
+        }
+        has_child = true;
+        if procs[i].state != PROC_ZOMBIE {
+            continue;
+        }
+        let pid = procs[i].pid;
+        let status = procs[i].exit_status;
+        if status_ptr != 0 {
+            let mut out = [0u8; 4];
+            write_i32(&mut out, 0, status);
+            if !copy_to_child(&procs[proc_idx], status_ptr, &out) {
+                return SyscallResult::Reply(-1);
+            }
+        }
+        clear_process_mappings(procs[i].pid);
+        procs[i] = Child::empty();
+        return SyscallResult::Reply(pid as i64);
+    }
+    if !has_child {
+        return SyscallResult::Reply(-1);
+    }
+
+    let reply_slot = alloc.alloc_slot();
+    call_checked(
+        ROOT_CNODE,
+        LABEL_CNODE_SAVE_CALLER,
+        &[],
+        &[reply_slot, ROOT_CNODE_DEPTH],
+    );
+    let mut reply_mrs = [0u64; 11];
+    reply_mrs.copy_from_slice(&mrs[..11]);
+    reply_mrs[0] = mrs[0].wrapping_add(4);
+    procs[proc_idx].state = PROC_WAITING;
+    procs[proc_idx].wait_status_ptr = status_ptr;
+    procs[proc_idx].wait_reply_slot = reply_slot;
+    procs[proc_idx].wait_reply_mrs = reply_mrs;
+    SyscallResult::Block
+}
+
+fn reply_waiting_parent(procs: &mut [Child; MAX_PROCS], child_idx: usize) {
+    let parent_pid = procs[child_idx].parent_pid;
+    let child_pid = procs[child_idx].pid;
+    let status = procs[child_idx].exit_status;
+    for i in 0..MAX_PROCS {
+        if procs[i].pid != parent_pid || procs[i].state != PROC_WAITING {
+            continue;
+        }
+
+        let parent = procs[i];
+        let mut ret = child_pid as i64;
+        if parent.wait_status_ptr != 0 {
+            let mut out = [0u8; 4];
+            write_i32(&mut out, 0, status);
+            if !copy_to_child(&parent, parent.wait_status_ptr, &out) {
+                ret = -1;
+            }
+        }
+
+        let mut reply_mrs = parent.wait_reply_mrs;
+        reply_mrs[3] = ret as u64;
+        unsafe {
+            sel4_send(parent.wait_reply_slot, msg_info(0, 0, 0, 11), &reply_mrs);
+        }
+        procs[i].state = PROC_RUNNABLE;
+        procs[i].wait_status_ptr = 0;
+        procs[i].wait_reply_slot = 0;
+        procs[i].wait_reply_mrs = [0; 11];
+        if ret >= 0 {
+            clear_process_mappings(procs[child_idx].pid);
+            procs[child_idx] = Child::empty();
+        }
+        return;
+    }
+}
+
+fn sys_kill(procs: &mut [Child; MAX_PROCS], pid: i64) -> i64 {
+    if pid <= 0 {
+        return -1;
+    }
+    for proc in procs.iter_mut() {
+        if proc.pid == pid as u64 && proc.state != PROC_UNUSED {
+            proc.state = PROC_ZOMBIE;
+            proc.exit_status = -1;
+            return 0;
+        }
+    }
+    -1
+}
+
+fn sys_exec(
+    alloc: &mut Allocator,
+    child: &mut Child,
+    path_ptr: u64,
+    argv_ptr: u64,
+) -> SyscallResult {
     let mut path = [0u8; 128];
-    let Some(len) = copy_cstr_from_child(path_ptr, &mut path) else {
+    let Some(path_len) = copy_cstr_from_child(child, path_ptr, &mut path) else {
+        return SyscallResult::Reply(-1);
+    };
+    let name = basename(&path[..path_len]);
+    let Some(image) = find_exec_image(name) else {
+        return SyscallResult::Reply(-1);
+    };
+
+    let mut args = [[0u8; MAX_EXEC_ARG_LEN]; MAX_EXEC_ARGS];
+    let mut arg_lens = [0usize; MAX_EXEC_ARGS];
+    let Some(argc) = collect_exec_args(child, argv_ptr, &mut args, &mut arg_lens) else {
+        return SyscallResult::Reply(-1);
+    };
+
+    reset_process_mappings(child.pid);
+    load_elf(alloc, child, image.elf);
+    map_stack(alloc, child);
+    let Some((sp, argv_va)) = setup_exec_stack(child, &args, &arg_lens, argc) else {
+        return SyscallResult::Reply(-1);
+    };
+
+    let mut ctx = [0u64; crate::child::USER_CONTEXT_WORDS];
+    ctx[0] = child.entry;
+    ctx[2] = sp;
+    ctx[16] = argc as u64;
+    ctx[17] = argv_va;
+    write_user_context(child.tcb, &ctx, false);
+
+    let mut reply = [0u64; 11];
+    reply[0] = child.entry;
+    reply[1] = sp;
+    reply[2] = 0;
+    reply[3] = argc as u64;
+    reply[4] = argv_va;
+    log("xv6-host: exec ");
+    log_bytes(name);
+    log(" pid=");
+    print_u64(child.pid);
+    log("\n");
+    SyscallResult::ReplyFrame(reply)
+}
+
+fn find_exec_image(name: &[u8]) -> Option<&'static ExecImage> {
+    for image in EXEC_IMAGES {
+        if image.name == name {
+            return Some(image);
+        }
+    }
+    None
+}
+
+fn collect_exec_args(
+    child: &Child,
+    argv_ptr: u64,
+    args: &mut [[u8; MAX_EXEC_ARG_LEN]; MAX_EXEC_ARGS],
+    arg_lens: &mut [usize; MAX_EXEC_ARGS],
+) -> Option<usize> {
+    let mut argc = 0;
+    loop {
+        if argc >= MAX_EXEC_ARGS {
+            return None;
+        }
+        let ptr = read_child_u64(child, argv_ptr + (argc as u64 * 8))?;
+        if ptr == 0 {
+            return Some(argc);
+        }
+        let len = copy_cstr_from_child(child, ptr, &mut args[argc])?;
+        arg_lens[argc] = len;
+        argc += 1;
+    }
+}
+
+fn setup_exec_stack(
+    child: &Child,
+    args: &[[u8; MAX_EXEC_ARG_LEN]; MAX_EXEC_ARGS],
+    arg_lens: &[usize; MAX_EXEC_ARGS],
+    argc: usize,
+) -> Option<(u64, u64)> {
+    let mut sp = CHILD_STACK_TOP;
+    let mut arg_ptrs = [0u64; MAX_EXEC_ARGS];
+    for i in 0..argc {
+        let len = arg_lens[i];
+        sp = sp.checked_sub((len + 1) as u64)?;
+        if !copy_to_child(child, sp, &args[i][..len]) {
+            return None;
+        }
+        if !copy_to_child(child, sp + len as u64, &[0]) {
+            return None;
+        }
+        arg_ptrs[i] = sp;
+    }
+
+    sp &= !0xf;
+    sp = sp.checked_sub(8)?;
+    if !write_child_u64(child, sp, 0) {
+        return None;
+    }
+    for i in (0..argc).rev() {
+        sp = sp.checked_sub(8)?;
+        if !write_child_u64(child, sp, arg_ptrs[i]) {
+            return None;
+        }
+    }
+    let argv_va = sp;
+    sp &= !0xf;
+    Some((sp, argv_va))
+}
+
+fn read_child_u64(child: &Child, va: u64) -> Option<u64> {
+    let mut bytes = [0u8; 8];
+    if !copy_from_child(child, va, &mut bytes) {
+        return None;
+    }
+    Some(read_u64(&bytes, 0))
+}
+
+fn write_child_u64(child: &Child, va: u64, value: u64) -> bool {
+    let mut bytes = [0u8; 8];
+    write_u64_bytes(&mut bytes, 0, value);
+    copy_to_child(child, va, &bytes)
+}
+
+fn sys_chdir(child: &Child, path_ptr: u64) -> i64 {
+    let mut path = [0u8; 128];
+    let Some(len) = copy_cstr_from_child(child, path_ptr, &mut path) else {
         return -1;
     };
     if path_is_root(&path[..len]) || basename(&path[..len]) == b".." {
@@ -301,7 +597,7 @@ fn sys_chdir(path_ptr: u64) -> i64 {
     }
 }
 
-fn sys_pipe(fds_ptr: u64) -> i64 {
+fn sys_pipe(child: &Child, fds_ptr: u64) -> i64 {
     unsafe {
         let mut pipe_idx = MAX_PIPES;
         for i in 0..MAX_PIPES {
@@ -339,7 +635,7 @@ fn sys_pipe(fds_ptr: u64) -> i64 {
         let mut out = [0u8; 8];
         write_i32(&mut out, 0, read_fd as i32);
         write_i32(&mut out, 4, write_fd as i32);
-        if !copy_to_child(fds_ptr, &out) {
+        if !copy_to_child(child, fds_ptr, &out) {
             close_fd(read_fd);
             close_fd(write_fd);
             return -1;
@@ -348,9 +644,9 @@ fn sys_pipe(fds_ptr: u64) -> i64 {
     }
 }
 
-fn sys_mknod(path_ptr: u64) -> i64 {
+fn sys_mknod(child: &Child, path_ptr: u64) -> i64 {
     let mut path = [0u8; 128];
-    let Some(len) = copy_cstr_from_child(path_ptr, &mut path) else {
+    let Some(len) = copy_cstr_from_child(child, path_ptr, &mut path) else {
         return -1;
     };
     if basename(&path[..len]) == b"console" {
@@ -415,6 +711,15 @@ fn find_free_fd() -> Option<usize> {
     None
 }
 
+fn find_free_proc(procs: &[Child; MAX_PROCS]) -> Option<usize> {
+    for i in 0..MAX_PROCS {
+        if procs[i].state == PROC_UNUSED {
+            return Some(i);
+        }
+    }
+    None
+}
+
 unsafe fn pipe_write(pipe_idx: usize, src: &[u8]) -> usize {
     unsafe {
         if pipe_idx >= MAX_PIPES || PIPES[pipe_idx].readers == 0 {
@@ -432,7 +737,7 @@ unsafe fn pipe_write(pipe_idx: usize, src: &[u8]) -> usize {
     }
 }
 
-unsafe fn pipe_read(pipe_idx: usize, dst: u64, len: usize) -> i64 {
+unsafe fn pipe_read(child: &Child, pipe_idx: usize, dst: u64, len: usize) -> i64 {
     unsafe {
         if pipe_idx >= MAX_PIPES {
             return -1;
@@ -453,7 +758,7 @@ unsafe fn pipe_read(pipe_idx: usize, dst: u64, len: usize) -> i64 {
                 pipe.len -= 1;
                 i += 1;
             }
-            if !copy_to_child(dst + total as u64, &scratch[..n]) {
+            if !copy_to_child(child, dst + total as u64, &scratch[..n]) {
                 return -1;
             }
             total += n;

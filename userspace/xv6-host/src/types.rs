@@ -1,4 +1,4 @@
-use crate::consts::FD_CLOSED;
+use crate::consts::{FD_CLOSED, PROC_UNUSED};
 
 #[repr(C)]
 pub(crate) struct SlotRegion {
@@ -48,8 +48,11 @@ pub(crate) struct IpcBuffer {
 
 #[derive(Copy, Clone)]
 pub(crate) struct Mapping {
+    pub(crate) pid: u64,
     pub(crate) child_page: u64,
     pub(crate) alias_page: u64,
+    pub(crate) writable: bool,
+    pub(crate) executable: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -69,16 +72,45 @@ impl FdEntry {
     }
 }
 
+#[derive(Copy, Clone)]
 pub(crate) struct Child {
+    pub(crate) pid: u64,
+    pub(crate) parent_pid: u64,
+    pub(crate) state: u8,
+    pub(crate) exit_status: i32,
     pub(crate) tcb: u64,
     pub(crate) vspace: u64,
     pub(crate) fault_ep: u64,
     pub(crate) entry: u64,
     pub(crate) brk: u64,
     pub(crate) heap_mapped_end: u64,
+    pub(crate) wait_status_ptr: u64,
+    pub(crate) wait_reply_slot: u64,
+    pub(crate) wait_reply_mrs: [u64; 11],
+}
+
+impl Child {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            pid: 0,
+            parent_pid: 0,
+            state: PROC_UNUSED,
+            exit_status: 0,
+            tcb: 0,
+            vspace: 0,
+            fault_ep: 0,
+            entry: 0,
+            brk: 0,
+            heap_mapped_end: 0,
+            wait_status_ptr: 0,
+            wait_reply_slot: 0,
+            wait_reply_mrs: [0; 11],
+        }
+    }
 }
 
 pub(crate) struct IpcMessage {
+    pub(crate) badge: u64,
     pub(crate) info: u64,
-    pub(crate) mrs: [u64; 16],
+    pub(crate) mrs: [u64; 64],
 }

@@ -65,6 +65,12 @@ pub(crate) fn log(s: &str) {
     }
 }
 
+pub(crate) fn log_bytes(bytes: &[u8]) {
+    for b in bytes {
+        putchar(*b);
+    }
+}
+
 pub(crate) fn print_u64(mut n: u64) {
     if n == 0 {
         putchar(b'0');

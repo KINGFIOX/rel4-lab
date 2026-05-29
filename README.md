@@ -15,11 +15,15 @@ are implemented far enough for the full suite to run to completion.
 
 Latest verified checkpoints:
 
-- RV64 non-MCS single-core: `./tools/run-tests.sh` passes with
-  **124 enabled tests passing, 43 upstream-disabled tests remaining**.
+- Historical RV64 non-MCS single-core checkpoint: `./tools/run-tests.sh` passed
+  with **124 enabled tests passing, 43 upstream-disabled tests remaining**
+  before the upstream build tree was switched to the current SMP configuration
+  and before M4.4g removed kernel floating-point context support.
 - RV64 SMP-compatible build (`SMP=ON`, `NUM_NODES=2`, QEMU `SMP=2`):
-  `env SMP=2 TIMEOUT=480 ./tools/run-tests.sh` passes with
-  **125 enabled tests passing, 42 upstream-disabled tests remaining**.
+  `env SMP=2 TIMEOUT=480 ./tools/run-tests.sh` currently reaches the full
+  suite but reports **121 enabled tests passing, 42 upstream-disabled tests
+  remaining, and 4 FPU tests failing** after the M4.4g "no kernel floating
+  point" change.
 - xv6 user-program compatibility smoke path: xv6 user ELFs from
   `third_party/xv6-riscv/user` are embedded into the `xv6-host` rootserver,
   loaded into a child TCB/VSpace, and handled through seL4 fault IPC via
@@ -64,8 +68,11 @@ rebuild the SMP image after CMake regeneration.
 M4.4g removes kernel-owned floating-point context support. The trap entry no
 longer executes F/D instructions, `UserContext` no longer contains FPR/FCSR
 state, user `sstatus.FS` is left off, and the seL4 TCB FPU flag is reported as
-disabled. This intentionally drops the previous FPU sel4test coverage in favor
-of keeping the Rust kernel free of floating-point save/restore machinery.
+disabled. The Rust kernel now also builds for `riscv64imac-unknown-none-elf`
+and has a compile-time guard against RISC-V `f`/`d` target features, so a future
+accidental `rv64gc` kernel build fails immediately. This intentionally drops
+the previous FPU sel4test coverage in favor of keeping the Rust kernel free of
+floating-point save/restore machinery.
 
 M5.1/M5.2 were the temporary in-kernel xv6 bridge: a generated wrapper linked
 one xv6 user program at `0x10000000`, and the Rust kernel directly dispatched
@@ -80,9 +87,20 @@ syscalls as `UnknownSyscall` fault IPC. The kernel no longer owns Unix fd,
 heap, or pseudo-filesystem state.
 `xv6-host` is now a Cargo workspace package on Rust 2024. Its linker args live
 in `userspace/xv6-host/build.rs`, the kernel linker args live in
-`kernel/build.rs`, and `.cargo/config.toml` only carries shared RISC-V target
-flags. The host crate also denies the Rust 2024 unsafe migration lints
+`kernel/build.rs`, and `.cargo/config.toml` selects the shared no-F/D
+`riscv64imac-unknown-none-elf` target plus common RISC-V codegen flags. The
+host crate also denies the Rust 2024 unsafe migration lints
 `unsafe_attr_outside_unsafe` and `unsafe_op_in_unsafe_fn`.
+
+M5.4 starts the real xv6 process model in user space. `xv6-host` now uses one
+badged seL4 fault endpoint for all xv6 children, keeps a small process table,
+implements `fork` by creating a new TCB/CNode/VSpace, cloning mapped child pages
+through the host alias window, reading the blocked parent's registers with
+`TCB_ReadRegisters`, and starting the child with `TCB_WriteRegisters`. `exit`
+turns non-root children into zombies and `wait` can reap them. `forktest` now
+passes through real child creation/exits instead of the old graceful
+`fork == -1` path. `init` reaches the first `exec("sh")` and then exits via the
+expected current `exec` failure path.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -118,11 +136,12 @@ flags. The host crate also denies the Rust 2024 unsafe migration lints
 | M4.4c | RISC-V `PAGEFAULT1005` inter-AS undefined-instruction test: avoid cross-VSpace pointer dereference in the handler and let the faulter restart stub perform the writeback. Full suite now reports **122 passed / 45 disabled**. | ✅ Done |
 | M4.4d | `SCHED0021` equal-priority preemption under QEMU simulation: Rust scheduler uses per-TCB time-slice accounting, and sel4test uses a simulation-specific timing upper bound while preserving the original non-simulation bound. Full suite now reports **123 passed / 44 disabled**. | ✅ Done |
 | M4.4e | RISC-V `CACHEFLUSH0004`: enable the non-ARM cache/retype test and validate that retyped frames are zeroed after `Untyped_Revoke`. Full suite now reports **124 passed / 43 disabled**. | ✅ Done |
-| M4.4f | SMP-compatible RV64 build/run: secondary harts park before shared init; SMP invocation-label shift and `TCBSetAffinity` are handled; QEMU wrappers accept `SMP=2`; `MULTICORE0001..0005` pass in the full SMP run. Current SMP full suite previously reported **125 passed / 42 disabled** before FPU support was removed. | ✅ Done |
-| M4.4g | Remove kernel floating-point context handling: no FPR/FCSR fields in `UserContext`, no `fsd`/`fld`/FCSR instructions in trap entry/exit, and TCB FPU state is permanently disabled. | ✅ Done |
+| M4.4f | SMP-compatible RV64 build/run: secondary harts park before shared init; SMP invocation-label shift and `TCBSetAffinity` are handled; QEMU wrappers accept `SMP=2`; `MULTICORE0001..0005` pass in the full SMP run. The current SMP regression now stops on the expected FPU failures after M4.4g. | ✅ Done |
+| M4.4g | Remove kernel floating-point context handling: no FPR/FCSR fields in `UserContext`, no `fsd`/`fld`/FCSR instructions in trap entry/exit, TCB FPU state is permanently disabled, and the kernel/rootserver Rust target is `riscv64imac-unknown-none-elf` rather than `rv64gc`. | ✅ Done |
 | M5.1 | xv6 user-program smoke path: build an xv6 user ELF as rootserver and route xv6 positive syscalls through a temporary kernel compatibility module. | ✅ Superseded |
 | M5.2 | Temporary kernel-side xv6 read-only pseudo-fs: expose `README`, `.`, `/`, and `console`; implement fd offsets and `fstat`. | ✅ Superseded |
 | M5.3 | seL4-style xv6 host: embed the xv6 user ELF into a no_std Rust 2024 Cargo rootserver, spawn it as a child TCB/VSpace with a fault endpoint, and handle xv6 syscalls via `UnknownSyscall` fault IPC. Smoke set passes: `echo`, `forktest`, `cat README`, `ls .`, `wc README`, `grep xv6 README`. | ✅ Done |
+| M5.4 | User-space xv6 process model v1: shared badged fault endpoint, host process table, real TCB/VSpace-backed `fork`, zombie `exit`, and `wait` reaping. `forktest` now creates real children up to the current process-table limit. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
@@ -221,7 +240,7 @@ Test suite passed. 124 tests passed. 43 tests disabled.
 All is well in the universe
 ```
 
-### xv6 Compatibility Checkpoint (M5.3)
+### xv6 Compatibility Checkpoint (M5.3/M5.4)
 
 The current xv6 path is a user-space compatibility server, not a full Unix
 server yet. The helper builds one xv6 user program from
@@ -253,29 +272,32 @@ Verified output includes:
 
 ```text
 hello from xv6
-xv6-host: exit(0)
+xv6-host: exit(0) pid=1
 
 fork test
+xv6-host: fork parent=1 child=2
+xv6-host: exit(0) pid=2
+...
 fork test OK
-xv6-host: exit(0)
+xv6-host: exit(0) pid=1
 
 .              1 1 64
 ..             1 1 64
 README         2 2 2441
 console        3 3 0
-xv6-host: exit(0)
+xv6-host: exit(0) pid=1
 ```
 
 Implemented host-side compatibility now has an explicit handler for every xv6
 syscall number 1..21. The currently functional subset is process exit,
-console/file read-write where meaningful, `open`/`close`/`dup`/`fstat`,
-`sbrk`, `getpid`, `uptime`, `pause`, root-only `chdir`, `mknod("console")`,
-and a single-process in-memory `pipe` ring buffer. Calls that require real
-multi-process state or a mutable filesystem (`fork`, `wait`, `exec`, `unlink`,
-`link`, `mkdir`, and non-console `mknod`) return `-1` consistently instead of
-falling through as unknown syscalls. Running `init`, `sh`, real `fork`/`exec`,
-cross-process pipes, mutable files, and `usertests` still requires a fuller
-Unix service with process state and a filesystem image.
+TCB/VSpace-backed `fork`, zombie `wait`, console/file read-write where
+meaningful, `open`/`close`/`dup`/`fstat`, `sbrk`, `getpid`, `uptime`, `pause`,
+root-only `chdir`, `mknod("console")`, and a single-process in-memory `pipe`
+ring buffer. Remaining Unix gaps are `exec`, `unlink`, `link`, `mkdir`, a
+mutable filesystem image, per-process fd tables, blocking `wait`, full
+cross-process pipe semantics, and scaling process/resource cleanup beyond the
+current fixed process table. Running `init` now gets through its first `fork`
+and fails at `exec("sh")`, which is the next compatibility boundary.
 
 
 ## Repository layout
@@ -284,7 +306,7 @@ Unix service with process state and a filesystem image.
 microkernel/
 ├── flake.nix              # Nix dev shell: Rust + RISC-V toolchain + qemu/ninja/cpio
 ├── .envrc                 # `use flake` for direnv
-├── rust-toolchain.toml    # stable + riscv64gc-unknown-none-elf
+├── rust-toolchain.toml    # stable + riscv64imac-unknown-none-elf
 ├── Cargo.toml             # workspace
 ├── .cargo/config.toml     # build target + shared RISC-V rustflags
 ├── kernel/

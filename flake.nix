@@ -37,7 +37,7 @@
               "rust-analyzer"
             ];
             targets = [
-              "riscv64gc-unknown-none-elf"
+              "riscv64imac-unknown-none-elf"
             ];
           })
         ];

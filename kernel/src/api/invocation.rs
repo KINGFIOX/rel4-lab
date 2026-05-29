@@ -999,7 +999,9 @@ pub fn handle_thread(
                 /* 31 tp */ reg::TP,
             ];
             if length >= 5 && count >= 3 {
-                let mr_count = ((length - 1) as usize).min(count as usize).min(34);
+                let mr_count = (length as usize)
+                    .min((count as usize).saturating_add(2))
+                    .min(34);
                 if !thread.ipc_buffer_kva.is_null() {
                     // mr_i for i=4..mr_count holds frameRegister/gpRegister
                     // value at slot (i-2) of seL4_UserContext.

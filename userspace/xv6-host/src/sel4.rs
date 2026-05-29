@@ -2,7 +2,7 @@ use core::arch::asm;
 use core::cmp::min;
 use core::ptr;
 
-use crate::consts::{SYS_CALL, SYS_RECV, SYS_REPLY_RECV, SYS_YIELD};
+use crate::consts::{SYS_CALL, SYS_RECV, SYS_REPLY_RECV, SYS_SEND, SYS_YIELD};
 use crate::types::{IpcBuffer, IpcMessage};
 use crate::util::{halt_loop, log, print_u64};
 
@@ -93,6 +93,34 @@ pub(crate) unsafe fn sel4_reply_recv(ep: u64, info: u64, reply_mrs: &[u64]) -> I
     }
 }
 
+pub(crate) unsafe fn sel4_send(dest: u64, info: u64, mrs: &[u64]) {
+    unsafe {
+        let ipc = &mut *IPC_BUFFER;
+        let mut i = 4;
+        while i < mrs.len() {
+            ipc.msg[i] = mrs[i];
+            i += 1;
+        }
+        let a0 = dest;
+        let a1 = info;
+        let a2 = mr(mrs, 0);
+        let a3 = mr(mrs, 1);
+        let a4 = mr(mrs, 2);
+        let a5 = mr(mrs, 3);
+        asm!(
+            "ecall",
+            in("a0") a0,
+            in("a1") a1,
+            in("a2") a2,
+            in("a3") a3,
+            in("a4") a4,
+            in("a5") a5,
+            in("a7") SYS_SEND,
+            options(nostack)
+        );
+    }
+}
+
 pub(crate) unsafe fn sel4_yield() {
     unsafe {
         asm!("ecall", in("a7") SYS_YIELD, options(nostack));
@@ -127,7 +155,7 @@ pub(crate) fn call_checked(service: u64, label: u64, extra_caps: &[u64], mrs: &[
 }
 
 unsafe fn read_ipc_message(
-    _badge: u64,
+    badge: u64,
     info: u64,
     a2: u64,
     a3: u64,
@@ -136,7 +164,7 @@ unsafe fn read_ipc_message(
 ) -> IpcMessage {
     unsafe {
         let ipc = &*IPC_BUFFER;
-        let mut mrs = [0u64; 16];
+        let mut mrs = [0u64; 64];
         mrs[0] = a2;
         mrs[1] = a3;
         mrs[2] = a4;
@@ -147,8 +175,12 @@ unsafe fn read_ipc_message(
             mrs[i] = ipc.msg[i];
             i += 1;
         }
-        IpcMessage { info, mrs }
+        IpcMessage { badge, info, mrs }
     }
+}
+
+pub(crate) unsafe fn read_ipc_mr(i: usize) -> u64 {
+    unsafe { (*IPC_BUFFER).msg[i] }
 }
 
 fn mr(mrs: &[u64], i: usize) -> u64 {

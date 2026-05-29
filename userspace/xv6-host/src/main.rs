@@ -17,12 +17,13 @@ mod xv6;
 use allocator::Allocator;
 use child::{create_child, load_payload, map_stack, start_child};
 use consts::{FAULT_UNKNOWN_SYSCALL, LABEL_IRQ_ISSUE_IRQ_HANDLER, LABEL_IRQ_SET_NOTIFICATION};
-use consts::{INIT_TCB, IRQ_CONTROL, KERNEL_TIMER_IRQ, OBJ_NOTIFICATION, ROOT_CNODE};
+use consts::{INIT_TCB, IRQ_CONTROL, KERNEL_TIMER_IRQ, MAX_PROCS, OBJ_ENDPOINT, OBJ_NOTIFICATION};
 use consts::{LABEL_TCB_BIND_NOTIFICATION, ROOT_CNODE_DEPTH};
+use consts::{PROC_UNUSED, ROOT_CNODE};
 use sel4::{call_checked, init_ipc_buffer, msg_info, msg_label, sel4_recv, sel4_reply_recv};
-use types::BootInfo;
+use types::{BootInfo, Child};
 use util::{halt_loop, log, print_u64};
-use xv6::handle_xv6_syscall;
+use xv6::{SyscallResult, handle_xv6_syscall};
 
 static mut SAW_FAULT_IPC: bool = false;
 
@@ -53,21 +54,24 @@ fn run(bi_ptr: *const BootInfo) -> ! {
 
     let mut alloc = Allocator::new(bi);
     xv6::init_fds();
-    let mut child = create_child(&mut alloc);
+    let fault_ep = alloc.retype_one(OBJ_ENDPOINT, 0);
+    let mut procs = [Child::empty(); MAX_PROCS];
+    procs[0] = create_child(&mut alloc, 1, 0, fault_ep);
     setup_timer_notification(&mut alloc);
-    load_payload(&mut alloc, &mut child);
-    map_stack(&mut alloc, &child);
-    start_child(&child);
+    load_payload(&mut alloc, &mut procs[0]);
+    map_stack(&mut alloc, &procs[0]);
+    start_child(&procs[0]);
 
     log("xv6-host: waiting for fault IPC\n");
     let mut reply_pending = false;
+    let mut reply_info = msg_info(0, 0, 0, 11);
     let mut reply_mrs = [0u64; 11];
     loop {
         let msg = if reply_pending {
             reply_pending = false;
-            unsafe { sel4_reply_recv(child.fault_ep, msg_info(0, 0, 0, 11), &reply_mrs) }
+            unsafe { sel4_reply_recv(fault_ep, reply_info, &reply_mrs) }
         } else {
-            unsafe { sel4_recv(child.fault_ep) }
+            unsafe { sel4_recv(fault_ep) }
         };
 
         let label = msg_label(msg.info);
@@ -89,12 +93,45 @@ fn run(bi_ptr: *const BootInfo) -> ! {
             }
         }
 
-        reply_mrs = msg.mrs[..11].try_into().unwrap_or([0; 11]);
-        let ret = handle_xv6_syscall(&mut alloc, &mut child, &msg.mrs);
-        reply_mrs[0] = msg.mrs[0].wrapping_add(4);
-        reply_mrs[3] = ret as u64;
-        reply_pending = true;
+        let Some(proc_idx) = find_proc_by_pid(&procs, msg.badge) else {
+            log("xv6-host: fault from unknown pid=");
+            print_u64(msg.badge);
+            log("\n");
+            halt_loop();
+        };
+
+        match handle_xv6_syscall(&mut alloc, &mut procs, proc_idx, &msg.mrs) {
+            SyscallResult::Reply(ret) => {
+                reply_info = msg_info(0, 0, 0, 11);
+                reply_mrs = msg.mrs[..11].try_into().unwrap_or([0; 11]);
+                reply_mrs[0] = msg.mrs[0].wrapping_add(4);
+                reply_mrs[3] = ret as u64;
+                reply_pending = true;
+            }
+            SyscallResult::ReplyFrame(frame) => {
+                reply_info = msg_info(0, 0, 0, 11);
+                reply_mrs = frame;
+                reply_pending = true;
+            }
+            SyscallResult::Block => {
+                reply_pending = false;
+            }
+            SyscallResult::Stop => {
+                reply_info = msg_info(1, 0, 0, 0);
+                reply_mrs = [0; 11];
+                reply_pending = true;
+            }
+        }
     }
+}
+
+fn find_proc_by_pid(procs: &[Child; MAX_PROCS], pid: u64) -> Option<usize> {
+    for i in 0..MAX_PROCS {
+        if procs[i].pid == pid && procs[i].state != PROC_UNUSED {
+            return Some(i);
+        }
+    }
+    None
 }
 
 fn setup_timer_notification(alloc: &mut Allocator) {
