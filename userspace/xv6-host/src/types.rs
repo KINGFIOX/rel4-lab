@@ -60,6 +60,8 @@ pub(crate) struct FdEntry {
     pub(crate) kind: u8,
     pub(crate) offset: usize,
     pub(crate) aux: usize,
+    pub(crate) readable: bool,
+    pub(crate) writable: bool,
 }
 
 impl FdEntry {
@@ -68,6 +70,56 @@ impl FdEntry {
             kind: FD_CLOSED,
             offset: 0,
             aux: 0,
+            readable: false,
+            writable: false,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+pub(crate) struct FsNode {
+    pub(crate) used: bool,
+    pub(crate) kind: u8,
+    pub(crate) ino: u32,
+    pub(crate) parent: usize,
+    pub(crate) nlink: u16,
+    pub(crate) open_refs: u16,
+    pub(crate) size: usize,
+    pub(crate) data: [u8; crate::consts::MAX_FILE_BYTES],
+}
+
+impl FsNode {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            used: false,
+            kind: crate::consts::FS_UNUSED,
+            ino: 0,
+            parent: 0,
+            nlink: 0,
+            open_refs: 0,
+            size: 0,
+            data: [0; crate::consts::MAX_FILE_BYTES],
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+pub(crate) struct DirEntry {
+    pub(crate) used: bool,
+    pub(crate) parent: usize,
+    pub(crate) node: usize,
+    pub(crate) name_len: u8,
+    pub(crate) name: [u8; crate::consts::DIRSIZ],
+}
+
+impl DirEntry {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            used: false,
+            parent: 0,
+            node: 0,
+            name_len: 0,
+            name: [0; crate::consts::DIRSIZ],
         }
     }
 }
@@ -84,6 +136,8 @@ pub(crate) struct Child {
     pub(crate) entry: u64,
     pub(crate) brk: u64,
     pub(crate) heap_mapped_end: u64,
+    pub(crate) fds: [FdEntry; crate::consts::MAX_FD],
+    pub(crate) cwd: usize,
     pub(crate) wait_status_ptr: u64,
     pub(crate) wait_reply_slot: u64,
     pub(crate) wait_reply_mrs: [u64; 11],
@@ -102,6 +156,8 @@ impl Child {
             entry: 0,
             brk: 0,
             heap_mapped_end: 0,
+            fds: [FdEntry::closed(); crate::consts::MAX_FD],
+            cwd: crate::consts::FS_ROOT_NODE,
             wait_status_ptr: 0,
             wait_reply_slot: 0,
             wait_reply_mrs: [0; 11],

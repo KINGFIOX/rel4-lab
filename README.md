@@ -22,14 +22,16 @@ Latest verified checkpoints:
 - RV64 SMP-compatible build (`SMP=ON`, `NUM_NODES=2`, QEMU `SMP=2`):
   `env SMP=2 TIMEOUT=480 ./tools/run-tests.sh` currently reaches the full
   suite but reports **121 enabled tests passing, 42 upstream-disabled tests
-  remaining, and 4 FPU tests failing** after the M4.4g "no kernel floating
-  point" change.
+  remaining, and 4 FPU tests failing** after the M4.4g/M4.4h "no kernel
+  floating point" changes.
 - xv6 user-program compatibility smoke path: xv6 user ELFs from
   `third_party/xv6-riscv/user` are embedded into the `xv6-host` rootserver,
   loaded into a child TCB/VSpace, and handled through seL4 fault IPC via
   `./tools/run-xv6-user.sh`. Verified:
   `echo`, `forktest`, `cat README`, `ls .`, `wc README`, and
-  `grep xv6 README` end in `xv6-host: exit(0)`.
+  `grep xv6 README` end in `xv6-host: exit(0)`. The `sh` path can now consume
+  scripted console input and run `fork/exec/wait` command lines, including a
+  simple `echo ... | wc` pipeline.
 
 M4.4b unlocked the first timer-gated disabled group on the current RV64,
 non-MCS, single-core, QEMU configuration: `TIMER0001`, `TIMER0002`,
@@ -67,12 +69,15 @@ rebuild the SMP image after CMake regeneration.
 
 M4.4g removes kernel-owned floating-point context support. The trap entry no
 longer executes F/D instructions, `UserContext` no longer contains FPR/FCSR
-state, user `sstatus.FS` is left off, and the seL4 TCB FPU flag is reported as
-disabled. The Rust kernel now also builds for `riscv64imac-unknown-none-elf`
-and has a compile-time guard against RISC-V `f`/`d` target features, so a future
-accidental `rv64gc` kernel build fails immediately. This intentionally drops
-the previous FPU sel4test coverage in favor of keeping the Rust kernel free of
-floating-point save/restore machinery.
+state, and user `sstatus.FS` is left off. The Rust kernel now also builds for
+`riscv64imac-unknown-none-elf` and has a compile-time guard against RISC-V
+`f`/`d` target features, so a future accidental `rv64gc` kernel build fails
+immediately. This intentionally drops the previous FPU sel4test coverage in
+favor of keeping the Rust kernel free of floating-point save/restore machinery.
+M4.4h removes the remaining FPU compatibility surface from TCB handling:
+`Tcb` no longer stores a FPU-disabled flag, `TCBSetFlags` returns
+`IllegalOperation`, boot clears `sstatus.FS`, and the restore path masks
+`sstatus.FS` off before every `sret`.
 
 M5.1/M5.2 were the temporary in-kernel xv6 bridge: a generated wrapper linked
 one xv6 user program at `0x10000000`, and the Rust kernel directly dispatched
@@ -99,8 +104,16 @@ through the host alias window, reading the blocked parent's registers with
 `TCB_ReadRegisters`, and starting the child with `TCB_WriteRegisters`. `exit`
 turns non-root children into zombies and `wait` can reap them. `forktest` now
 passes through real child creation/exits instead of the old graceful
-`fork == -1` path. `init` reaches the first `exec("sh")` and then exits via the
-expected current `exec` failure path.
+`fork == -1` path.
+
+M5.5 adds the first usable xv6 shell path. The build can embed scripted console
+input with `XV6_CONSOLE_INPUT` or `tools/run-xv6-user.sh --stdin`, console reads
+block when no script is provided instead of reporting EOF, and fd tables are now
+per xv6 process rather than global. `fork` copies fd references, `exit` closes
+the exiting process's fds, and `close/dup/pipe` now work correctly across shell
+children. This is enough for scripted `sh` commands such as `echo`, `ls`,
+`cat README`, and `echo pipe data | wc` to exercise `fork -> exec -> wait`
+through the user-space seL4 server.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -137,11 +150,13 @@ expected current `exec` failure path.
 | M4.4d | `SCHED0021` equal-priority preemption under QEMU simulation: Rust scheduler uses per-TCB time-slice accounting, and sel4test uses a simulation-specific timing upper bound while preserving the original non-simulation bound. Full suite now reports **123 passed / 44 disabled**. | ✅ Done |
 | M4.4e | RISC-V `CACHEFLUSH0004`: enable the non-ARM cache/retype test and validate that retyped frames are zeroed after `Untyped_Revoke`. Full suite now reports **124 passed / 43 disabled**. | ✅ Done |
 | M4.4f | SMP-compatible RV64 build/run: secondary harts park before shared init; SMP invocation-label shift and `TCBSetAffinity` are handled; QEMU wrappers accept `SMP=2`; `MULTICORE0001..0005` pass in the full SMP run. The current SMP regression now stops on the expected FPU failures after M4.4g. | ✅ Done |
-| M4.4g | Remove kernel floating-point context handling: no FPR/FCSR fields in `UserContext`, no `fsd`/`fld`/FCSR instructions in trap entry/exit, TCB FPU state is permanently disabled, and the kernel/rootserver Rust target is `riscv64imac-unknown-none-elf` rather than `rv64gc`. | ✅ Done |
+| M4.4g | Remove kernel floating-point context handling: no FPR/FCSR fields in `UserContext`, no `fsd`/`fld`/FCSR instructions in trap entry/exit, and the kernel/rootserver Rust target is `riscv64imac-unknown-none-elf` rather than `rv64gc`. | ✅ Done |
+| M4.4h | Remove the residual TCB FPU flag surface: no FPU flag is stored in `Tcb`, `TCBSetFlags` is rejected as unsupported, and `sstatus.FS` is cleared at boot plus masked off on every return to user mode. | ✅ Done |
 | M5.1 | xv6 user-program smoke path: build an xv6 user ELF as rootserver and route xv6 positive syscalls through a temporary kernel compatibility module. | ✅ Superseded |
 | M5.2 | Temporary kernel-side xv6 read-only pseudo-fs: expose `README`, `.`, `/`, and `console`; implement fd offsets and `fstat`. | ✅ Superseded |
 | M5.3 | seL4-style xv6 host: embed the xv6 user ELF into a no_std Rust 2024 Cargo rootserver, spawn it as a child TCB/VSpace with a fault endpoint, and handle xv6 syscalls via `UnknownSyscall` fault IPC. Smoke set passes: `echo`, `forktest`, `cat README`, `ls .`, `wc README`, `grep xv6 README`. | ✅ Done |
 | M5.4 | User-space xv6 process model v1: shared badged fault endpoint, host process table, real TCB/VSpace-backed `fork`, zombie `exit`, and `wait` reaping. `forktest` now creates real children up to the current process-table limit. | ✅ Done |
+| M5.5 | Scripted shell path: `XV6_CONSOLE_INPUT`/`--stdin`, blocking empty console reads, per-process fd tables, fd refcounting across `fork`, close-on-exit, and basic cross-process pipes. `sh` can run `echo`, `ls`, `cat README`, and `echo pipe data \| wc`. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
@@ -240,7 +255,7 @@ Test suite passed. 124 tests passed. 43 tests disabled.
 All is well in the universe
 ```
 
-### xv6 Compatibility Checkpoint (M5.3/M5.4)
+### xv6 Compatibility Checkpoint (M5.3-M5.5)
 
 The current xv6 path is a user-space compatibility server, not a full Unix
 server yet. The helper builds one xv6 user program from
@@ -266,6 +281,8 @@ nix develop --command ./tools/run-xv6-user.sh cat README
 nix develop --command ./tools/run-xv6-user.sh ls .
 nix develop --command ./tools/run-xv6-user.sh wc README
 nix develop --command ./tools/run-xv6-user.sh grep xv6 README
+nix develop --command ./tools/run-xv6-user.sh --stdin $'echo scripted from sh\nls .\ncat README\n' sh
+nix develop --command ./tools/run-xv6-user.sh --stdin $'echo pipe data | wc\n' sh
 ```
 
 Verified output includes:
@@ -286,18 +303,28 @@ xv6-host: exit(0) pid=1
 README         2 2 2441
 console        3 3 0
 xv6-host: exit(0) pid=1
+
+$ echo pipe data | wc
+xv6-host: fork parent=1 child=2
+xv6-host: fork parent=2 child=3
+xv6-host: fork parent=2 child=4
+xv6-host: exec echo pid=3
+xv6-host: exec wc pid=4
+1 2 10
 ```
 
 Implemented host-side compatibility now has an explicit handler for every xv6
 syscall number 1..21. The currently functional subset is process exit,
-TCB/VSpace-backed `fork`, zombie `wait`, console/file read-write where
-meaningful, `open`/`close`/`dup`/`fstat`, `sbrk`, `getpid`, `uptime`, `pause`,
-root-only `chdir`, `mknod("console")`, and a single-process in-memory `pipe`
-ring buffer. Remaining Unix gaps are `exec`, `unlink`, `link`, `mkdir`, a
-mutable filesystem image, per-process fd tables, blocking `wait`, full
-cross-process pipe semantics, and scaling process/resource cleanup beyond the
-current fixed process table. Running `init` now gets through its first `fork`
-and fails at `exec("sh")`, which is the next compatibility boundary.
+TCB/VSpace-backed `fork`, catalog-backed `exec`, zombie/blocking `wait`,
+scripted console input, console/file read-write where meaningful,
+per-process `open`/`close`/`dup`/`fstat`, `sbrk`, `getpid`, `uptime`, `pause`,
+root-only `chdir`, `mknod("console")`, and a fixed-size in-memory `pipe` ring
+buffer shared across forked processes. Remaining Unix gaps are `unlink`,
+`link`, `mkdir`, writable files, a real xv6 filesystem image, dynamic host
+keyboard input, pipe read blocking/backpressure, broader exec catalog coverage,
+and scaling process/cap/resource cleanup beyond the current fixed tables. With
+no scripted input, `init` now reaches `exec("sh")` and the shell blocks on
+console read instead of exiting and forcing `init` into a restart loop.
 
 
 ## Repository layout

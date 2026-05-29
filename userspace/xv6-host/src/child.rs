@@ -58,6 +58,8 @@ pub(crate) fn create_child(
         entry: 0,
         brk: 0,
         heap_mapped_end: 0,
+        fds: [crate::types::FdEntry::closed(); MAX_FD],
+        cwd: FS_ROOT_NODE,
         wait_status_ptr: 0,
         wait_reply_slot: 0,
         wait_reply_mrs: [0; 11],

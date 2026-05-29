@@ -94,10 +94,13 @@ restore_user_context:
     mv      sp, a0
 
     // Load sepc and sstatus. The kernel intentionally does not save or
-    // restore floating-point state; user contexts run with sstatus.FS=Off.
+    // restore floating-point state; force sstatus.FS=Off on every return.
     ld      t0, 32*8(sp)
     csrw    sepc, t0
     ld      t2, 33*8(sp)
+    li      t3, 0x6000
+    not     t3, t3
+    and     t2, t2, t3
     csrw    sstatus, t2
 
     // Put the UserContext pointer into sscratch so the next trap entry

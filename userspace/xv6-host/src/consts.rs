@@ -1,5 +1,9 @@
 pub(crate) const PAYLOAD_ELF: &[u8] = include_bytes!(env!("XV6_PAYLOAD_ELF"));
 pub(crate) const README_BYTES: &[u8] = include_bytes!("../../../third_party/xv6-riscv/README");
+pub(crate) const CONSOLE_INPUT: &[u8] = match option_env!("XV6_CONSOLE_INPUT") {
+    Some(input) => input.as_bytes(),
+    None => b"",
+};
 include!(env!("XV6_EXEC_CATALOG_RS"));
 
 pub(crate) const PAGE_SIZE: u64 = 4096;
@@ -59,14 +63,28 @@ pub(crate) const PROC_WAITING: u8 = 3;
 
 pub(crate) const FD_CLOSED: u8 = 0;
 pub(crate) const FD_CONSOLE: u8 = 1;
-pub(crate) const FD_README: u8 = 2;
-pub(crate) const FD_ROOTDIR: u8 = 3;
+pub(crate) const FD_FS_FILE: u8 = 2;
+pub(crate) const FD_FS_DIR: u8 = 3;
 pub(crate) const FD_PIPE_READ: u8 = 4;
 pub(crate) const FD_PIPE_WRITE: u8 = 5;
 pub(crate) const MAX_PIPES: usize = 8;
 pub(crate) const PIPE_BUF: usize = 512;
 pub(crate) const MAX_EXEC_ARGS: usize = 16;
 pub(crate) const MAX_EXEC_ARG_LEN: usize = 128;
+pub(crate) const MAX_FS_NODES: usize = 64;
+pub(crate) const MAX_DIR_ENTRIES: usize = 96;
+pub(crate) const MAX_FILE_BYTES: usize = 16 * 1024;
+pub(crate) const DIRSIZ: usize = 14;
+
+pub(crate) const FS_UNUSED: u8 = 0;
+pub(crate) const FS_FILE: u8 = 1;
+pub(crate) const FS_DIR: u8 = 2;
+pub(crate) const FS_README: u8 = 3;
+pub(crate) const FS_CONSOLE: u8 = 4;
+
+pub(crate) const FS_ROOT_NODE: usize = 0;
+pub(crate) const FS_README_NODE: usize = 1;
+pub(crate) const FS_CONSOLE_NODE: usize = 2;
 
 pub(crate) const FAULT_UNKNOWN_SYSCALL: u64 = 2;
 

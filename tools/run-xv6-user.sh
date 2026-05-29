@@ -15,10 +15,13 @@ die() { log "ERROR: $*"; exit 1; }
 
 usage() {
     cat >&2 <<'EOF'
-usage: tools/run-xv6-user.sh [--verbose|-v] PROGRAM [ARG...]
+usage: tools/run-xv6-user.sh [--verbose|-v] [--stdin TEXT | --stdin-file PATH] PROGRAM [ARG...]
 
 Examples:
   tools/run-xv6-user.sh echo hello from xv6
+  tools/run-xv6-user.sh --stdin 'echo hi
+' sh
+  tools/run-xv6-user.sh --stdin-file script.sh sh
   TIMEOUT=60 tools/run-xv6-user.sh sh
 EOF
 }
@@ -28,6 +31,19 @@ while [[ $# -gt 0 ]]; do
         --verbose|-v)
             VERBOSE=1
             shift
+            ;;
+        --stdin)
+            [[ $# -ge 2 ]] || die "--stdin requires text"
+            export XV6_CONSOLE_INPUT="$2"
+            shift 2
+            ;;
+        --stdin-file)
+            [[ $# -ge 2 ]] || die "--stdin-file requires a path"
+            [[ -f "$2" ]] || die "stdin file not found: $2"
+            XV6_CONSOLE_INPUT="$(cat "$2"; printf _xv6_host_eof_marker_)"
+            XV6_CONSOLE_INPUT="${XV6_CONSOLE_INPUT%_xv6_host_eof_marker_}"
+            export XV6_CONSOLE_INPUT
+            shift 2
             ;;
         --help|-h)
             usage

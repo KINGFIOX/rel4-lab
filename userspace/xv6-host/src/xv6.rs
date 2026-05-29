@@ -8,13 +8,16 @@ use crate::child::{
 };
 use crate::consts::*;
 use crate::sel4::{call_checked, msg_info, sel4_send, sel4_yield};
-use crate::types::{Child, FdEntry};
+use crate::types::{Child, DirEntry, FdEntry, FsNode};
 use crate::util::*;
 
-static mut FD_TABLE: [FdEntry; MAX_FD] = [FdEntry::closed(); MAX_FD];
 static mut TICKS: u64 = 0;
 static mut PIPES: [Pipe; MAX_PIPES] = [Pipe::closed(); MAX_PIPES];
 static mut NEXT_PID: u64 = 2;
+static mut CONSOLE_INPUT_POS: usize = 0;
+static mut FS_NODES: [FsNode; MAX_FS_NODES] = [FsNode::empty(); MAX_FS_NODES];
+static mut DIR_ENTRIES: [DirEntry; MAX_DIR_ENTRIES] = [DirEntry::empty(); MAX_DIR_ENTRIES];
+static mut NEXT_INO: u32 = 4;
 
 pub(crate) enum SyscallResult {
     Reply(i64),
@@ -44,12 +47,6 @@ impl Pipe {
     }
 }
 
-const ROOT_DIRENTS: [u8; 64] = [
-    1, 0, b'.', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, b'.', b'.', 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 2, 0, b'R', b'E', b'A', b'D', b'M', b'E', 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, b'c', b'o',
-    b'n', b's', b'o', b'l', b'e', 0, 0, 0, 0, 0, 0, 0,
-];
-
 pub(crate) fn tick() {
     unsafe {
         TICKS = TICKS.wrapping_add(1);
@@ -74,11 +71,11 @@ pub(crate) fn handle_xv6_syscall(
             return sys_exit(procs, proc_idx, a0 as i32);
         }
         SYS_WAIT => return sys_wait(alloc, procs, proc_idx, a0, mrs),
-        SYS_WRITE => sys_write(&procs[proc_idx], a0 as usize, a1, a2 as usize),
-        SYS_READ => sys_read(&procs[proc_idx], a0 as usize, a1, a2 as usize),
-        SYS_OPEN => sys_open(&procs[proc_idx], a0, a1 as u32),
-        SYS_CLOSE => sys_close(a0 as usize),
-        SYS_DUP => sys_dup(a0 as usize),
+        SYS_WRITE => sys_write(&mut procs[proc_idx], a0 as usize, a1, a2 as usize),
+        SYS_READ => return sys_read(&mut procs[proc_idx], a0 as usize, a1, a2 as usize),
+        SYS_OPEN => sys_open(&mut procs[proc_idx], a0, a1 as u32),
+        SYS_CLOSE => sys_close(&mut procs[proc_idx], a0 as usize),
+        SYS_DUP => sys_dup(&mut procs[proc_idx], a0 as usize),
         SYS_FSTAT => sys_fstat(&procs[proc_idx], a0 as usize, a1),
         SYS_SBRK => sys_sbrk(alloc, &mut procs[proc_idx], a0 as i64),
         SYS_GETPID => procs[proc_idx].pid as i64,
@@ -88,17 +85,19 @@ pub(crate) fn handle_xv6_syscall(
             0
         }
         SYS_KILL => sys_kill(procs, a0 as i64),
-        SYS_CHDIR => sys_chdir(&procs[proc_idx], a0),
-        SYS_PIPE => sys_pipe(&procs[proc_idx], a0),
+        SYS_CHDIR => sys_chdir(&mut procs[proc_idx], a0),
+        SYS_PIPE => sys_pipe(&mut procs[proc_idx], a0),
         SYS_MKNOD => sys_mknod(&procs[proc_idx], a0),
         SYS_EXEC => return sys_exec(alloc, &mut procs[proc_idx], a0, a1),
-        SYS_UNLINK | SYS_LINK | SYS_MKDIR => -1,
+        SYS_UNLINK => sys_unlink(&procs[proc_idx], a0),
+        SYS_LINK => sys_link(&procs[proc_idx], a0, a1),
+        SYS_MKDIR => sys_mkdir(&procs[proc_idx], a0),
         _ => -1,
     };
     SyscallResult::Reply(ret)
 }
 
-fn sys_write(child: &Child, fd: usize, buf: u64, len: usize) -> i64 {
+fn sys_write(child: &mut Child, fd: usize, buf: u64, len: usize) -> i64 {
     if len == 0 {
         return 0;
     }
@@ -109,149 +108,161 @@ fn sys_write(child: &Child, fd: usize, buf: u64, len: usize) -> i64 {
         if !copy_from_child(child, buf + done as u64, &mut scratch[..n]) {
             return -1;
         }
-        let wrote = unsafe {
+        let wrote = {
             if fd >= MAX_FD {
                 return -1;
             }
-            match FD_TABLE[fd].kind {
-                FD_CONSOLE if fd != 0 => {
+            match child.fds[fd].kind {
+                FD_CONSOLE if child.fds[fd].writable => {
                     for b in &scratch[..n] {
                         putchar(*b);
                     }
                     n
                 }
-                FD_PIPE_WRITE => pipe_write(FD_TABLE[fd].aux, &scratch[..n]),
+                FD_PIPE_WRITE => unsafe { pipe_write(child.fds[fd].aux, &scratch[..n]) },
+                FD_FS_FILE if child.fds[fd].writable => {
+                    fs_write(child.fds[fd].aux, child.fds[fd].offset, &scratch[..n])
+                }
                 _ => return -1,
             }
         };
         if wrote == 0 {
             break;
         }
+        if fd < MAX_FD && child.fds[fd].kind == FD_FS_FILE {
+            child.fds[fd].offset += wrote;
+        }
         done += wrote;
     }
     done as i64
 }
 
-fn sys_read(child: &Child, fd: usize, dst: u64, len: usize) -> i64 {
+fn sys_read(child: &mut Child, fd: usize, dst: u64, len: usize) -> SyscallResult {
     if fd >= MAX_FD || len == 0 {
-        return if fd < MAX_FD { 0 } else { -1 };
+        return SyscallResult::Reply(if fd < MAX_FD { 0 } else { -1 });
     }
-    unsafe {
-        let entry = FD_TABLE[fd];
-        match entry.kind {
-            FD_CONSOLE => 0,
-            FD_README => {
-                let data = README_BYTES;
-                if entry.offset >= data.len() {
-                    return 0;
-                }
-                let n = min(len, data.len() - entry.offset);
-                if !copy_to_child(child, dst, &data[entry.offset..entry.offset + n]) {
-                    return -1;
-                }
-                FD_TABLE[fd].offset += n;
-                n as i64
-            }
-            FD_ROOTDIR => {
-                let data = &ROOT_DIRENTS;
-                if entry.offset >= data.len() {
-                    return 0;
-                }
-                let n = min(len, data.len() - entry.offset);
-                if !copy_to_child(child, dst, &data[entry.offset..entry.offset + n]) {
-                    return -1;
-                }
-                FD_TABLE[fd].offset += n;
-                n as i64
-            }
-            FD_PIPE_READ => pipe_read(child, entry.aux, dst, len),
-            _ => -1,
-        }
+    let entry = child.fds[fd];
+    match entry.kind {
+        FD_CONSOLE => sys_read_console(child, dst, len),
+        FD_FS_FILE if entry.readable => SyscallResult::Reply(fs_read_file(child, fd, dst, len)),
+        FD_FS_DIR if entry.readable => SyscallResult::Reply(fs_read_dir(child, fd, dst, len)),
+        FD_PIPE_READ => SyscallResult::Reply(unsafe { pipe_read(child, entry.aux, dst, len) }),
+        _ => SyscallResult::Reply(-1),
     }
 }
 
-fn sys_open(child: &Child, path_ptr: u64, flags: u32) -> i64 {
+fn sys_read_console(child: &Child, dst: u64, len: usize) -> SyscallResult {
+    if CONSOLE_INPUT.is_empty() {
+        return SyscallResult::Block;
+    }
+    unsafe {
+        if CONSOLE_INPUT_POS >= CONSOLE_INPUT.len() {
+            return SyscallResult::Reply(0);
+        }
+        let n = min(len, CONSOLE_INPUT.len() - CONSOLE_INPUT_POS);
+        let chunk = &CONSOLE_INPUT[CONSOLE_INPUT_POS..CONSOLE_INPUT_POS + n];
+        if !copy_to_child(child, dst, chunk) {
+            return SyscallResult::Reply(-1);
+        }
+        for b in chunk {
+            putchar(*b);
+        }
+        CONSOLE_INPUT_POS += n;
+        SyscallResult::Reply(n as i64)
+    }
+}
+
+fn sys_open(child: &mut Child, path_ptr: u64, flags: u32) -> i64 {
     let mut path = [0u8; 128];
     let Some(len) = copy_cstr_from_child(child, path_ptr, &mut path) else {
         return -1;
     };
-    let name = basename(&path[..len]);
+    let path = &path[..len];
     let wants_write = flags & (O_WRONLY | O_RDWR | O_CREATE | O_TRUNC) != 0;
-    let kind = if path_is_root(&path[..len]) || name == b"." || name == b".." {
-        if wants_write {
-            return -1;
+    let readable = flags & O_WRONLY == 0 || flags & O_RDWR != 0;
+    let writable = flags & (O_WRONLY | O_RDWR) != 0;
+
+    let node = match lookup_path(child, path) {
+        Some(node) => node,
+        None if flags & O_CREATE != 0 => {
+            let Some((parent, name, name_len)) = lookup_parent(child, path) else {
+                return -1;
+            };
+            let Some(node) = create_fs_node(parent, &name[..name_len], FS_FILE) else {
+                return -1;
+            };
+            node
         }
-        FD_ROOTDIR
-    } else if name == b"README" {
-        if wants_write {
-            return -1;
-        }
-        FD_README
-    } else if name == b"console" {
-        FD_CONSOLE
-    } else {
-        return -1;
+        None => return -1,
     };
-    alloc_fd(kind)
-}
 
-fn sys_close(fd: usize) -> i64 {
-    if fd >= MAX_FD {
+    let kind = unsafe { FS_NODES[node].kind };
+    if kind == FS_CONSOLE {
+        return alloc_fd(child, FD_CONSOLE, 0, true, true);
+    }
+    if kind == FS_DIR && wants_write {
         return -1;
     }
-    unsafe {
-        if fd <= 2 {
-            FD_TABLE[fd].offset = 0;
-            return 0;
-        }
-        if FD_TABLE[fd].kind == FD_CLOSED {
-            return -1;
-        }
-        close_fd(fd);
-        return 0;
+    if kind == FS_README && wants_write {
+        return -1;
     }
+    if kind == FS_FILE && flags & O_TRUNC != 0 && writable {
+        unsafe {
+            FS_NODES[node].size = 0;
+        }
+    }
+
+    let fd_kind = if kind == FS_DIR {
+        FD_FS_DIR
+    } else {
+        FD_FS_FILE
+    };
+    alloc_fd(child, fd_kind, node, readable, writable)
 }
 
-unsafe fn close_fd(fd: usize) {
+fn sys_close(child: &mut Child, fd: usize) -> i64 {
+    if fd >= MAX_FD || child.fds[fd].kind == FD_CLOSED {
+        return -1;
+    }
+    close_fd(child, fd);
+    0
+}
+
+fn close_fd(child: &mut Child, fd: usize) {
+    let entry = child.fds[fd];
     unsafe {
-        match FD_TABLE[fd].kind {
-            FD_PIPE_READ => {
-                let pipe = FD_TABLE[fd].aux;
-                if pipe < MAX_PIPES && PIPES[pipe].readers > 0 {
-                    PIPES[pipe].readers -= 1;
-                }
+        match entry.kind {
+            FD_PIPE_READ if entry.aux < MAX_PIPES && PIPES[entry.aux].readers > 0 => {
+                PIPES[entry.aux].readers -= 1;
             }
-            FD_PIPE_WRITE => {
-                let pipe = FD_TABLE[fd].aux;
-                if pipe < MAX_PIPES && PIPES[pipe].writers > 0 {
-                    PIPES[pipe].writers -= 1;
+            FD_PIPE_WRITE if entry.aux < MAX_PIPES && PIPES[entry.aux].writers > 0 => {
+                PIPES[entry.aux].writers -= 1;
+            }
+            FD_FS_FILE | FD_FS_DIR if entry.aux < MAX_FS_NODES => {
+                if FS_NODES[entry.aux].open_refs > 0 {
+                    FS_NODES[entry.aux].open_refs -= 1;
                 }
+                maybe_free_node(entry.aux);
             }
             _ => {}
         }
-        FD_TABLE[fd] = FdEntry::closed();
     }
+    child.fds[fd] = FdEntry::closed();
 }
 
-fn sys_dup(fd: usize) -> i64 {
+fn sys_dup(child: &mut Child, fd: usize) -> i64 {
     if fd >= MAX_FD {
         return -1;
     }
-    let entry = unsafe { FD_TABLE[fd] };
+    let entry = child.fds[fd];
     if entry.kind == FD_CLOSED {
         return -1;
     }
-    unsafe {
-        for i in 0..MAX_FD {
-            if FD_TABLE[i].kind == FD_CLOSED {
-                FD_TABLE[i] = entry;
-                match entry.kind {
-                    FD_PIPE_READ if entry.aux < MAX_PIPES => PIPES[entry.aux].readers += 1,
-                    FD_PIPE_WRITE if entry.aux < MAX_PIPES => PIPES[entry.aux].writers += 1,
-                    _ => {}
-                }
-                return i as i64;
-            }
+    for i in 0..MAX_FD {
+        if child.fds[i].kind == FD_CLOSED {
+            child.fds[i] = entry;
+            inc_fd_ref(entry);
+            return i as i64;
         }
     }
     -1
@@ -261,11 +272,10 @@ fn sys_fstat(child: &Child, fd: usize, dst: u64) -> i64 {
     if fd >= MAX_FD {
         return -1;
     }
-    let entry = unsafe { FD_TABLE[fd] };
+    let entry = child.fds[fd];
     let (typ, ino, size) = match entry.kind {
         FD_CONSOLE => (T_DEVICE, CONSOLE_INO, 0u64),
-        FD_README => (T_FILE, README_INO, README_BYTES.len() as u64),
-        FD_ROOTDIR => (T_DIR, ROOT_INO, ROOT_DIRENTS.len() as u64),
+        FD_FS_FILE | FD_FS_DIR => fs_stat(entry.aux),
         FD_PIPE_READ | FD_PIPE_WRITE => (T_FILE, 4 + entry.aux as u32, 0u64),
         _ => return -1,
     };
@@ -323,6 +333,8 @@ fn sys_fork(
     child.entry = parent.entry;
     child.brk = parent.brk;
     child.heap_mapped_end = parent.heap_mapped_end;
+    child.fds = parent.fds;
+    inc_fd_refs(&child);
     clone_address_space(alloc, &parent, &child);
 
     let mut ctx = read_user_context(parent.tcb);
@@ -349,6 +361,7 @@ fn sys_exit(procs: &mut [Child; MAX_PROCS], proc_idx: usize, status: i32) -> Sys
     if procs[proc_idx].parent_pid == 0 {
         halt_loop();
     }
+    close_all_fds(&mut procs[proc_idx]);
     procs[proc_idx].state = PROC_ZOMBIE;
     procs[proc_idx].exit_status = status;
     reply_waiting_parent(procs, proc_idx);
@@ -585,19 +598,24 @@ fn write_child_u64(child: &Child, va: u64, value: u64) -> bool {
     copy_to_child(child, va, &bytes)
 }
 
-fn sys_chdir(child: &Child, path_ptr: u64) -> i64 {
+fn sys_chdir(child: &mut Child, path_ptr: u64) -> i64 {
     let mut path = [0u8; 128];
     let Some(len) = copy_cstr_from_child(child, path_ptr, &mut path) else {
         return -1;
     };
-    if path_is_root(&path[..len]) || basename(&path[..len]) == b".." {
-        0
-    } else {
-        -1
+    let Some(node) = lookup_path(child, &path[..len]) else {
+        return -1;
+    };
+    unsafe {
+        if FS_NODES[node].kind != FS_DIR {
+            return -1;
+        }
     }
+    child.cwd = node;
+    0
 }
 
-fn sys_pipe(child: &Child, fds_ptr: u64) -> i64 {
+fn sys_pipe(child: &mut Child, fds_ptr: u64) -> i64 {
     unsafe {
         let mut pipe_idx = MAX_PIPES;
         for i in 0..MAX_PIPES {
@@ -610,34 +628,38 @@ fn sys_pipe(child: &Child, fds_ptr: u64) -> i64 {
             return -1;
         }
 
-        let Some(read_fd) = find_free_fd() else {
+        let Some(read_fd) = find_free_fd(child) else {
             return -1;
         };
-        FD_TABLE[read_fd] = FdEntry {
+        child.fds[read_fd] = FdEntry {
             kind: FD_PIPE_READ,
             offset: 0,
             aux: pipe_idx,
+            readable: true,
+            writable: false,
         };
-        let Some(write_fd) = find_free_fd() else {
-            FD_TABLE[read_fd] = FdEntry::closed();
+        let Some(write_fd) = find_free_fd(child) else {
+            child.fds[read_fd] = FdEntry::closed();
             return -1;
         };
 
         PIPES[pipe_idx] = Pipe::closed();
         PIPES[pipe_idx].readers = 1;
         PIPES[pipe_idx].writers = 1;
-        FD_TABLE[write_fd] = FdEntry {
+        child.fds[write_fd] = FdEntry {
             kind: FD_PIPE_WRITE,
             offset: 0,
             aux: pipe_idx,
+            readable: false,
+            writable: true,
         };
 
         let mut out = [0u8; 8];
         write_i32(&mut out, 0, read_fd as i32);
         write_i32(&mut out, 4, write_fd as i32);
         if !copy_to_child(child, fds_ptr, &out) {
-            close_fd(read_fd);
-            close_fd(write_fd);
+            close_fd(child, read_fd);
+            close_fd(child, write_fd);
             return -1;
         }
         0
@@ -656,56 +678,63 @@ fn sys_mknod(child: &Child, path_ptr: u64) -> i64 {
     }
 }
 
-pub(crate) fn init_fds() {
+pub(crate) fn init_fds(child: &mut Child) {
     unsafe {
         let mut i = 0;
         while i < MAX_FD {
-            FD_TABLE[i] = FdEntry::closed();
+            child.fds[i] = FdEntry::closed();
             i += 1;
         }
-        FD_TABLE[0] = FdEntry {
+        child.fds[0] = FdEntry {
             kind: FD_CONSOLE,
             offset: 0,
             aux: 0,
+            readable: true,
+            writable: true,
         };
-        FD_TABLE[1] = FdEntry {
+        child.fds[1] = FdEntry {
             kind: FD_CONSOLE,
             offset: 0,
             aux: 0,
+            readable: true,
+            writable: true,
         };
-        FD_TABLE[2] = FdEntry {
+        child.fds[2] = FdEntry {
             kind: FD_CONSOLE,
             offset: 0,
             aux: 0,
+            readable: true,
+            writable: true,
         };
         let mut p = 0;
         while p < MAX_PIPES {
             PIPES[p] = Pipe::closed();
             p += 1;
         }
+        CONSOLE_INPUT_POS = 0;
+        init_fs();
     }
 }
 
-fn alloc_fd(kind: u8) -> i64 {
-    unsafe {
-        if let Some(i) = find_free_fd() {
-            FD_TABLE[i] = FdEntry {
-                kind,
-                offset: 0,
-                aux: 0,
-            };
-            return i as i64;
-        }
+fn alloc_fd(child: &mut Child, kind: u8, aux: usize, readable: bool, writable: bool) -> i64 {
+    if let Some(i) = find_free_fd(child) {
+        child.fds[i] = FdEntry {
+            kind,
+            offset: 0,
+            aux,
+            readable,
+            writable,
+        };
+        inc_fd_ref(child.fds[i]);
+        return i as i64;
     }
     -1
 }
 
-fn find_free_fd() -> Option<usize> {
-    unsafe {
-        for i in 0..MAX_FD {
-            if FD_TABLE[i].kind == FD_CLOSED {
-                return Some(i);
-            }
+fn find_free_fd(child: &Child) -> Option<usize> {
+    for i in 0..MAX_FD {
+        if child.fds[i].kind == FD_CLOSED {
+            return Some(i);
         }
     }
     None
@@ -718,6 +747,458 @@ fn find_free_proc(procs: &[Child; MAX_PROCS]) -> Option<usize> {
         }
     }
     None
+}
+
+fn inc_fd_refs(child: &Child) {
+    for entry in child.fds {
+        inc_fd_ref(entry);
+    }
+}
+
+fn inc_fd_ref(entry: FdEntry) {
+    unsafe {
+        match entry.kind {
+            FD_PIPE_READ if entry.aux < MAX_PIPES => PIPES[entry.aux].readers += 1,
+            FD_PIPE_WRITE if entry.aux < MAX_PIPES => PIPES[entry.aux].writers += 1,
+            FD_FS_FILE | FD_FS_DIR if entry.aux < MAX_FS_NODES => {
+                FS_NODES[entry.aux].open_refs = FS_NODES[entry.aux].open_refs.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn close_all_fds(child: &mut Child) {
+    for fd in 0..MAX_FD {
+        if child.fds[fd].kind != FD_CLOSED {
+            close_fd(child, fd);
+        }
+    }
+}
+
+fn init_fs() {
+    unsafe {
+        let mut i = 0;
+        while i < MAX_FS_NODES {
+            FS_NODES[i] = FsNode::empty();
+            i += 1;
+        }
+        let mut d = 0;
+        while d < MAX_DIR_ENTRIES {
+            DIR_ENTRIES[d] = DirEntry::empty();
+            d += 1;
+        }
+        NEXT_INO = 4;
+
+        FS_NODES[FS_ROOT_NODE] = FsNode {
+            used: true,
+            kind: FS_DIR,
+            ino: ROOT_INO,
+            parent: FS_ROOT_NODE,
+            nlink: 1,
+            open_refs: 0,
+            size: 0,
+            data: [0; MAX_FILE_BYTES],
+        };
+        FS_NODES[FS_README_NODE] = FsNode {
+            used: true,
+            kind: FS_README,
+            ino: README_INO,
+            parent: FS_ROOT_NODE,
+            nlink: 1,
+            open_refs: 0,
+            size: README_BYTES.len(),
+            data: [0; MAX_FILE_BYTES],
+        };
+        FS_NODES[FS_CONSOLE_NODE] = FsNode {
+            used: true,
+            kind: FS_CONSOLE,
+            ino: CONSOLE_INO,
+            parent: FS_ROOT_NODE,
+            nlink: 1,
+            open_refs: 0,
+            size: 0,
+            data: [0; MAX_FILE_BYTES],
+        };
+        let _ = add_dir_entry(FS_ROOT_NODE, b"README", FS_README_NODE);
+        let _ = add_dir_entry(FS_ROOT_NODE, b"console", FS_CONSOLE_NODE);
+    }
+}
+
+fn fs_stat(node: usize) -> (u16, u32, u64) {
+    unsafe {
+        if node >= MAX_FS_NODES || !FS_NODES[node].used {
+            return (T_FILE, 0, 0);
+        }
+        let typ = match FS_NODES[node].kind {
+            FS_DIR => T_DIR,
+            FS_CONSOLE => T_DEVICE,
+            _ => T_FILE,
+        };
+        (typ, FS_NODES[node].ino, fs_node_size(node) as u64)
+    }
+}
+
+fn fs_node_size(node: usize) -> usize {
+    unsafe {
+        match FS_NODES[node].kind {
+            FS_README => README_BYTES.len(),
+            FS_DIR => dir_entry_count(node) * 16,
+            _ => FS_NODES[node].size,
+        }
+    }
+}
+
+fn fs_read_file(child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
+    let node = child.fds[fd].aux;
+    unsafe {
+        if node >= MAX_FS_NODES || !FS_NODES[node].used {
+            return -1;
+        }
+        let offset = child.fds[fd].offset;
+        let size = fs_node_size(node);
+        if offset >= size {
+            return 0;
+        }
+        let n = min(len, size - offset);
+        let ok = match FS_NODES[node].kind {
+            FS_README => copy_to_child(child, dst, &README_BYTES[offset..offset + n]),
+            FS_FILE => copy_to_child(child, dst, &FS_NODES[node].data[offset..offset + n]),
+            _ => false,
+        };
+        if !ok {
+            return -1;
+        }
+        child.fds[fd].offset += n;
+        n as i64
+    }
+}
+
+fn fs_write(node: usize, offset: usize, src: &[u8]) -> usize {
+    unsafe {
+        if node >= MAX_FS_NODES || !FS_NODES[node].used || FS_NODES[node].kind != FS_FILE {
+            return 0;
+        }
+        if offset >= MAX_FILE_BYTES {
+            return 0;
+        }
+        let n = min(src.len(), MAX_FILE_BYTES - offset);
+        FS_NODES[node].data[offset..offset + n].copy_from_slice(&src[..n]);
+        FS_NODES[node].size = FS_NODES[node].size.max(offset + n);
+        n
+    }
+}
+
+fn fs_read_dir(child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
+    let node = child.fds[fd].aux;
+    let mut done = 0usize;
+    while done < len {
+        let off = child.fds[fd].offset + done;
+        let mut ent = [0u8; 16];
+        if !dirent_at(node, off / 16, &mut ent) {
+            break;
+        }
+        let start = off % 16;
+        let n = min(16 - start, len - done);
+        if !copy_to_child(child, dst + done as u64, &ent[start..start + n]) {
+            return -1;
+        }
+        done += n;
+    }
+    child.fds[fd].offset += done;
+    done as i64
+}
+
+fn dir_entry_count(parent: usize) -> usize {
+    let mut count = 2;
+    unsafe {
+        let mut i = 0;
+        while i < MAX_DIR_ENTRIES {
+            if DIR_ENTRIES[i].used && DIR_ENTRIES[i].parent == parent {
+                count += 1;
+            }
+            i += 1;
+        }
+    }
+    count
+}
+
+fn dirent_at(parent: usize, idx: usize, out: &mut [u8; 16]) -> bool {
+    if idx == 0 {
+        return write_dirent(out, parent, b".");
+    }
+    if idx == 1 {
+        let p = unsafe { FS_NODES[parent].parent };
+        return write_dirent(out, p, b"..");
+    }
+    let mut seen = 2;
+    unsafe {
+        let mut i = 0;
+        while i < MAX_DIR_ENTRIES {
+            let ent = DIR_ENTRIES[i];
+            if ent.used && ent.parent == parent {
+                if seen == idx {
+                    return write_dirent(out, ent.node, &ent.name[..ent.name_len as usize]);
+                }
+                seen += 1;
+            }
+            i += 1;
+        }
+    }
+    false
+}
+
+fn write_dirent(out: &mut [u8; 16], node: usize, name: &[u8]) -> bool {
+    unsafe {
+        if node >= MAX_FS_NODES || !FS_NODES[node].used {
+            return false;
+        }
+        for b in out.iter_mut() {
+            *b = 0;
+        }
+        write_u16(out, 0, FS_NODES[node].ino as u16);
+        let n = min(DIRSIZ, name.len());
+        out[2..2 + n].copy_from_slice(&name[..n]);
+        true
+    }
+}
+
+fn lookup_path(child: &Child, path: &[u8]) -> Option<usize> {
+    if path.is_empty() || path == b"." {
+        return Some(child.cwd);
+    }
+    let mut cur = if path[0] == b'/' {
+        FS_ROOT_NODE
+    } else {
+        child.cwd
+    };
+    let mut pos = 0usize;
+    while pos < path.len() {
+        while pos < path.len() && path[pos] == b'/' {
+            pos += 1;
+        }
+        if pos >= path.len() {
+            break;
+        }
+        let start = pos;
+        while pos < path.len() && path[pos] != b'/' {
+            pos += 1;
+        }
+        let comp = &path[start..pos];
+        if comp == b"." {
+            continue;
+        }
+        if comp == b".." {
+            cur = unsafe { FS_NODES[cur].parent };
+            continue;
+        }
+        let ent = find_dir_entry(cur, comp)?;
+        cur = unsafe { DIR_ENTRIES[ent].node };
+    }
+    Some(cur)
+}
+
+fn lookup_parent(child: &Child, path: &[u8]) -> Option<(usize, [u8; DIRSIZ], usize)> {
+    let mut end = path.len();
+    while end > 0 && path[end - 1] == b'/' {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    let mut slash = end;
+    while slash > 0 && path[slash - 1] != b'/' {
+        slash -= 1;
+    }
+    let name = &path[slash..end];
+    if name.is_empty() || name == b"." || name == b".." || name.len() > DIRSIZ {
+        return None;
+    }
+    let parent = if slash == 0 {
+        if path[0] == b'/' {
+            FS_ROOT_NODE
+        } else {
+            child.cwd
+        }
+    } else {
+        lookup_path(child, &path[..slash])?
+    };
+    unsafe {
+        if FS_NODES[parent].kind != FS_DIR {
+            return None;
+        }
+    }
+    let mut out = [0u8; DIRSIZ];
+    out[..name.len()].copy_from_slice(name);
+    Some((parent, out, name.len()))
+}
+
+fn create_fs_node(parent: usize, name: &[u8], kind: u8) -> Option<usize> {
+    if find_dir_entry(parent, name).is_some() {
+        return None;
+    }
+    unsafe {
+        let mut node = 0usize;
+        while node < MAX_FS_NODES {
+            if !FS_NODES[node].used {
+                FS_NODES[node] = FsNode {
+                    used: true,
+                    kind,
+                    ino: NEXT_INO,
+                    parent,
+                    nlink: 1,
+                    open_refs: 0,
+                    size: 0,
+                    data: [0; MAX_FILE_BYTES],
+                };
+                NEXT_INO = NEXT_INO.wrapping_add(1);
+                add_dir_entry(parent, name, node)?;
+                return Some(node);
+            }
+            node += 1;
+        }
+    }
+    None
+}
+
+fn add_dir_entry(parent: usize, name: &[u8], node: usize) -> Option<usize> {
+    if name.is_empty() || name.len() > DIRSIZ || find_dir_entry(parent, name).is_some() {
+        return None;
+    }
+    unsafe {
+        let mut i = 0;
+        while i < MAX_DIR_ENTRIES {
+            if !DIR_ENTRIES[i].used {
+                let mut stored = [0u8; DIRSIZ];
+                stored[..name.len()].copy_from_slice(name);
+                DIR_ENTRIES[i] = DirEntry {
+                    used: true,
+                    parent,
+                    node,
+                    name_len: name.len() as u8,
+                    name: stored,
+                };
+                return Some(i);
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+fn find_dir_entry(parent: usize, name: &[u8]) -> Option<usize> {
+    if name.len() > DIRSIZ {
+        return None;
+    }
+    unsafe {
+        let mut i = 0;
+        while i < MAX_DIR_ENTRIES {
+            let ent = DIR_ENTRIES[i];
+            if ent.used
+                && ent.parent == parent
+                && ent.name_len as usize == name.len()
+                && &ent.name[..name.len()] == name
+            {
+                return Some(i);
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+fn sys_unlink(child: &Child, path_ptr: u64) -> i64 {
+    let mut path = [0u8; 128];
+    let Some(len) = copy_cstr_from_child(child, path_ptr, &mut path) else {
+        return -1;
+    };
+    let Some((parent, name, name_len)) = lookup_parent(child, &path[..len]) else {
+        return -1;
+    };
+    let Some(ent_idx) = find_dir_entry(parent, &name[..name_len]) else {
+        return -1;
+    };
+    unsafe {
+        let node = DIR_ENTRIES[ent_idx].node;
+        if node == FS_README_NODE || node == FS_CONSOLE_NODE {
+            return -1;
+        }
+        if FS_NODES[node].kind == FS_DIR && !is_dir_empty(node) {
+            return -1;
+        }
+        DIR_ENTRIES[ent_idx] = DirEntry::empty();
+        if FS_NODES[node].nlink > 0 {
+            FS_NODES[node].nlink -= 1;
+        }
+        maybe_free_node(node);
+    }
+    0
+}
+
+fn sys_link(child: &Child, old_ptr: u64, new_ptr: u64) -> i64 {
+    let mut old_path = [0u8; 128];
+    let mut new_path = [0u8; 128];
+    let Some(old_len) = copy_cstr_from_child(child, old_ptr, &mut old_path) else {
+        return -1;
+    };
+    let Some(new_len) = copy_cstr_from_child(child, new_ptr, &mut new_path) else {
+        return -1;
+    };
+    let Some(node) = lookup_path(child, &old_path[..old_len]) else {
+        return -1;
+    };
+    let Some((parent, name, name_len)) = lookup_parent(child, &new_path[..new_len]) else {
+        return -1;
+    };
+    unsafe {
+        if FS_NODES[node].kind != FS_FILE && FS_NODES[node].kind != FS_README {
+            return -1;
+        }
+        if add_dir_entry(parent, &name[..name_len], node).is_none() {
+            return -1;
+        }
+        FS_NODES[node].nlink = FS_NODES[node].nlink.saturating_add(1);
+    }
+    0
+}
+
+fn sys_mkdir(child: &Child, path_ptr: u64) -> i64 {
+    let mut path = [0u8; 128];
+    let Some(len) = copy_cstr_from_child(child, path_ptr, &mut path) else {
+        return -1;
+    };
+    let Some((parent, name, name_len)) = lookup_parent(child, &path[..len]) else {
+        return -1;
+    };
+    if create_fs_node(parent, &name[..name_len], FS_DIR).is_some() {
+        0
+    } else {
+        -1
+    }
+}
+
+fn is_dir_empty(node: usize) -> bool {
+    unsafe {
+        let mut i = 0;
+        while i < MAX_DIR_ENTRIES {
+            if DIR_ENTRIES[i].used && DIR_ENTRIES[i].parent == node {
+                return false;
+            }
+            i += 1;
+        }
+    }
+    true
+}
+
+fn maybe_free_node(node: usize) {
+    unsafe {
+        if node >= MAX_FS_NODES || !FS_NODES[node].used {
+            return;
+        }
+        if FS_NODES[node].nlink == 0 && FS_NODES[node].open_refs == 0 {
+            FS_NODES[node] = FsNode::empty();
+        }
+    }
 }
 
 unsafe fn pipe_write(pipe_idx: usize, src: &[u8]) -> usize {
@@ -775,8 +1256,4 @@ fn basename(path: &[u8]) -> &[u8] {
         }
     }
     &path[start..]
-}
-
-fn path_is_root(path: &[u8]) -> bool {
-    path.is_empty() || path == b"/" || path == b"."
 }

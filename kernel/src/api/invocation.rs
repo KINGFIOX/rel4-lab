@@ -734,7 +734,9 @@ pub fn handle_domain(
 /// without actually starting/resuming the thread. The test driver's
 /// expectation in the 116-test set is that these calls succeed; once we
 /// land a real context-switch path the same code will gain real
-/// behaviour without changing the parse/validate logic.
+/// behaviour without changing the parse/validate logic. `TCBSetFlags`
+/// is intentionally unsupported: on RISC-V this is the FPU flag surface,
+/// and this kernel does not own or expose floating-point context.
 pub fn handle_thread(
     thread: &Thread,
     _slot: *mut Cte,
@@ -1192,28 +1194,7 @@ pub fn handle_thread(
             Ok(())
         }
 
-        id if id == TCB_SET_FLAGS + current_label_shift() => {
-            // libsel4: tag = MessageInfo(_, 0, 0, 2). mr0 = clear, mr1 = set.
-            if length < 2 {
-                return Err(SyscallError::TruncatedMessage);
-            }
-            let clear = uc.regs[reg::A2] as u32;
-            let set = uc.regs[reg::A3] as u32;
-            unsafe {
-                let cur = (*tcb_ptr).flags;
-                // The Rust kernel no longer owns floating-point context.
-                // Keep the ABI-visible flag disabled regardless of attempts
-                // to clear it, and leave sstatus.FS off.
-                let flags = ((cur & !clear) | (set & tcb::TCB_FLAG_FPU_DISABLED))
-                    | tcb::TCB_FLAG_FPU_DISABLED;
-                (*tcb_ptr).flags = flags;
-                uc.regs[reg::A2] = flags as u64;
-                if !thread.ipc_buffer_kva.is_null() {
-                    *thread.ipc_buffer_kva.add(1) = flags as u64;
-                }
-            }
-            Ok(())
-        }
+        id if id == TCB_SET_FLAGS + current_label_shift() => Err(SyscallError::IllegalOperation),
 
         _ => Err(SyscallError::IllegalOperation),
     }

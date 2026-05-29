@@ -89,6 +89,8 @@ pub extern "C" fn init_kernel(
     hart_id: usize,
     core_id: usize,
 ) -> ! {
+    crate::arch::riscv64::trap::disable_fpu_access();
+
     // Touch the linker symbols so they don't get stripped.
     let _ = unsafe {
         (

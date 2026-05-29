@@ -15,6 +15,7 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=XV6_PAYLOAD_ELF");
     println!("cargo:rerun-if-env-changed=XV6_EXEC_CATALOG_RS");
+    println!("cargo:rerun-if-env-changed=XV6_CONSOLE_INPUT");
     let payload = env::var("XV6_PAYLOAD_ELF").unwrap_or_else(|_| {
         panic!(
             "XV6_PAYLOAD_ELF must point to a linked xv6 user payload; \

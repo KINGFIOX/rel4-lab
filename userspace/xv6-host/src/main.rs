@@ -53,10 +53,10 @@ fn run(bi_ptr: *const BootInfo) -> ! {
     log("xv6-host: boot\n");
 
     let mut alloc = Allocator::new(bi);
-    xv6::init_fds();
     let fault_ep = alloc.retype_one(OBJ_ENDPOINT, 0);
     let mut procs = [Child::empty(); MAX_PROCS];
     procs[0] = create_child(&mut alloc, 1, 0, fault_ep);
+    xv6::init_fds(&mut procs[0]);
     setup_timer_notification(&mut alloc);
     load_payload(&mut alloc, &mut procs[0]);
     map_stack(&mut alloc, &procs[0]);

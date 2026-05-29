@@ -53,6 +53,7 @@ pub mod reg {
 }
 
 pub const SSTATUS_SPIE: u64 = 1 << 5;
+pub const SSTATUS_FS_MASK: u64 = 0b11 << 13;
 pub const SSTATUS_SUM: u64 = 1 << 18;
 pub const USER_SSTATUS: u64 = SSTATUS_SPIE;
 pub const ROOTSERVER_SSTATUS: u64 = USER_SSTATUS | SSTATUS_SUM;
@@ -86,6 +87,11 @@ pub fn init_timer() {
     csr::set_scounteren(csr::scounteren() | SCOUNTEREN_TM);
     csr::set_sie(csr::sie() | SIE_STIE);
     program_next_timer();
+}
+
+#[inline]
+pub fn disable_fpu_access() {
+    csr::set_sstatus(csr::sstatus() & !(SSTATUS_FS_MASK as usize));
 }
 
 fn program_next_timer() {

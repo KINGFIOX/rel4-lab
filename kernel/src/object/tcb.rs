@@ -58,7 +58,6 @@ pub fn set_current(tcb: *mut Tcb) -> *mut Tcb {
 
 pub const NUM_PRIORITIES: usize = 256;
 pub const DEFAULT_TIME_SLICE_TICKS: u8 = 5;
-pub const TCB_FLAG_FPU_DISABLED: u32 = 0x1;
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct Queue {
@@ -234,7 +233,6 @@ pub struct Tcb {
     pub affinity: u8,
     pub time_slice_ticks: u8,
     pub _sched_pad: [u8; 2],
-    pub flags: u32,
 
     /// Cap roots. The full caps (not just pointers) so that the future
     /// `restore_user_context` path can re-lookup CSpace / VSpace without
@@ -326,7 +324,6 @@ impl Tcb {
             affinity: 0,
             time_slice_ticks: 0,
             _sched_pad: [0; 2],
-            flags: TCB_FLAG_FPU_DISABLED,
             cspace_cap: Cap::null(),
             vspace_cap: Cap::null(),
             ipc_buffer_cap: Cap::null(),
@@ -376,7 +373,6 @@ pub unsafe fn init(tcb_kva: u64) {
     unsafe {
         (*t).state = ThreadState::Inactive as u8;
         (*t).time_slice_ticks = DEFAULT_TIME_SLICE_TICKS;
-        (*t).flags = TCB_FLAG_FPU_DISABLED;
         (*t).context.sstatus = crate::arch::riscv64::trap::USER_SSTATUS;
     }
 }
@@ -471,15 +467,6 @@ pub unsafe fn set_mcp(tcb: *mut Tcb, mcp: u8) {
     }
     unsafe {
         (*tcb).mcp = mcp;
-    }
-}
-
-pub unsafe fn set_flags(tcb: *mut Tcb, flags: u32) {
-    if tcb.is_null() {
-        return;
-    }
-    unsafe {
-        (*tcb).flags = flags;
     }
 }
 
