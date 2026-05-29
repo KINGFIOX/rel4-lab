@@ -6,22 +6,22 @@ binary boots unmodified on top of it.
 
 ## Current status
 
-The `sel4test-driver` rootserver boots, spawns helper TCBs and **per-test
-child processes** in their own VSpaces, and runs them on the Rust kernel
-through the official `libsel4` ABI. Endpoint IPC, bound notifications,
-satp-swapping context switches, and the major part of CSpace/Untyped
-plumbing are implemented well enough that **BIND00xx tests now pass for
-real** (helper TCB blocks on EP, gets signalled by bound NTFN, then is
-woken into a runnable state).
+The `sel4test-driver` rootserver boots, spawns helper TCBs and per-test
+child processes in their own VSpaces, and runs them on the Rust kernel
+through the official `libsel4` ABI. Endpoint IPC, notifications, reply
+caps, FPU save/restore, timer preemption, several CNode/Untyped paths,
+multi-size frame map/unmap, DomainSet, fault IPC, and ASID pool creation
+are implemented far enough for the full suite to run to completion.
 
-Before M4.2e the rootserver never actually yielded the CPU to its test
-processes, so previously-claimed "116/116 pass" numbers were trivially
-green — `seL4_Wait` was a no-op that returned `badge=0` to the driver,
-which interpreted that as success. With the EP state machine + VSpace
-switch landed (see milestones below), the BASIC test type now spawns a
-real `sel4test-tests` process per test in its own root PT, which exposes
-several real bugs in CNode ops / CSpace lookup that were never exercised
-before. Those are the next thing on deck — see "Next steps" below.
+Latest verified checkpoint: `./tools/run-tests.sh` passes:
+**116/116 enabled tests passing, 51 upstream-disabled tests remaining**.
+The final push from 91/116 fixed two seL4 semantics gaps:
+`CNode_Delete` now uses C-kernel-style `emptySlot` MDB splicing instead
+of rejecting slots with CDT children, which clears the `RETYPE0000..0002`
+teardown failures and the `VSPACE0006` ASID stress exhaustion; endpoint
+IPC now supports the pre-MCS single receive-slot cap-transfer path, which
+lets the serial server receive client shared-memory frame caps and clears
+all `SERSERV_*` failures.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -40,18 +40,18 @@ before. Those are the next thing on deck — see "Next steps" below.
 | M3.6 | Minimal Notification (state + badge) + `seL4_Send`/`seL4_Recv` slow-path dispatch — enough to make `BIND00xx`, `SYNC00xx`, `CANCEL_BADGED_SENDS` pass. | ✅ Done |
 | M3.7 | Minimal ASID table: every Frame cap records the ASID of the VSpace it's mapped into so `Page_Unmap` + `finalize_cap(Frame)` rip the leaf PTE out of the *right* root PT during cross-vspace Revoke. | ✅ Done |
 | M3.8 | `BootInfo.userImageFrames` populated with Frame caps for the rootserver ELF range, so `libsel4utils` doesn't re-allocate VAs over the driver's own image. | ✅ Done |
-| M3.9 | Full sel4test run: **116/116 enabled tests pass.** | ✅ Done |
+| M3.9 | Full enabled sel4test suite passes: **116/116 enabled tests pass; 51 tests disabled upstream**. | ✅ Done |
 | M4.1 | Recycle PT pages on `unmap_user_4k` — empty L1/L0 tables go straight back onto `BOOT_PT_FREELIST`, so the 128-page static pool sustains the whole 116-test sweep. | ✅ Done |
 | M4.2a | `Tcb` struct + per-Untyped-Retype slab init + dedicated `handle_thread()` for all 15 non-MCS `TCB_*` labels (Configure/SetSpace/SetIPCBuffer/SetPriority/SetMCPriority/SetSchedParams/WriteRegisters/ReadRegisters/CopyRegisters/Suspend/Resume/BindNotification/UnbindNotification/SetTLSBase/SetFlags). Data is parsed, validated, and persisted into the TCB slab. | ✅ Done |
 | M4.2b | Rootserver runs out of a real `Tcb` (`ROOTSERVER_TCB` in BSS); `CAP_INIT_THREAD_TCB` installed; `tcb::CURRENT_TCB` tracked. `restore_user_context` now restores from `current_tcb()->context`, so any `seL4_TCB_*` write against the rootserver TCB (`SetTLSBase`, future `WriteRegisters`, …) takes effect on next sret. | ✅ Done |
 | M4.2c | 256-bin per-priority ready queue (`RUNQUEUES` + 4-word `READY_BITMAP` for O(1) "highest set priority" scan), `enqueue/dequeue/schedule()` primitives, `kernel_exit()` hook called from every trap return. `TCB_Resume`/`Suspend` move the TCB in/out of the queue; `TCB_WriteRegisters(resume_target=1)` (the real "start helper" call) hits the same path. `seL4_Yield` rotates within the priority bin. Trampoline now takes the next TCB's `UserContext*` straight out of `handle_trap_rust`'s return value. | ✅ Done |
-| M4.2d | `Endpoint` struct (16 bytes, 2-bit state packed in head ptr, doubly-linked wait list reusing `Tcb.queue_{next,prev}`), `enqueue_waiter / pop_head / remove_waiter / finalize` primitives, init hook on `Untyped_Retype(Endpoint)`, `finalize_cap(Endpoint)` wakes all blocked waiters back into the runqueue. `Tcb.caller` field added for the pre-MCS Call/Reply pattern. The state machine isn't yet wired into `do_send`/`do_recv` — that's M4.2e — but the kernel object now exists at the right address with the right layout. | ✅ Done |
+| M4.2d | `Endpoint` struct (16 bytes, 2-bit state packed in head ptr, doubly-linked wait list reusing `Tcb.queue_{next,prev}`), `enqueue_waiter / pop_head / remove_waiter / finalize` primitives, init hook on `Untyped_Retype(Endpoint)`, `finalize_cap(Endpoint)` wakes all blocked waiters back into the runqueue. `Tcb.caller` field added for the pre-MCS Call/Reply pattern. | ✅ Done |
 | M4.2e | Wire `do_send` / `do_recv` / `do_call` / `do_reply` to the `Endpoint` state machine + `tcb::set_current → refresh_from_tcb` so syscalls read MRs from the *running* TCB's IPC buffer. The rootserver actually blocks on its fault EP now and the child test process gets scheduled in. | ✅ Done |
 | M4.2e+ | `kernel_exit` writes `satp` + `sfence.vma` when the next TCB lives in a different VSpace; new user root PTs (Untyped → PageTable) get the kernel-ELF + PSpace megapage entries copied in (`copy_kernel_mappings_to`) so traps from U-mode can still reach `trap_entry`. | ✅ Done |
 | M4.2e+ | `Page_Map` now parses `seL4_CapRights_t` (bit 0 W, bit 1 R) and the RISC-V VM-attr `riscvExecuteNever` bit instead of hard-coding `R/W/¬X`. ELF code pages are correctly mapped executable. | ✅ Done |
 | M4.2e+ | `TCB_Configure` / `TCB_SetSpace` apply the `seL4_CNode_CapData` word (guard ‖ guard_size) to the cspace cap before storing — without this the child process's root CNode could only resolve cptrs equal to its own bits, and every libsel4allocman retype came back `IllegalOperation`. | ✅ Done |
-| M4.2f | Triage real bugs surfaced now that BASIC tests actually execute: BIND0002 (bound NTFN race), CANCEL_BADGED_SENDS_000x, CNODEOP0006..0009, CSPACE0001 hang. | ⏳ Pending |
-| M4.3 | Faults → fault-endpoint forwarding | ⏳ Pending |
+| M4.2f | Close the final enabled-suite gaps: CNode Delete follows `cteDelete(..., exposed=true)` / `emptySlot` semantics, and IPC cap transfer handles the single receive-slot path used by serial-server shared memory setup. | ✅ Done |
+| M4.3 | VM/cap/user fault forwarding to the configured fault endpoint; `PAGEFAULT0001..0005` and `PAGEFAULT1001..1004` pass. | ✅ Done |
 | M4.4 | PLIC IRQ chain, SBI timer + preemption, debug breakpoints (unlocks the 51 disabled tests) | ⏳ Pending |
 
 A live run (kernel boots, the rootserver's `allocman` carves up untyped
@@ -218,42 +218,20 @@ QEMU virt
 
 ## Next steps (M4)
 
-With the full sel4test suite passing, the remaining work is about real
-multi-process plumbing and unlocking the upstream-disabled tests:
+With the enabled sel4test suite green, the remaining work is about
+unlocking the 51 upstream-disabled tests and tightening semantics that
+are currently implemented only as far as sel4test needs:
 
-1. **Wire the Endpoint state machine (M4.2e).** M4.2d gave us the
-   `Endpoint` kernel object; M4.2e1 (current iteration) added the two
-   foundations the wire-up needs:
-   * `api::thread::current()` now *follows* `tcb::current()` — every
-     `tcb::set_current` refreshes the legacy `Thread` view from the
-     running TCB's `cspace_cap` / `vspace_cap` / `ipc_buffer_*`, so
-     cap lookups and IPC-buffer reads in the syscall path automatically
-     target whichever TCB the scheduler last picked.
-   * `TCB_WriteRegisters` correctly translates MR index ↔
-     `seL4_UserContext` field index (the previous off-by-2 only mattered
-     once helpers actually got scheduled).
-   * `kernel/src/api/ipc.rs` carries the full Send / Recv / Call / Reply
-     / ReplyRecv state machine, ready to wire.
-   The remaining wiring (`do_send` → `ipc::send`, etc.) is held back of
-   a stub because three prerequisites must land first to avoid wedging
-   tests like `BIND0001`: bound-notification → bound-TCB wakeup on
-   `Notification_Signal`, an idle thread / null-`schedule()` handler
-   for the moments when every TCB is blocked, and `tcb::suspend` /
-   `finalize` removing the TCB from any EP wait list it's queued on.
-2. **Multi-VSpace context switch.** Helpers in sel4test typically
-   share VSpace with the driver, so M4.2e alone unlocks most
-   thread-aware tests. Separate-process tests will additionally need
-   `kernel_exit()` to write `satp` + `sfence.vma` on cross-VSpace
-   switches (the data is already in `Tcb.vspace_cap`).
-3. **VSpace cap finalisation.** Tracked PTEs in user VSpaces should be
-   torn down when an Untyped is Revoked through a `PageTable`/`Thread`
-   cap; today we lean on the `frame_mapped_asid` shortcut for Frame
-   caps but ignore PageTable caps.
-4. **Fault forwarding.** vm_fault / cap_fault / user_exception currently
-   just park the offending thread. Forward them to the fault endpoint so
-   the driver can inspect failures and recover.
-5. **PLIC + SBI timer.** Wire `seL4_IRQControl_Get`,
-   `seL4_IRQHandler_{Set,Ack,Clear}Notification`, and the SBI timer ECALL
-   so that interrupt and preemption tests can run.
-6. **Hardware breakpoints / debug exceptions.** Required by the
-   `BREAKPOINT_*` group still disabled in `kernel_all_pp_prune.c`.
+1. **Interrupt and timer stack.** Wire `seL4_IRQControl_Get`,
+   `seL4_IRQHandler_{Set,Ack,Clear}Notification`, PLIC delivery, and SBI
+   timer programming so the interrupt/preemption groups can be enabled.
+2. **Debug exceptions.** Implement hardware breakpoint and debug-fault
+   forwarding needed by the `BREAKPOINT_*` tests still pruned from the
+   active suite.
+3. **Full cap-transfer/generalisation pass.** The current IPC transfer
+   path intentionally covers the pre-MCS single receive-slot case. The
+   next conformance pass should cover multi-cap edge cases, endpoint
+   unwrapping details, and cleanup paths beyond the serial-server use.
+4. **Zombie/finalisation fidelity.** CNode/TCB finalisation is good
+   enough for the enabled tests, but should be brought closer to the C
+   kernel's Zombie reduction model before expanding coverage further.

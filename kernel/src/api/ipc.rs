@@ -30,8 +30,9 @@
 //!     sender's cap, stashed in `sender_badge` when queueing).
 //!
 //! Notes / non-goals for this iteration:
-//!   * `seL4_MessageInfo.caps_unwrapped` and cap transfer aren't yet
-//!     implemented — sel4test exercises plain message-register IPC.
+//!   * Cap transfer implements the pre-MCS single receive-slot path used
+//!     by libsel4serialserver and libsel4utils. Multi-slot receive and
+//!     the subtler cleanup/preemption cases are still future work.
 //!   * No cross-VSpace context switch: kernel_exit still runs every
 //!     TCB on the rootserver's PT (helpers share it). Multi-VSpace
 //!     switching is the next iteration.
@@ -39,16 +40,23 @@
 #![allow(dead_code)]
 
 use crate::abi::types::MessageInfo;
-use crate::api::cspace::lookup_cap;
+use crate::api::cspace::{self, lookup_cap};
 use crate::api::thread;
 use crate::arch::riscv64::trap::{UserContext, reg};
 use crate::object::cap::{Cap, CapTag};
+use crate::object::cnode::Cte;
 use crate::object::endpoint::{self, EpState};
+use crate::object::mdb::MdbNode;
 use crate::object::tcb::{self, ThreadState};
 
 /// `seL4_MsgMaxLength` (libsel4/include/sel4/constants.h).
 const MSG_MAX_LENGTH: u64 = 120;
+const MSG_MAX_EXTRA_CAPS: u64 = 3;
 const MR_REG_COUNT: u64 = 4;
+const IPCBUF_CAPS_OR_BADGES: usize = 122;
+const IPCBUF_RECV_CNODE: usize = 125;
+const IPCBUF_RECV_INDEX: usize = 126;
+const IPCBUF_RECV_DEPTH: usize = 127;
 const FAULT_UNKNOWN_SYSCALL: u64 = 2;
 const FAULT_USER_EXCEPTION: u64 = 3;
 
@@ -59,17 +67,17 @@ unsafe fn transfer_message(
     receiver: *mut tcb::Tcb,
     info_in: MessageInfo,
     badge: u64,
+    endpoint: *mut endpoint::Endpoint,
+    can_grant: bool,
 ) {
     let label = info_in.label();
     let mut length = info_in.length();
     if length > MSG_MAX_LENGTH {
         length = MSG_MAX_LENGTH;
     }
-    let info_out = MessageInfo::new(label, 0, 0, length);
 
     unsafe {
         (*receiver).context.regs[reg::A0] = badge;
-        (*receiver).context.regs[reg::A1] = info_out.0;
 
         let mr_reg_n = length.min(MR_REG_COUNT) as usize;
         for i in 0..mr_reg_n {
@@ -90,6 +98,152 @@ unsafe fn transfer_message(
                 }
             }
         }
+
+        let (caps_unwrapped, extra_caps) =
+            transfer_caps(sender, receiver, info_in, endpoint, can_grant);
+        let info_out = MessageInfo::new(label, caps_unwrapped, extra_caps, length);
+        (*receiver).context.regs[reg::A1] = info_out.0;
+    }
+}
+
+unsafe fn transfer_caps(
+    sender: *mut tcb::Tcb,
+    receiver: *mut tcb::Tcb,
+    info_in: MessageInfo,
+    endpoint: *mut endpoint::Endpoint,
+    can_grant: bool,
+) -> (u64, u64) {
+    if !can_grant {
+        return (0, 0);
+    }
+    let send_buf = unsafe { (*sender).ipc_buffer_kva };
+    let recv_buf = unsafe { (*receiver).ipc_buffer_kva };
+    if send_buf == 0 || recv_buf == 0 {
+        return (0, 0);
+    }
+
+    let requested = info_in.extra_caps().min(MSG_MAX_EXTRA_CAPS);
+    if requested == 0 {
+        return (0, 0);
+    }
+
+    let send_buf = send_buf as *const u64;
+    let recv_buf = recv_buf as *mut u64;
+    let mut dest_slot = unsafe { get_receive_slot(receiver, recv_buf) };
+    let mut caps_unwrapped = 0u64;
+    let mut transferred = 0u64;
+
+    for i in 0..requested as usize {
+        let cptr = unsafe { *send_buf.add(IPCBUF_CAPS_OR_BADGES + i) };
+        let (src_cap, src_slot) = match unsafe { lookup_cap_in_tcb(sender, cptr) } {
+            Some(v) => v,
+            None => break,
+        };
+
+        if src_cap.tag() == Some(CapTag::Endpoint)
+            && !endpoint.is_null()
+            && src_cap.endpoint_ptr() == endpoint as u64
+        {
+            unsafe {
+                *recv_buf.add(IPCBUF_CAPS_OR_BADGES + i) = src_cap.endpoint_badge();
+            }
+            caps_unwrapped |= 1u64 << i;
+        } else {
+            let dst = match dest_slot {
+                Some(s) => s,
+                None => break,
+            };
+            let derived = match unsafe { derive_transfer_cap(src_slot, src_cap) } {
+                Some(c) => c,
+                None => break,
+            };
+            unsafe { insert_derived_cap(src_slot, dst, derived) };
+            dest_slot = None;
+        }
+
+        transferred = i as u64 + 1;
+    }
+
+    (caps_unwrapped, transferred)
+}
+
+unsafe fn lookup_cap_in_tcb(t: *mut tcb::Tcb, cptr: u64) -> Option<(Cap, *mut Cte)> {
+    if t.is_null() {
+        return None;
+    }
+    let root = unsafe { (*t).cspace_cap };
+    if root.tag() != Some(CapTag::CNode) {
+        return None;
+    }
+    let r = cspace::lookup_slot_in(root, cptr, cspace::WORD_BITS).ok()?;
+    if r.bits_remaining != 0 {
+        return None;
+    }
+    let cap = unsafe { (*r.slot).cap };
+    if cap.is_null() {
+        return None;
+    }
+    Some((cap, r.slot))
+}
+
+unsafe fn get_receive_slot(receiver: *mut tcb::Tcb, recv_buf: *mut u64) -> Option<*mut Cte> {
+    let root_cptr = unsafe { *recv_buf.add(IPCBUF_RECV_CNODE) };
+    let index = unsafe { *recv_buf.add(IPCBUF_RECV_INDEX) };
+    let raw_depth = unsafe { *recv_buf.add(IPCBUF_RECV_DEPTH) };
+    let depth = if raw_depth == 0 {
+        cspace::WORD_BITS
+    } else {
+        raw_depth as u32
+    };
+
+    let (root_cap, _) = unsafe { lookup_cap_in_tcb(receiver, root_cptr) }?;
+    if root_cap.tag() != Some(CapTag::CNode) || depth > cspace::WORD_BITS {
+        return None;
+    }
+    let r = cspace::lookup_slot_in(root_cap, index, depth).ok()?;
+    if r.bits_remaining != 0 {
+        return None;
+    }
+    unsafe {
+        if !(*r.slot).cap.is_null() || (*r.slot).mdb.prev() != 0 || (*r.slot).mdb.next() != 0 {
+            return None;
+        }
+    }
+    Some(r.slot)
+}
+
+unsafe fn derive_transfer_cap(src_slot: *mut Cte, cap: Cap) -> Option<Cap> {
+    match cap.tag() {
+        None | Some(CapTag::Null) | Some(CapTag::IrqControl) | Some(CapTag::Reply) => None,
+        Some(CapTag::Untyped) => {
+            if unsafe { crate::object::cnode::mdb_has_children(src_slot) } {
+                None
+            } else {
+                Some(cap)
+            }
+        }
+        _ => Some(cap),
+    }
+}
+
+unsafe fn insert_derived_cap(src_slot: *mut Cte, dst: *mut Cte, cap: Cap) {
+    let src_cap = unsafe { (*src_slot).cap };
+    let revocable = is_cap_revocable(cap, src_cap);
+    unsafe {
+        (*dst).cap = cap;
+        (*dst).mdb = MdbNode::new(0, 0, revocable, revocable);
+        crate::object::cnode::mdb_insert_after(src_slot, dst);
+    }
+}
+
+fn is_cap_revocable(new_cap: Cap, src_cap: Cap) -> bool {
+    match new_cap.tag() {
+        Some(CapTag::Frame) | Some(CapTag::PageTable) | Some(CapTag::AsidPool) => false,
+        Some(CapTag::Untyped) => true,
+        Some(CapTag::Endpoint) => new_cap.endpoint_badge() != src_cap.endpoint_badge(),
+        Some(CapTag::Notification) => new_cap.notification_badge() != src_cap.notification_badge(),
+        Some(CapTag::IrqHandler) => src_cap.tag() == Some(CapTag::IrqControl),
+        _ => false,
     }
 }
 
@@ -219,7 +373,7 @@ pub fn send(uc: &mut UserContext, blocking: bool) {
                 return;
             }
             unsafe {
-                transfer_message(cur, receiver, info, badge);
+                transfer_message(cur, receiver, info, badge, ep, cap.endpoint_can_grant());
                 (*receiver).waiting_on = 0;
                 (*receiver).state = ThreadState::Running as u8;
                 tcb::enqueue(receiver);
@@ -281,15 +435,21 @@ pub fn recv(uc: &mut UserContext, blocking: bool) {
             let info_in = unsafe { MessageInfo((*sender).context.regs[reg::A1]) };
             let badge = unsafe { (*sender).sender_badge };
             let is_call = unsafe { (*sender).sender_is_call } != 0;
-            let can_reply = unsafe {
-                (*sender).sender_can_grant != 0 || (*sender).sender_can_grant_reply != 0
-            };
+            let can_reply =
+                unsafe { (*sender).sender_can_grant != 0 || (*sender).sender_can_grant_reply != 0 };
             let is_fault = unsafe { (*sender).sender_is_fault } != 0;
             unsafe {
                 if is_fault {
                     transfer_fault_message(sender, cur, badge);
                 } else {
-                    transfer_message(sender, cur, info_in, badge);
+                    transfer_message(
+                        sender,
+                        cur,
+                        info_in,
+                        badge,
+                        ep,
+                        (*sender).sender_can_grant != 0,
+                    );
                 }
                 (*sender).waiting_on = 0;
                 if is_call && can_reply {
@@ -394,7 +554,7 @@ pub fn call(uc: &mut UserContext) {
                 return;
             }
             unsafe {
-                transfer_message(cur, receiver, info, badge);
+                transfer_message(cur, receiver, info, badge, ep, cap.endpoint_can_grant());
                 (*receiver).waiting_on = 0;
                 (*receiver).state = ThreadState::Running as u8;
                 tcb::enqueue(receiver);
@@ -457,7 +617,7 @@ pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb) {
     unsafe {
         let mut wake_caller = true;
         if (*caller).sender_is_fault == 0 {
-            transfer_message(cur, caller, info, 0);
+            transfer_message(cur, caller, info, 0, core::ptr::null_mut(), false);
         } else {
             if info.label() == 0 {
                 match (*caller).fault_label {

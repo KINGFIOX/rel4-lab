@@ -140,22 +140,16 @@ pub fn handle_untyped(
     // Resolve the destination CNode capability.
     //   nodeDepth == 0 → use the looked-up cap *directly* (it must be a CNode).
     //   nodeDepth > 0  → walk `nodeIndex` for `nodeDepth` bits within it.
+    let (root_cap, _) =
+        cspace::lookup_cap(thread, root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
     let dest_cnode_cap = if node_depth == 0 {
-        let (cap, _) =
-            cspace::lookup_cap(thread, root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
-        cap
+        root_cap
     } else {
-        // Single-level walk for now: assume the supplied cap is already
-        // the rootserver's root CNode (caps_or_badges[0]) and we just
-        // re-resolve through it. For our M3 scenarios `node_depth == 0`,
-        // so we fall back to that interpretation if anything's off.
-        let (cap, _) =
-            cspace::lookup_cap(thread, root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
-        let _ = (node_index, node_depth);
-        cap
+        let node_slot = resolve_slot(root_cap, node_index, node_depth as u32)?;
+        unsafe { (*node_slot).cap }
     };
     if dest_cnode_cap.tag() != Some(CapTag::CNode) {
-        return Err(SyscallError::InvalidCapability);
+        return Err(SyscallError::FailedLookup);
     }
     let dest_radix = dest_cnode_cap.cnode_radix();
     if node_offset >= (1u64 << dest_radix) {
@@ -471,7 +465,8 @@ pub fn handle_asid_control(
             return Err(SyscallError::DeleteFirst);
         }
         let pool_ptr = untyped_cap.untyped_ptr();
-        let base = crate::object::asid::alloc_pool_base(pool_ptr).ok_or(SyscallError::DeleteFirst)?;
+        let base =
+            crate::object::asid::alloc_pool_base(pool_ptr).ok_or(SyscallError::DeleteFirst)?;
         ptr::write_bytes(
             pool_ptr as *mut u8,
             0,
@@ -483,7 +478,8 @@ pub fn handle_asid_control(
         // Make sure the backing untyped looks fully consumed, just like
         // the C kernel's `performASIDControlInvocation`.
         let s = &mut *untyped_slot;
-        s.cap.set_untyped_free_index(1u64 << (crate::abi::constants::SEL4_ASID_POOL_BITS - 4));
+        s.cap
+            .set_untyped_free_index(1u64 << (crate::abi::constants::SEL4_ASID_POOL_BITS - 4));
     }
     Ok(())
 }
@@ -516,7 +512,7 @@ pub fn handle_asid_pool(
         cap.asid_pool_ptr(),
         root_pt_kva,
     )
-        .ok_or(SyscallError::DeleteFirst)?;
+    .ok_or(SyscallError::DeleteFirst)?;
     unsafe {
         (*vspace_slot).cap.set_page_table_mapped_asid(asid);
     }
@@ -1026,11 +1022,9 @@ pub fn handle_thread(
                 let flags = (cur & !clear) | (set & TCB_FLAG_MASK);
                 (*tcb_ptr).flags = flags;
                 if (flags & TCB_FLAG_MASK) != 0 {
-                    (*tcb_ptr).context.sstatus &=
-                        !crate::arch::riscv64::trap::SSTATUS_FS_DIRTY;
+                    (*tcb_ptr).context.sstatus &= !crate::arch::riscv64::trap::SSTATUS_FS_DIRTY;
                 } else {
-                    (*tcb_ptr).context.sstatus |=
-                        crate::arch::riscv64::trap::SSTATUS_FS_DIRTY;
+                    (*tcb_ptr).context.sstatus |= crate::arch::riscv64::trap::SSTATUS_FS_DIRTY;
                 }
                 uc.regs[reg::A2] = flags as u64;
                 if !thread.ipc_buffer_kva.is_null() {
@@ -1533,23 +1527,50 @@ fn apply_badge(cap: Cap, badge: u64) -> Cap {
     }
 }
 
-/// Empty a slot, freeing the resources behind its cap if necessary. For
-/// M3.4 we don't yet zero out the object's backing memory (that's a
-/// Revoke responsibility) — we just clear the slot and unlink from CDT.
+/// Empty a slot, freeing the resources behind its cap if necessary.
+///
+/// Plain `CNode_Delete` does not require the target to be child-free:
+/// the C kernel's `cteDelete(..., exposed=true)` finalises the current
+/// cap and then `emptySlot`s it, leaving any surviving CDT descendants
+/// threaded into the surrounding MDB list. Operations that truly need a
+/// leaf (for example deriving an Untyped cap) use their own
+/// `ensureNoChildren` check before reaching this path.
 fn delete_slot(slot: *mut Cte) -> Result<(), SyscallError> {
     unsafe {
         if (*slot).cap.is_null() {
             return Ok(());
         }
-        if crate::object::cnode::mdb_has_children(slot) {
-            return Err(SyscallError::RevokeFirst);
-        }
         let is_final = is_final_capability(slot);
         finalize_cap(&mut (*slot).cap, is_final);
-        crate::object::cnode::mdb_unlink(slot);
-        (*slot).cap = Cap::null();
+        empty_slot(slot);
     }
     Ok(())
+}
+
+/// C kernel `emptySlot`: splice `slot` out of the MDB list, preserve the
+/// list ordering for any descendants, and propagate `firstBadged` to the
+/// successor. This differs subtly from `mdb_unlink`, which is also used
+/// by Move/Mutate while the MDB node is about to be transplanted.
+unsafe fn empty_slot(slot: *mut Cte) {
+    debug_assert!(!slot.is_null());
+    unsafe {
+        let mdb = (*slot).mdb;
+        let prev = mdb.prev();
+        let next = mdb.next();
+        if prev != 0 {
+            let p = prev as *mut Cte;
+            (*p).mdb.set_next(next);
+        }
+        if next != 0 {
+            let n = next as *mut Cte;
+            (*n).mdb.set_prev(prev);
+            if mdb.first_badged() {
+                (*n).mdb.set_first_badged(true);
+            }
+        }
+        (*slot).cap = Cap::null();
+        (*slot).mdb = MdbNode::NULL;
+    }
 }
 
 /// `isFinalCapability`-equivalent: check whether this CTE holds the last
@@ -1592,9 +1613,7 @@ fn same_object_as(a: Cap, b: Cap) -> bool {
         (Some(CapTag::PageTable), Some(CapTag::PageTable)) => {
             a.page_table_base_ptr() == b.page_table_base_ptr()
         }
-        (Some(CapTag::AsidPool), Some(CapTag::AsidPool)) => {
-            a.asid_pool_ptr() == b.asid_pool_ptr()
-        }
+        (Some(CapTag::AsidPool), Some(CapTag::AsidPool)) => a.asid_pool_ptr() == b.asid_pool_ptr(),
         (Some(CapTag::Frame), Some(CapTag::Frame)) => {
             a.frame_base_ptr() == b.frame_base_ptr() && a.frame_size() == b.frame_size()
         }
