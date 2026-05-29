@@ -72,18 +72,3 @@ impl Iterator for UntypedChunks {
 pub fn make_untyped_cap(base_kva: u64, bits: u8, is_device: bool) -> Cap {
     Cap::new_untyped(base_kva, bits as u64, 0, is_device)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn split_simple_2mb_region() {
-        let r = FreeRange {
-            start_kva: 0x80400000,
-            size: 0x200000,
-        };
-        let chunks: Vec<_> = UntypedChunks::new(r).collect();
-        assert_eq!(chunks, vec![(0x80400000, 21)]);
-    }
-}

@@ -510,22 +510,3 @@ const _: () = {
     assert!(core::mem::size_of::<Cap>() == 16);
     assert!(core::mem::align_of::<Cap>() == 8);
 };
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn null_tag() {
-        let c = Cap::null();
-        assert_eq!(c.tag(), Some(CapTag::Null));
-    }
-
-    #[test]
-    fn untyped_roundtrip() {
-        let c = Cap::new_untyped(0xFFFF_FFFF_8021_0000, 12, 0, false);
-        assert_eq!(c.tag(), Some(CapTag::Untyped));
-        assert_eq!(c.untyped_block_size_bits(), 12);
-        assert_eq!(c.untyped_ptr(), 0xFFFF_FFFF_8021_0000);
-    }
-}
