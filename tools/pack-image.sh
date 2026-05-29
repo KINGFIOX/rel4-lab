@@ -77,6 +77,7 @@ if [[ -n "${ROOTSERVER_ELF}" ]]; then
     log "installing custom rootserver: ${ROOTSERVER_ELF}"
     TMP_ROOTSERVER_STRIPPED="$(mktemp -t rootserver.elf.XXXXXX)"
     "${STRIP}" "${ROOTSERVER_ELF}" -o "${TMP_ROOTSERVER_STRIPPED}"
+    rm -f "${SEL4_BUILD_DIR}/elfloader/rootserver"
     install -m 0644 "${TMP_ROOTSERVER_STRIPPED}" "${SEL4_BUILD_DIR}/elfloader/rootserver"
 fi
 

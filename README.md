@@ -23,9 +23,8 @@ Latest verified checkpoints:
 - xv6 user-program compatibility smoke path: xv6 user ELFs from
   `third_party/xv6-riscv/user` can be linked as a temporary rootserver and
   run on the Rust kernel via `./tools/run-xv6-user.sh`. Verified:
-  `echo hello from xv6` prints through the xv6 `write(1, ...)` syscall and
-  `forktest` handles unsupported `fork()` as `-1`, both ending in
-  `xv6compat: exit(0)`.
+  `echo`, `forktest`, `cat README`, `ls .`, `wc README`, and
+  `grep xv6 README` end in `xv6compat: exit(0)`.
 
 M4.4b unlocked the first timer-gated disabled group on the current RV64,
 non-MCS, single-core, QEMU configuration: `TIMER0001`, `TIMER0002`,
@@ -71,6 +70,11 @@ programs: console `write`, nonblocking console `read`, `sbrk`, `getpid`,
 returns for process/filesystem calls that need real services. `fork`, `exec`,
 pipes, wait semantics, and a filesystem are not implemented yet; those should
 move into a user-space Unix/xv6 server rather than bloating the kernel path.
+M5.2 adds a tiny read-only pseudo-filesystem to that bridge: the xv6
+`README` is embedded as a readable file, `.` / `/` expose xv6-format
+directory entries, `console` appears as a device, and fd state now tracks
+per-open offsets plus `struct stat` metadata. This is enough for `cat`,
+`ls`, `wc`, and `grep` against `README`.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -108,6 +112,7 @@ move into a user-space Unix/xv6 server rather than bloating the kernel path.
 | M4.4e | RISC-V `CACHEFLUSH0004`: enable the non-ARM cache/retype test and validate that retyped frames are zeroed after `Untyped_Revoke`. Full suite now reports **124 passed / 43 disabled**. | ✅ Done |
 | M4.4f | SMP-compatible RV64 build/run: secondary harts park before shared init; SMP invocation-label shift and `TCBSetAffinity` are handled; QEMU wrappers accept `SMP=2`; `FPU0002` and `MULTICORE0001..0005` pass in the full SMP run. Current SMP full suite reports **125 passed / 42 disabled**. | ✅ Done |
 | M5.1 | xv6 user-program smoke path: build an xv6 user ELF as rootserver, route xv6 positive syscalls through a small compatibility module, and pass `echo` / `forktest` under QEMU. | ✅ Done |
+| M5.2 | xv6 read-only pseudo-fs: expose `README`, `.`, `/`, and `console`; implement fd offsets and `fstat`; pass `cat README`, `ls .`, `wc README`, and `grep xv6 README`. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
@@ -216,6 +221,10 @@ build, use two harts (the helper defaults to `SMP=2`):
 ```sh
 nix develop --command ./tools/run-xv6-user.sh echo hello from xv6
 nix develop --command ./tools/run-xv6-user.sh forktest
+nix develop --command ./tools/run-xv6-user.sh cat README
+nix develop --command ./tools/run-xv6-user.sh ls .
+nix develop --command ./tools/run-xv6-user.sh wc README
+nix develop --command ./tools/run-xv6-user.sh grep xv6 README
 ```
 
 Verified output includes:
@@ -227,14 +236,20 @@ xv6compat: exit(0)
 fork test
 fork test OK
 xv6compat: exit(0)
+
+.              1 1 64
+..             1 1 64
+README         2 2 2441
+console        3 3 0
+xv6compat: exit(0)
 ```
 
 Implemented kernel-side compatibility is intentionally tiny: console
-read/write, heap growth via `sbrk`, time/pid stubs, console fd operations, and
-graceful `-1` for process/filesystem calls. Running `init`, `sh`, `ls`, `cat`
-against a real file, pipes, and `usertests` requires the next layer: a
-user-space xv6/Unix service process that owns process state, program loading,
-and a filesystem image.
+read/write, heap growth via `sbrk`, time/pid stubs, console fd operations, a
+read-only pseudo-fs containing `README`, and graceful `-1` for process and
+write-side filesystem calls. Running `init`, `sh`, pipes, `exec`, mutable files,
+and `usertests` requires the next layer: a user-space xv6/Unix service process
+that owns process state, program loading, and a filesystem image.
 
 
 ## Repository layout
@@ -331,6 +346,8 @@ SMP=2 TIMEOUT=480 ./tools/run-tests.sh  # SMP-compatible sel4test build
 # xv6 user-program smoke path:
 ./tools/run-xv6-user.sh echo hello from xv6
 ./tools/run-xv6-user.sh forktest
+./tools/run-xv6-user.sh cat README
+./tools/run-xv6-user.sh ls .
 ```
 
 ## Key ABI / layout constants (frozen against upstream)
