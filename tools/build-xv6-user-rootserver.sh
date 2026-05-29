@@ -65,6 +65,7 @@ ARGS_C="${OUT_DIR}/${PROGRAM}_argv.c"
 ARGS_O="${OUT_DIR}/${PROGRAM}_argv.o"
 PAYLOAD_ELF="${OUT_DIR}/_${PROGRAM}-payload"
 HOST_ELF="${OUT_DIR}/xv6-host-${PROGRAM}-rootserver"
+HOST_BUILD_ELF="${ROOT_DIR}/target/riscv64gc-unknown-none-elf/release/xv6-host"
 LINKER_SCRIPT="${OUT_DIR}/user-${XV6_USER_BASE}.ld"
 
 args=("${PROGRAM}" "$@")
@@ -116,19 +117,10 @@ log "linking payload ${PAYLOAD_ELF}"
     "${XV6_DIR}/user/umalloc.o"
 
 log "building xv6-host rootserver ${HOST_ELF}"
-XV6_PAYLOAD_ELF="${PAYLOAD_ELF}" rustc \
-    --edition=2021 \
-    --target riscv64gc-unknown-none-elf \
-    -C panic=abort \
-    -C opt-level=2 \
-    -C code-model=medium \
-    -C relocation-model=static \
-    -C force-frame-pointers=yes \
-    -C linker=rust-lld \
-    -C link-arg=-T"${ROOT_DIR}/userspace/xv6-host/linker.ld" \
-    -C link-arg=--no-relax \
-    -C link-arg=-zmax-page-size=4096 \
-    -o "${HOST_ELF}" \
-    "${ROOT_DIR}/userspace/xv6-host/src/main.rs"
+XV6_PAYLOAD_ELF="${PAYLOAD_ELF}" cargo build \
+    --manifest-path "${ROOT_DIR}/Cargo.toml" \
+    --release \
+    -p xv6-host
+install -m 0644 "${HOST_BUILD_ELF}" "${HOST_ELF}"
 
 printf '%s\n' "${HOST_ELF}"

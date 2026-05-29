@@ -1,5 +1,7 @@
 #![no_std]
 #![no_main]
+#![deny(unsafe_attr_outside_unsafe)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use core::arch::asm;
 use core::cmp::min;
@@ -186,12 +188,12 @@ const ROOT_DIRENTS: [u8; 64] = [
     b'n', b's', b'o', b'l', b'e', 0, 0, 0, 0, 0, 0, 0,
 ];
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start(bootinfo: usize) -> ! {
     unsafe {
         clear_bss();
-        run(bootinfo as *const BootInfo);
     }
+    run(bootinfo as *const BootInfo);
 }
 
 unsafe fn clear_bss() {
@@ -206,7 +208,7 @@ unsafe fn clear_bss() {
     }
 }
 
-unsafe fn run(bi_ptr: *const BootInfo) -> ! {
+fn run(bi_ptr: *const BootInfo) -> ! {
     let bi = unsafe { &*bi_ptr };
     unsafe { IPC_BUFFER = bi.ipc_buffer as *mut IpcBuffer };
     log("xv6-host: boot\n");
@@ -259,8 +261,8 @@ unsafe fn run(bi_ptr: *const BootInfo) -> ! {
     }
 }
 
-unsafe fn setup_timer_notification(alloc: &mut Allocator) {
-    let ntfn = unsafe { alloc.retype_one(OBJ_NOTIFICATION, 0) };
+fn setup_timer_notification(alloc: &mut Allocator) {
+    let ntfn = alloc.retype_one(OBJ_NOTIFICATION, 0);
     let irq_handler = alloc.alloc_slot();
     call_checked(
         IRQ_CONTROL,
@@ -273,7 +275,7 @@ unsafe fn setup_timer_notification(alloc: &mut Allocator) {
 }
 
 impl Allocator {
-    unsafe fn new(bi: &BootInfo) -> Self {
+    fn new(bi: &BootInfo) -> Self {
         let mut selected = 0;
         let start = bi.untyped.start as usize;
         let end = bi.untyped.end as usize;
@@ -307,14 +309,14 @@ impl Allocator {
         slot
     }
 
-    unsafe fn retype_one(&mut self, ty: u64, user_size: u64) -> u64 {
+    fn retype_one(&mut self, ty: u64, user_size: u64) -> u64 {
         let slot = self.alloc_slot();
         let mrs = [ty, user_size, 0, 0, slot, 1];
         call_checked(self.untyped_slot, LABEL_UNTYPED_RETYPE, &[ROOT_CNODE], &mrs);
         slot
     }
 
-    unsafe fn copy_cap(&mut self, src_slot: u64, rights: u64) -> u64 {
+    fn copy_cap(&mut self, src_slot: u64, rights: u64) -> u64 {
         let dst = self.alloc_slot();
         let mrs = [dst, ROOT_CNODE_DEPTH, src_slot, ROOT_CNODE_DEPTH, rights];
         call_checked(ROOT_CNODE, LABEL_CNODE_COPY, &[ROOT_CNODE], &mrs);
@@ -322,12 +324,12 @@ impl Allocator {
     }
 }
 
-unsafe fn create_child(alloc: &mut Allocator) -> Child {
-    let tcb = unsafe { alloc.retype_one(OBJ_TCB, 0) };
-    let cnode = unsafe { alloc.retype_one(OBJ_CAP_TABLE, CHILD_CNODE_BITS) };
-    let vspace = unsafe { alloc.retype_one(OBJ_PAGE_TABLE, 0) };
-    let fault_ep = unsafe { alloc.retype_one(OBJ_ENDPOINT, 0) };
-    let ipc_frame = unsafe { alloc.retype_one(OBJ_4K, 0) };
+fn create_child(alloc: &mut Allocator) -> Child {
+    let tcb = alloc.retype_one(OBJ_TCB, 0);
+    let cnode = alloc.retype_one(OBJ_CAP_TABLE, CHILD_CNODE_BITS);
+    let vspace = alloc.retype_one(OBJ_PAGE_TABLE, 0);
+    let fault_ep = alloc.retype_one(OBJ_ENDPOINT, 0);
+    let ipc_frame = alloc.retype_one(OBJ_4K, 0);
 
     call_checked(INIT_ASID_POOL, LABEL_RISCV_ASID_POOL_ASSIGN, &[vspace], &[]);
     map_existing_frame(alloc, ipc_frame, vspace, CHILD_IPC_BUFFER, true, false);
@@ -395,7 +397,7 @@ fn load_payload(alloc: &mut Allocator, child: &mut Child) {
         let end = align_up(p_vaddr.saturating_add(p_memsz));
         let mut page = start;
         while page < end {
-            unsafe { map_fresh_child_page(alloc, child.vspace, page, true, true) };
+            map_fresh_child_page(alloc, child.vspace, page, true, true);
             page += PAGE_SIZE;
         }
         if p_filesz > 0 {
@@ -420,7 +422,7 @@ fn load_payload(alloc: &mut Allocator, child: &mut Child) {
 fn map_stack(alloc: &mut Allocator, child: &Child) {
     for i in 0..CHILD_STACK_PAGES {
         let va = CHILD_STACK_TOP - ((i as u64 + 1) * PAGE_SIZE);
-        unsafe { map_fresh_child_page(alloc, child.vspace, va, true, false) };
+        map_fresh_child_page(alloc, child.vspace, va, true, false);
     }
 }
 
@@ -436,7 +438,7 @@ fn start_child(child: &Child) {
     call_checked(child.tcb, LABEL_TCB_WRITE_REGISTERS, &[], &regs);
 }
 
-unsafe fn map_existing_frame(
+fn map_existing_frame(
     alloc: &mut Allocator,
     frame_slot: u64,
     vspace: u64,
@@ -444,7 +446,7 @@ unsafe fn map_existing_frame(
     writable: bool,
     executable: bool,
 ) -> u64 {
-    let alias_slot = unsafe { alloc.copy_cap(frame_slot, cap_rights(false, false, true, true)) };
+    let alias_slot = alloc.copy_cap(frame_slot, cap_rights(false, false, true, true));
     let alias_va = register_mapping(child_va);
     page_map(alias_slot, INIT_VSPACE, alias_va, true, false);
     zero_page(alias_va);
@@ -452,7 +454,7 @@ unsafe fn map_existing_frame(
     alias_va
 }
 
-unsafe fn map_fresh_child_page(
+fn map_fresh_child_page(
     alloc: &mut Allocator,
     vspace: u64,
     child_va: u64,
@@ -463,8 +465,8 @@ unsafe fn map_fresh_child_page(
     if let Some(alias) = lookup_alias(page) {
         return alias;
     }
-    let frame_slot = unsafe { alloc.retype_one(OBJ_4K, 0) };
-    unsafe { map_existing_frame(alloc, frame_slot, vspace, page, writable, executable) }
+    let frame_slot = alloc.retype_one(OBJ_4K, 0);
+    map_existing_frame(alloc, frame_slot, vspace, page, writable, executable)
 }
 
 fn page_map(frame_slot: u64, vspace: u64, va: u64, writable: bool, executable: bool) {
@@ -742,7 +744,7 @@ fn sys_sbrk(alloc: &mut Allocator, child: &mut Child, increment: i64) -> i64 {
     if new_brk > child.heap_mapped_end {
         let mut page = align_up(child.heap_mapped_end);
         while page < align_up(new_brk) {
-            unsafe { map_fresh_child_page(alloc, child.vspace, page, true, false) };
+            map_fresh_child_page(alloc, child.vspace, page, true, false);
             page += PAGE_SIZE;
         }
         child.heap_mapped_end = align_up(new_brk);
@@ -939,11 +941,7 @@ unsafe fn read_ipc_message(
 }
 
 fn mr(mrs: &[u64], i: usize) -> u64 {
-    if i < mrs.len() {
-        mrs[i]
-    } else {
-        0
-    }
+    if i < mrs.len() { mrs[i] } else { 0 }
 }
 
 fn msg_info(label: u64, caps_unwrapped: u64, extra_caps: u64, length: u64) -> u64 {

@@ -1,11 +1,11 @@
 [package]
-name = "kernel"
+name = "xv6-host"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
 [[bin]]
-name = "kernel"
+name = "xv6-host"
 path = "src/main.rs"
 
 [dependencies]

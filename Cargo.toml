@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["kernel"]
+members = ["kernel", "userspace/xv6-host"]
+default-members = ["kernel"]
 
 [profile.release]
 opt-level = 3

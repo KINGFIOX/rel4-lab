@@ -72,6 +72,11 @@ BootInfo, allocates seL4 objects from untyped caps, creates a child TCB/CNode/
 VSpace/fault endpoint, maps the xv6 payload into the child, and handles xv6
 syscalls as `UnknownSyscall` fault IPC. The kernel no longer owns Unix fd,
 heap, or pseudo-filesystem state.
+`xv6-host` is now a Cargo workspace package on Rust 2024. Its linker args live
+in `userspace/xv6-host/build.rs`, the kernel linker args live in
+`kernel/build.rs`, and `.cargo/config.toml` only carries shared RISC-V target
+flags. The host crate also denies the Rust 2024 unsafe migration lints
+`unsafe_attr_outside_unsafe` and `unsafe_op_in_unsafe_fn`.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -110,7 +115,7 @@ heap, or pseudo-filesystem state.
 | M4.4f | SMP-compatible RV64 build/run: secondary harts park before shared init; SMP invocation-label shift and `TCBSetAffinity` are handled; QEMU wrappers accept `SMP=2`; `FPU0002` and `MULTICORE0001..0005` pass in the full SMP run. Current SMP full suite reports **125 passed / 42 disabled**. | ✅ Done |
 | M5.1 | xv6 user-program smoke path: build an xv6 user ELF as rootserver and route xv6 positive syscalls through a temporary kernel compatibility module. | ✅ Superseded |
 | M5.2 | Temporary kernel-side xv6 read-only pseudo-fs: expose `README`, `.`, `/`, and `console`; implement fd offsets and `fstat`. | ✅ Superseded |
-| M5.3 | seL4-style xv6 host: embed the xv6 user ELF into a no_std Rust rootserver, spawn it as a child TCB/VSpace with a fault endpoint, and handle xv6 syscalls via `UnknownSyscall` fault IPC. Smoke set passes: `echo`, `forktest`, `cat README`, `ls .`, `wc README`, `grep xv6 README`. | ✅ Done |
+| M5.3 | seL4-style xv6 host: embed the xv6 user ELF into a no_std Rust 2024 Cargo rootserver, spawn it as a child TCB/VSpace with a fault endpoint, and handle xv6 syscalls via `UnknownSyscall` fault IPC. Smoke set passes: `echo`, `forktest`, `cat README`, `ls .`, `wc README`, `grep xv6 README`. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
@@ -213,10 +218,14 @@ All is well in the universe
 The current xv6 path is a user-space compatibility server, not a full Unix
 server yet. The helper builds one xv6 user program from
 `third_party/xv6-riscv/user`, links it at `0x10000000` with a generated
-`argc/argv` entry stub, embeds that ELF into `userspace/xv6-host`, and boots
-the host as the elfloader rootserver. The host then uses seL4 APIs to create a
-child TCB/CNode/VSpace/fault endpoint and services the child's positive xv6
-syscalls via `UnknownSyscall` fault IPC.
+`argc/argv` entry stub, then invokes Cargo to build `userspace/xv6-host` with
+that payload embedded. The host boots as the elfloader rootserver, uses seL4
+APIs to create a child TCB/CNode/VSpace/fault endpoint, and services the
+child's positive xv6 syscalls via `UnknownSyscall` fault IPC.
+
+The host crate remains `edition = "2024"` and enforces the Rust 2024 unsafe
+rules at compile time with `deny(unsafe_attr_outside_unsafe)` and
+`deny(unsafe_op_in_unsafe_fn)`.
 
 With the current SMP upstream build, use two harts (the helper defaults to
 `SMP=2`):
@@ -263,7 +272,7 @@ microkernel/
 ├── .envrc                 # `use flake` for direnv
 ├── rust-toolchain.toml    # stable + riscv64gc-unknown-none-elf
 ├── Cargo.toml             # workspace
-├── .cargo/config.toml     # build-target + rustflags
+├── .cargo/config.toml     # build target + shared RISC-V rustflags
 ├── kernel/
 │   ├── Cargo.toml
 │   ├── linker.ld          # KERNEL_ELF_BASE=0xFFFFFFFF80200000, LMA 0x80200000
