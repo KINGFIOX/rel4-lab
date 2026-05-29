@@ -47,7 +47,14 @@ log "building Rust kernel..."
 [[ -f "${SEL4_BUILD_DIR}/kernel/kernel.dtb" ]] || \
     die "kernel/kernel.dtb missing — run upstream seL4 build first"
 
-# 3. Install our (stripped) kernel.elf where the elfloader cpio expects it.
+# 3. Let upstream rebuild anything it thinks is stale before we inject the
+# Rust kernel. This intentionally goes all the way to the stock image target:
+# if CMake regeneration, rootserver relinks, or the C kernel strip rule need to
+# run, they must happen before we replace elfloader/kernel.elf.
+log "refreshing upstream image prerequisites..."
+(cd "${SEL4_BUILD_DIR}" && ninja images/sel4test-driver-image-riscv-qemu-riscv-virt)
+
+# 4. Install our (stripped) kernel.elf where the elfloader cpio expects it.
 log "installing Rust kernel into elfloader staging..."
 STRIP="${STRIP:-riscv64-none-elf-strip}"
 TMP_STRIPPED="$(mktemp -t rust-kernel.elf.XXXXXX)"
@@ -55,22 +62,27 @@ trap 'rm -f "${TMP_STRIPPED}"' EXIT
 "${STRIP}" "${RUST_KERNEL_ELF}" -o "${TMP_STRIPPED}"
 install -m 0644 "${TMP_STRIPPED}" "${SEL4_BUILD_DIR}/elfloader/kernel.elf"
 
-# Bump mtime so ninja considers the strip step up-to-date and doesn't
-# re-overwrite with the C kernel.
+# Bump mtime so ninja considers the C-kernel strip step up-to-date and doesn't
+# re-overwrite the staging file. The sleep avoids same-second filesystems.
+sleep 1
 touch "${SEL4_BUILD_DIR}/elfloader/kernel.elf"
 
-# 4. Wipe downstream so ninja regenerates them from our kernel.elf.
+# 5. Wipe downstream so ninja regenerates them from our kernel.elf.
 log "invalidating downstream artifacts..."
 rm -f "${SEL4_BUILD_DIR}/elfloader/archive.archive.o.cpio"
 rm -f "${SEL4_BUILD_DIR}/elfloader/archive.o"
 rm -f "${SEL4_BUILD_DIR}/elfloader/elfloader"
 rm -f "${SEL4_BUILD_DIR}/images/sel4test-driver-image-riscv-qemu-riscv-virt"
 
-# 5. Re-run ninja for just the image. Use -j1 for stable error reporting.
+# 6. Re-run ninja for just the image. Use -j1 for stable error reporting.
 log "running ninja to re-pack image..."
 (cd "${SEL4_BUILD_DIR}" && ninja images/sel4test-driver-image-riscv-qemu-riscv-virt)
 
-# 6. Copy into our local images/ directory.
+if ! cmp -s "${TMP_STRIPPED}" "${SEL4_BUILD_DIR}/elfloader/kernel.elf"; then
+    die "elfloader/kernel.elf was overwritten after Rust injection"
+fi
+
+# 7. Copy into our local images/ directory.
 mkdir -p "${OUT_DIR}"
 cp -f "${SEL4_BUILD_DIR}/images/sel4test-driver-image-riscv-qemu-riscv-virt" "${OUT_IMAGE}"
 log "image ready: ${OUT_IMAGE}"

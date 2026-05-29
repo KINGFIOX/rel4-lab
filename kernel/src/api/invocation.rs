@@ -7,8 +7,10 @@
 
 #![allow(dead_code)]
 
+use core::cell::UnsafeCell;
 use core::ptr;
 
+use crate::abi::types::MessageInfo;
 use crate::api::cspace;
 use crate::api::syscall::SyscallError;
 use crate::api::thread::Thread;
@@ -16,6 +18,7 @@ use crate::arch::riscv64::trap::{UserContext, reg};
 use crate::object::cap::{Cap, CapTag};
 use crate::object::cnode::{Cte, cnode_at};
 use crate::object::mdb::MdbNode;
+use crate::object::tcb::{self, Tcb, ThreadState};
 
 /// Object type IDs as defined by `seL4_ObjectType` (`api_object` +
 /// `_mode_object` + `_object` for RISC-V).
@@ -256,16 +259,13 @@ pub fn handle_untyped(
             }
             _ => {}
         }
-        // Mirrors `isCapRevocable(newCap, srcCap)` from
-        // `kernel/src/object/objecttype.c`. For arch caps (Frame /
-        // PageTable) it returns false, so children of an Untyped are
-        // *not* themselves revocable — that lets the user `Delete` them
-        // without first `Revoke`ing the parent. Only sub-Untypeds (and
-        // future badged EP / IRQ-handler caps) are revocable.
-        let new_revocable = new_type == obj::UNTYPED;
         let dst = &mut dest_cnode[(node_offset + i) as usize];
         dst.cap = cap;
-        dst.mdb = MdbNode::new(0, 0, new_revocable, true);
+        // Untyped_Retype uses the C kernel's insertNewCap path, not
+        // cteInsert/isCapRevocable: every freshly-created object is a
+        // revocable child of the source Untyped and may itself become a
+        // CDT parent for later derived caps.
+        dst.mdb = MdbNode::new(0, 0, true, true);
         unsafe {
             crate::object::cnode::mdb_insert_after(src_slot, dst as *mut Cte);
         }
@@ -1376,6 +1376,130 @@ fn read_mr(thread: &Thread, uc: &UserContext, i: usize) -> u64 {
     }
 }
 
+struct PendingRevoke {
+    active: bool,
+    owner: *mut Tcb,
+    root: *mut Cte,
+}
+
+impl PendingRevoke {
+    const fn empty() -> Self {
+        Self {
+            active: false,
+            owner: core::ptr::null_mut(),
+            root: core::ptr::null_mut(),
+        }
+    }
+}
+
+struct PendingRevokeCell(UnsafeCell<PendingRevoke>);
+unsafe impl Sync for PendingRevokeCell {}
+
+static PENDING_REVOKE: PendingRevokeCell =
+    PendingRevokeCell(UnsafeCell::new(PendingRevoke::empty()));
+const REVOKE_STEPS_PER_SLICE: usize = 128;
+
+#[inline]
+fn pending_revoke_mut() -> &'static mut PendingRevoke {
+    unsafe { &mut *PENDING_REVOKE.0.get() }
+}
+
+fn pending_revoke_has_higher_priority_waiter() -> bool {
+    let pending = pending_revoke_mut();
+    if !pending.active || pending.owner.is_null() {
+        return false;
+    }
+    let next = tcb::schedule();
+    !next.is_null() && unsafe { (*next).priority > (*pending.owner).priority }
+}
+
+/// Should the in-kernel CNode_Revoke continuation run before returning
+/// to user mode? It executes at the suspended caller's priority, so any
+/// newly-runnable higher-priority TCB gets first pick.
+pub fn pending_revoke_should_run() -> bool {
+    let pending = pending_revoke_mut();
+    if !pending.active || pending.owner.is_null() {
+        return false;
+    }
+    let next = tcb::schedule();
+    next.is_null() || unsafe { (*next).priority <= (*pending.owner).priority }
+}
+
+pub fn run_pending_revoke() {
+    for _ in 0..REVOKE_STEPS_PER_SLICE {
+        if crate::arch::riscv64::trap::service_due_timer_interrupts()
+            && pending_revoke_has_higher_priority_waiter()
+        {
+            return;
+        }
+
+        let root = {
+            let pending = pending_revoke_mut();
+            if !pending.active {
+                return;
+            }
+            pending.root
+        };
+
+        if !revoke_one_descendant(root) {
+            complete_pending_revoke();
+            return;
+        }
+    }
+}
+
+fn complete_pending_revoke() {
+    let pending = pending_revoke_mut();
+    if !pending.active {
+        return;
+    }
+    let owner = pending.owner;
+    pending.active = false;
+    pending.owner = core::ptr::null_mut();
+    pending.root = core::ptr::null_mut();
+
+    if owner.is_null() {
+        return;
+    }
+
+    unsafe {
+        (*owner).context.regs[reg::A0] = 0;
+        (*owner).context.regs[reg::A1] = MessageInfo::new(0, 0, 0, 0).0;
+        (*owner).state = ThreadState::Running as u8;
+        tcb::enqueue(owner);
+    }
+}
+
+fn begin_revoke_continuation(root: *mut Cte) -> Result<(), SyscallError> {
+    unsafe {
+        if !crate::object::cnode::mdb_has_children(root) {
+            return Ok(());
+        }
+    }
+
+    let owner = tcb::current();
+    if owner.is_null() {
+        revoke_descendants(root);
+        return Ok(());
+    }
+
+    let pending = pending_revoke_mut();
+    if pending.active {
+        revoke_descendants(root);
+        return Ok(());
+    }
+
+    pending.active = true;
+    pending.owner = owner;
+    pending.root = root;
+
+    unsafe {
+        tcb::dequeue(owner);
+        (*owner).state = ThreadState::BlockedOnReply as u8;
+    }
+    Err(SyscallError::Preempted)
+}
+
 fn cnode_op_revoke(dest_root_cap: Cap, length: u64, uc: &UserContext) -> Result<(), SyscallError> {
     if length < 2 {
         return Err(SyscallError::TruncatedMessage);
@@ -1383,8 +1507,7 @@ fn cnode_op_revoke(dest_root_cap: Cap, length: u64, uc: &UserContext) -> Result<
     let index = uc.regs[reg::A2];
     let depth = uc.regs[reg::A3] as u32 & 0xff;
     let slot = resolve_slot(dest_root_cap, index, depth)?;
-    revoke_descendants(slot);
-    Ok(())
+    begin_revoke_continuation(slot)
 }
 
 fn cnode_op_delete(dest_root_cap: Cap, length: u64, uc: &UserContext) -> Result<(), SyscallError> {
@@ -1885,6 +2008,31 @@ fn revoke_descendants(cte: *mut Cte) {
             crate::object::cnode::mdb_unlink(child);
             (*child).cap = Cap::null();
         }
+    }
+}
+
+fn revoke_one_descendant(cte: *mut Cte) -> bool {
+    unsafe {
+        let mut leaf = cte;
+        loop {
+            if !crate::object::cnode::mdb_has_children(leaf) {
+                break;
+            }
+            leaf = (*leaf).mdb.next() as *mut Cte;
+            if leaf.is_null() {
+                return false;
+            }
+        }
+
+        if leaf == cte {
+            return false;
+        }
+
+        let is_final = is_final_capability(leaf);
+        finalize_cap(&mut (*leaf).cap, is_final);
+        crate::object::cnode::mdb_unlink(leaf);
+        (*leaf).cap = Cap::null();
+        true
     }
 }
 

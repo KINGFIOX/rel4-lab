@@ -5,9 +5,10 @@
 //! known seL4 syscall number in `a7`. Other exceptions panic the kernel.
 
 use core::arch::global_asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::abi::types::MessageInfo;
 use crate::abi::syscall::{self, SyscallNo};
+use crate::abi::types::MessageInfo;
 use crate::arch::riscv64::{csr, sbi};
 
 /// User-mode register snapshot, exactly the layout consumed by `trap.S`.
@@ -78,20 +79,43 @@ mod scause_code {
 }
 
 const SIE_STIE: usize = 1 << 5;
+const SCOUNTEREN_TM: usize = 1 << 1;
 const TIMER_INTERVAL_TICKS: u64 = 20_000;
+const TIME_SLICE_TICKS: u64 = 5;
+static NEXT_TIMER_DEADLINE: AtomicU64 = AtomicU64::new(0);
+static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 const FAULT_CAP_FAULT: u64 = 1;
 const FAULT_UNKNOWN_SYSCALL: u64 = 2;
 const FAULT_USER_EXCEPTION: u64 = 3;
 const FAULT_VM_FAULT: u64 = 5;
 
 pub fn init_timer() {
+    csr::set_scounteren(csr::scounteren() | SCOUNTEREN_TM);
     csr::set_sie(csr::sie() | SIE_STIE);
     program_next_timer();
 }
 
 fn program_next_timer() {
     let now = csr::time() as u64;
-    sbi::set_timer(now.wrapping_add(TIMER_INTERVAL_TICKS));
+    let deadline = now.wrapping_add(TIMER_INTERVAL_TICKS);
+    NEXT_TIMER_DEADLINE.store(deadline, Ordering::Release);
+    sbi::set_timer(deadline);
+}
+
+/// Poll the architectural timer while running a long in-kernel
+/// continuation. Hardware timer interrupts are masked while we are in
+/// S-mode, so long syscalls need this explicit preemption point.
+pub fn service_due_timer_interrupts() -> bool {
+    let deadline = NEXT_TIMER_DEADLINE.load(Ordering::Acquire);
+    if deadline == 0 {
+        return false;
+    }
+    let now = csr::time() as u64;
+    if now < deadline {
+        return false;
+    }
+    handle_timer_interrupt();
+    true
 }
 
 /// Rust trap dispatcher, called from `trap_entry` once user registers are
@@ -153,9 +177,9 @@ fn fault_message(code: usize, stval: u64, uc: &UserContext) -> (u64, u64, [u64; 
         1 | 5 | 7 | 12 | 13 | 15 => {
             let instruction_fault = matches!(code, 1 | 12) as u64;
             let fsr = match code {
-                1 | 12 => 1,  // RISCVInstructionAccessFault
-                5 | 13 => 5,  // RISCVLoadAccessFault
-                7 | 15 => 7,  // RISCVStoreAccessFault
+                1 | 12 => 1, // RISCVInstructionAccessFault
+                5 | 13 => 5, // RISCVLoadAccessFault
+                7 | 15 => 7, // RISCVStoreAccessFault
                 _ => code as u64,
             };
             mrs[0] = uc.pc;
@@ -416,6 +440,10 @@ fn handle_timer_interrupt() {
     unsafe {
         crate::object::irq::signal_irq(crate::object::irq::KERNEL_TIMER_IRQ as u64);
     }
+    let tick = TIMER_TICKS.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+    if tick % TIME_SLICE_TICKS != 0 {
+        return;
+    }
     unsafe {
         let cur = crate::object::tcb::current();
         if !cur.is_null() && (*cur).state == crate::object::tcb::ThreadState::Running as u8 {
@@ -482,6 +510,11 @@ fn kernel_exit(uc: &mut UserContext) -> *mut UserContext {
     let cur = tcb::current();
 
     loop {
+        if crate::api::invocation::pending_revoke_should_run() {
+            crate::api::invocation::run_pending_revoke();
+            continue;
+        }
+
         let next = tcb::schedule();
         if !next.is_null() {
             if next != cur {
@@ -510,9 +543,13 @@ fn kernel_exit(uc: &mut UserContext) -> *mut UserContext {
             return uc as *mut UserContext;
         }
 
-        // Stall the hart until an interrupt (none today) or, eventually,
-        // a queued-up timer wakeup makes a TCB runnable again.
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+        // We are still in the kernel trap path here, with sscratch=0.
+        // Taking a real nested timer interrupt would therefore go down
+        // the kernel-trap panic path, so idle by polling the timer
+        // deadline and servicing it explicitly.
+        if !service_due_timer_interrupts() {
+            core::hint::spin_loop();
+        }
     }
 }
 

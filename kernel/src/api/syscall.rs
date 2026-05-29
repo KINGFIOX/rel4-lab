@@ -27,6 +27,7 @@ pub enum SyscallError {
     TruncatedMessage,
     FailedLookup,
     Unsupported,
+    Preempted,
 }
 
 impl SyscallError {
@@ -46,7 +47,7 @@ impl SyscallError {
             Self::RevokeFirst => 9,
             Self::NotEnoughMemory => 10,
             // No seL4_Error code for "not implemented" — use IllegalOperation.
-            Self::Unsupported => 3,
+            Self::Unsupported | Self::Preempted => 3,
         }
     }
 }
@@ -91,9 +92,7 @@ pub fn do_call(uc: &mut UserContext) {
         Some(CapTag::AsidControl) => {
             invocation::handle_asid_control(t, cap, label, info.length(), uc)
         }
-        Some(CapTag::AsidPool) => {
-            invocation::handle_asid_pool(t, cap, label, info.length(), uc)
-        }
+        Some(CapTag::AsidPool) => invocation::handle_asid_pool(t, cap, label, info.length(), uc),
         Some(CapTag::IrqControl) => {
             invocation::handle_irq_control(t, slot, cap, label, info.length(), uc)
         }
@@ -106,6 +105,7 @@ pub fn do_call(uc: &mut UserContext) {
 
     match result {
         Ok(()) => write_ok_reply(uc, 0, 0),
+        Err(SyscallError::Preempted) => {}
         Err(e) => write_error_reply(uc, e),
     }
 }

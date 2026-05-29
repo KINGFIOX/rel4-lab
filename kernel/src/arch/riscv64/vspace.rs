@@ -8,8 +8,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::abi::constants::{
-    KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE, PPTR_TOP, PT_INDEX_BITS,
-    RISCV_PG_SHIFT,
+    KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE, PPTR_TOP, PT_INDEX_BITS, RISCV_PG_SHIFT,
 };
 use crate::arch::riscv64::csr;
 use crate::arch::riscv64::sv39::{
@@ -383,11 +382,7 @@ pub unsafe fn unmap_user_frame(
     }
 }
 
-unsafe fn unmap_user_leaf(
-    root: *mut PageTable,
-    vaddr: usize,
-    level: usize,
-) -> Option<usize> {
+unsafe fn unmap_user_leaf(root: *mut PageTable, vaddr: usize, level: usize) -> Option<usize> {
     let size = 1usize << (RISCV_PG_SHIFT + PT_INDEX_BITS * level);
     debug_assert!(vaddr & (size - 1) == 0, "vaddr not frame-aligned");
 

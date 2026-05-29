@@ -14,20 +14,17 @@ multi-size frame map/unmap, DomainSet, fault IPC, and ASID pool creation
 are implemented far enough for the full suite to run to completion.
 
 Latest verified checkpoint: `./tools/run-tests.sh` passes:
-**116/116 enabled tests passing, 51 upstream-disabled tests remaining**.
-The final push from 91/116 fixed two seL4 semantics gaps:
-`CNode_Delete` now uses C-kernel-style `emptySlot` MDB splicing instead
-of rejecting slots with CDT children, which clears the `RETYPE0000..0002`
-teardown failures and the `VSPACE0006` ASID stress exhaustion; endpoint
-IPC now supports the pre-MCS single receive-slot cap-transfer path, which
-lets the serial server receive client shared-memory frame caps and clears
-all `SERSERV_*` failures. The current M4.4 branch also has a first
-minimal IRQ path: `IRQControl_Get` can issue `IRQHandler` caps,
-`IRQHandler_SetNotification/Clear/Ack` dispatches through the real ABI
-labels, handler caps participate in the MDB, and the synthetic SBI timer
-IRQ can signal a bound notification. This is intentionally not a full
-PLIC implementation yet, so the 51 upstream-disabled tests remain
-disabled for now.
+**121 enabled tests passing, 46 upstream-disabled tests remaining**.
+M4.4b unlocked the first timer-gated disabled group on the current RV64,
+non-MCS, single-core, QEMU configuration: `TIMER0001`, `TIMER0002`,
+`SCHED0000`, `DOMAINS0004`, and `PREEMPT_REVOKE`. The Rust kernel now
+exposes `rdtime` to userspace, drives a 2 ms SBI timer tick, signals the
+synthetic timer `IRQHandler` notification, rotates same-priority threads
+on the configured five-tick time slice, and runs `CNode_Revoke` through a
+preemptible in-kernel continuation. The upstream sel4test tree at
+`/Users/wangfiox/sel4/sel4test` also has a qemu-riscv-virt
+`libplatsupport` ltimer shim using `rdtime` plus pseudo IRQ 96, with
+timer support enabled even under `Sel4testSimulation=ON`.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -59,7 +56,29 @@ disabled for now.
 | M4.2f | Close the final enabled-suite gaps: CNode Delete follows `cteDelete(..., exposed=true)` / `emptySlot` semantics, and IPC cap transfer handles the single receive-slot path used by serial-server shared memory setup. | ✅ Done |
 | M4.3 | VM/cap/user fault forwarding to the configured fault endpoint; `PAGEFAULT0001..0005` and `PAGEFAULT1001..1004` pass. | ✅ Done |
 | M4.4a | Minimal IRQControl/IRQHandler ABI support: issue one handler cap per IRQ, derive it under IRQControl in the MDB, bind/clear Notification caps, finalize handler state on last delete, and signal the kernel timer IRQ notification from the SBI timer trap. `Ack` is accepted as a no-op and RISC-V trigger configuration is parsed but not programmed. | ✅ Done |
-| M4.4 | Full PLIC IRQ chain, userspace timer enablement, and debug breakpoints (unlocks the 51 disabled tests) | ⏳ Pending |
+| M4.4b | qemu-riscv-virt userspace ltimer + first timer-gated disabled group: `TIMER0001`, `TIMER0002`, `SCHED0000`, `DOMAINS0004`, `PREEMPT_REVOKE`. Full suite now reports **121 passed / 46 disabled**. | ✅ Done |
+| M4.4 | Full PLIC IRQ chain, MCS/SMP/multi-domain/VTX/cache coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
+
+### Disabled-test accounting (M4.4b)
+
+The pre-M4.4b disabled set contained 51 tests in the compiled ELF. Five
+were timer-gated and are now enabled and passing:
+
+```text
+TIMER0001, TIMER0002, SCHED0000, DOMAINS0004, PREEMPT_REVOKE
+```
+
+The remaining 46 disabled tests, as of the `121 passed / 46 disabled`
+run, fall into these primary buckets:
+
+| Bucket | Count | Tests |
+|--------|-------|-------|
+| MCS / scheduling-context semantics | 32 | `BIND005`, `BIND006`, `TIMEOUTFAULT0001..0003`, `INTERRUPT0002..0006`, `SCHED_CONTEXT_0001`, `SCHED_CONTEXT_0002`, `SCHED_CONTEXT_0003`, `SCHED_CONTEXT_0005..0014`, `SCHED0007..0014`, `SCHED0016` |
+| SMP / multicore | 7 | `FPU0002`, `MULTICORE0001..0005`, `SCHED0022` |
+| Multi-domain | 3 | `DOMAINS0000`, `DOMAINS9999`, `DOMAINS0005` |
+| VTX / VM-entry | 1 | `UNKNOWN_SYSCALL_001` |
+| Cache maintenance | 1 | `CACHEFLUSH0004` |
+| Upstream-disabled or current-simulation-disabled | 2 | `PAGEFAULT1005`, `SCHED0021` |
 
 A live run (kernel boots, the rootserver's `allocman` carves up untyped
 memory via dozens of `Untyped_Retype` calls, maps frames via
@@ -88,12 +107,19 @@ Starting test 0:   Test that there are tests
 Starting test 1:   SYSCALL0000
 ...
 Starting test 15:  SYSCALL0017
-Starting test 16:  BIND0001
-Starting test 17:  BIND0002
+Starting test 16:  TIMER0001
+Starting test 17:  TIMER0002
+Starting test 18:  BIND0001
 ...
-Starting test 114: VSPACE0006
-Starting test 116: Test all tests ran
-Test suite passed. 116 tests passed. 51 tests disabled.
+Starting test 37:  DOMAINS0004
+...
+Starting test 70:  PREEMPT_REVOKE
+...
+Starting test 75:  SCHED0000
+...
+Starting test 119: VSPACE0006
+Starting test 121: Test all tests ran
+Test suite passed. 121 tests passed. 46 tests disabled.
 All is well in the universe
 ```
 
@@ -226,22 +252,24 @@ QEMU virt
 
 ## Next steps (M4)
 
-With the enabled sel4test suite green, the remaining work is about
-unlocking the 51 upstream-disabled tests and tightening semantics that
-are currently implemented only as far as sel4test needs:
+With the first timer-gated disabled group green, the remaining work is
+about the 46 disabled tests that are outside the current RV64/non-MCS/
+single-core/QEMU slice, plus semantics that are implemented only as far
+as sel4test currently needs:
 
-1. **Interrupt and timer stack.** The IRQControl/IRQHandler ABI path now
-   exists for cap issuing and notification binding, but the remaining M4
-   work is real PLIC claim/complete/masking, trigger programming, and
-   userspace timer enablement so the interrupt/preemption groups can be
-   turned back on.
-2. **Debug exceptions.** Implement hardware breakpoint and debug-fault
-   forwarding needed by the `BREAKPOINT_*` tests still pruned from the
-   active suite.
-3. **Full cap-transfer/generalisation pass.** The current IPC transfer
+1. **MCS model.** Scheduling contexts, timeout faults, SC donation, MCS
+   IPC, and MCS scheduler tests are still intentionally out of scope for
+   this non-MCS kernel build.
+2. **SMP / multicore.** Cross-core scheduling, remote deletion, affinity,
+   multicore IRQs, and FPU migration remain disabled under `-smp 1`.
+3. **Other disabled buckets.** Multi-domain scheduling, VTX/VM-entry,
+   cache maintenance, and the upstream-disabled `PAGEFAULT1005` /
+   simulation-disabled `SCHED0021` are tracked separately from the
+   timer work that landed in M4.4b.
+4. **Full cap-transfer/generalisation pass.** The current IPC transfer
    path intentionally covers the pre-MCS single receive-slot case. The
    next conformance pass should cover multi-cap edge cases, endpoint
    unwrapping details, and cleanup paths beyond the serial-server use.
-4. **Zombie/finalisation fidelity.** CNode/TCB finalisation is good
+5. **Zombie/finalisation fidelity.** CNode/TCB finalisation is good
    enough for the enabled tests, but should be brought closer to the C
    kernel's Zombie reduction model before expanding coverage further.

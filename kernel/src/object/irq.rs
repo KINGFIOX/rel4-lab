@@ -76,10 +76,7 @@ pub unsafe fn set_notification(irq: u64, ntfn_cap: Cap, ntfn_slot: *mut Cte) {
         e.notification_slot.cap = ntfn_cap;
         e.notification_slot.mdb = MdbNode::new(0, 0, false, false);
         unsafe {
-            crate::object::cnode::mdb_insert_after(
-                ntfn_slot,
-                &mut e.notification_slot as *mut Cte,
-            );
+            crate::object::cnode::mdb_insert_after(ntfn_slot, &mut e.notification_slot as *mut Cte);
         }
     }
 }
@@ -102,8 +99,7 @@ pub unsafe fn signal_irq(irq: u64) {
     if let Some(e) = unsafe { entry_mut(irq) } {
         let cap = e.notification_slot.cap;
         if cap.tag() == Some(CapTag::Notification) && cap.notification_can_send() {
-            let ntfn =
-                cap.notification_ptr() as *mut crate::object::notification::Notification;
+            let ntfn = cap.notification_ptr() as *mut crate::object::notification::Notification;
             unsafe { crate::object::notification::signal(ntfn, cap.notification_badge()) };
         }
     }

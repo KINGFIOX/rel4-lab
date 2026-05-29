@@ -36,6 +36,7 @@ rw_csr!(satp, set_satp, "satp");
 rw_csr!(sie, set_sie, "sie");
 rw_csr!(sip, set_sip, "sip");
 rw_csr!(time, _set_time, "time");
+rw_csr!(scounteren, set_scounteren, "scounteren");
 
 #[inline]
 #[allow(dead_code)]
