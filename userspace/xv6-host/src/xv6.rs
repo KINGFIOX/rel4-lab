@@ -38,7 +38,7 @@ pub(crate) fn handle_xv6_syscall(alloc: &mut Allocator, child: &mut Child, mrs: 
         }
         SYS_WRITE => sys_write(a0 as usize, a1, a2 as usize),
         SYS_READ => sys_read(a0 as usize, a1, a2 as usize),
-        SYS_OPEN => sys_open(a0),
+        SYS_OPEN => sys_open(a0, a1 as u32),
         SYS_CLOSE => sys_close(a0 as usize),
         SYS_DUP => sys_dup(a0 as usize),
         SYS_FSTAT => sys_fstat(a0 as usize, a1),
@@ -49,7 +49,10 @@ pub(crate) fn handle_xv6_syscall(alloc: &mut Allocator, child: &mut Child, mrs: 
             unsafe { sel4_yield() };
             0
         }
-        SYS_FORK | SYS_WAIT => -1,
+        SYS_KILL => sys_kill(a0 as i64),
+        SYS_CHDIR => sys_chdir(a0),
+        SYS_PIPE | SYS_EXEC | SYS_MKNOD | SYS_UNLINK | SYS_LINK | SYS_MKDIR | SYS_FORK
+        | SYS_WAIT => -1,
         _ => -1,
     }
 }
@@ -113,15 +116,22 @@ fn sys_read(fd: usize, dst: u64, len: usize) -> i64 {
     }
 }
 
-fn sys_open(path_ptr: u64) -> i64 {
+fn sys_open(path_ptr: u64, flags: u32) -> i64 {
     let mut path = [0u8; 128];
     let Some(len) = copy_cstr_from_child(path_ptr, &mut path) else {
         return -1;
     };
     let name = basename(&path[..len]);
+    let wants_write = flags & (O_WRONLY | O_RDWR | O_CREATE | O_TRUNC) != 0;
     let kind = if path_is_root(&path[..len]) || name == b"." || name == b".." {
+        if wants_write {
+            return -1;
+        }
         FD_ROOTDIR
     } else if name == b"README" {
+        if wants_write {
+            return -1;
+        }
         FD_README
     } else if name == b"console" {
         FD_CONSOLE
@@ -210,6 +220,22 @@ fn sys_sbrk(alloc: &mut Allocator, child: &mut Child, increment: i64) -> i64 {
     }
     child.brk = new_brk;
     old as i64
+}
+
+fn sys_kill(pid: i64) -> i64 {
+    if pid == 1 { 0 } else { -1 }
+}
+
+fn sys_chdir(path_ptr: u64) -> i64 {
+    let mut path = [0u8; 128];
+    let Some(len) = copy_cstr_from_child(path_ptr, &mut path) else {
+        return -1;
+    };
+    if path_is_root(&path[..len]) || basename(&path[..len]) == b".." {
+        0
+    } else {
+        -1
+    }
 }
 
 pub(crate) fn init_fds() {

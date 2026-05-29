@@ -225,7 +225,9 @@ child's positive xv6 syscalls via `UnknownSyscall` fault IPC.
 
 The host crate remains `edition = "2024"` and enforces the Rust 2024 unsafe
 rules at compile time with `deny(unsafe_attr_outside_unsafe)` and
-`deny(unsafe_op_in_unsafe_fn)`.
+`deny(unsafe_op_in_unsafe_fn)`. Its implementation is split by responsibility
+under `userspace/xv6-host/src`: seL4 ABI stubs, boot allocation, child
+TCB/VSpace setup, payload mapping, utility code, and xv6 syscall handling.
 
 With the current SMP upstream build, use two harts (the helper defaults to
 `SMP=2`):
@@ -256,12 +258,15 @@ console        3 3 0
 xv6-host: exit(0)
 ```
 
-Implemented host-side compatibility is intentionally tiny: console read/write,
-heap growth via `sbrk`, time/pid stubs, console fd operations, a read-only
-pseudo-fs containing `README`, and graceful `-1` for unsupported process and
-write-side filesystem calls. Running `init`, `sh`, real `fork`/`exec`, pipes,
-mutable files, and `usertests` still requires a fuller Unix service with
-process state and a filesystem image.
+Implemented host-side compatibility now has an explicit handler for every xv6
+syscall number 1..21. The currently functional subset is process exit,
+console/file read-write where meaningful, `open`/`close`/`dup`/`fstat`,
+`sbrk`, `getpid`, `uptime`, `pause`, and root-only `chdir`. Calls that require
+real multi-process state or a mutable filesystem (`fork`, `wait`, `pipe`,
+`exec`, `mknod`, `unlink`, `link`, `mkdir`) return `-1` consistently instead
+of falling through as unknown syscalls. Running `init`, `sh`, real
+`fork`/`exec`, pipes, mutable files, and `usertests` still requires a fuller
+Unix service with process state and a filesystem image.
 
 
 ## Repository layout
