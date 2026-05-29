@@ -95,11 +95,10 @@ pub fn do_call(uc: &mut UserContext) {
             invocation::handle_asid_pool(t, cap, label, info.length(), uc)
         }
         Some(CapTag::IrqControl) => {
-            // Still-stubbed cap kinds: report success so the rootserver's
-            // optional features fail soft instead of aborting. Each of
-            // these will become its own `handle_*` in M4.
-            //   - IrqControl_Get:  unblocks `seL4_IRQControl_Get`
-            Ok(())
+            invocation::handle_irq_control(t, slot, cap, label, info.length(), uc)
+        }
+        Some(CapTag::IrqHandler) => {
+            invocation::handle_irq_handler(t, cap, label, info.length(), uc)
         }
         None => Err(SyscallError::InvalidCapability),
         _ => Err(SyscallError::IllegalOperation),

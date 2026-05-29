@@ -49,6 +49,11 @@ mod label {
     pub const CNODE_MUTATE: u64 = 23;
     pub const CNODE_ROTATE: u64 = 24;
     pub const CNODE_SAVE_CALLER: u64 = 25;
+    pub const IRQ_ISSUE_IRQ_HANDLER: u64 = 26;
+    pub const IRQ_ACK: u64 = 27;
+    pub const IRQ_SET_HANDLER: u64 = 28;
+    pub const IRQ_CLEAR_HANDLER: u64 = 29;
+    pub const RISCV_IRQ_ISSUE_IRQ_HANDLER_TRIGGER: u64 = 40;
 }
 
 /// Helper: compute log2 of the in-memory bytes of an object given its
@@ -517,6 +522,86 @@ pub fn handle_asid_pool(
         (*vspace_slot).cap.set_page_table_mapped_asid(asid);
     }
     Ok(())
+}
+
+pub fn handle_irq_control(
+    thread: &Thread,
+    src_slot: *mut Cte,
+    _cap: Cap,
+    label_id: u64,
+    length: u64,
+    uc: &mut UserContext,
+) -> Result<(), SyscallError> {
+    let (irq, index, depth) = match label_id {
+        label::IRQ_ISSUE_IRQ_HANDLER => {
+            if length < 3 {
+                return Err(SyscallError::TruncatedMessage);
+            }
+            (uc.regs[reg::A2], uc.regs[reg::A3], uc.regs[reg::A4] & 0xff)
+        }
+        label::RISCV_IRQ_ISSUE_IRQ_HANDLER_TRIGGER => {
+            if length < 4 {
+                return Err(SyscallError::TruncatedMessage);
+            }
+            // We do not model PLIC edge/level trigger configuration yet,
+            // but the arch-specific syscall still issues the IRQHandler cap.
+            (uc.regs[reg::A2], uc.regs[reg::A4], uc.regs[reg::A5] & 0xff)
+        }
+        _ => return Err(SyscallError::IllegalOperation),
+    };
+
+    if !crate::object::irq::valid_irq(irq) {
+        uc.regs[reg::A2] = 1;
+        uc.regs[reg::A3] = crate::object::irq::MAX_IRQ as u64;
+        return Err(SyscallError::RangeError);
+    }
+    if unsafe { crate::object::irq::is_active(irq) } {
+        return Err(SyscallError::RevokeFirst);
+    }
+
+    let root_cptr = read_extra_cap(thread, 0);
+    let (root_cap, _) =
+        cspace::lookup_cap(thread, root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
+    let dest = resolve_slot(root_cap, index, depth as u32)?;
+
+    unsafe {
+        if !(*dest).cap.is_null() {
+            return Err(SyscallError::DeleteFirst);
+        }
+        (*dest).cap = Cap::new_irq_handler(irq);
+        (*dest).mdb = MdbNode::new(0, 0, true, true);
+        crate::object::cnode::mdb_insert_after(src_slot, dest);
+        crate::object::irq::issue_handler(irq);
+    }
+    Ok(())
+}
+
+pub fn handle_irq_handler(
+    thread: &Thread,
+    cap: Cap,
+    label_id: u64,
+    _length: u64,
+    _uc: &mut UserContext,
+) -> Result<(), SyscallError> {
+    let irq = cap.irq_handler_irq();
+    match label_id {
+        label::IRQ_ACK => Ok(()),
+        label::IRQ_SET_HANDLER => {
+            let ntfn_cptr = read_extra_cap(thread, 0);
+            let (ntfn_cap, ntfn_slot) = cspace::lookup_cap(thread, ntfn_cptr)
+                .map_err(|_| SyscallError::InvalidCapability)?;
+            if ntfn_cap.tag() != Some(CapTag::Notification) || !ntfn_cap.notification_can_send() {
+                return Err(SyscallError::InvalidCapability);
+            }
+            unsafe { crate::object::irq::set_notification(irq, ntfn_cap, ntfn_slot) };
+            Ok(())
+        }
+        label::IRQ_CLEAR_HANDLER => {
+            unsafe { crate::object::irq::clear_notification(irq) };
+            Ok(())
+        }
+        _ => Err(SyscallError::IllegalOperation),
+    }
 }
 
 /// DomainSet invocations.
@@ -1610,6 +1695,9 @@ fn same_object_as(a: Cap, b: Cap) -> bool {
         }
         (Some(CapTag::CNode), Some(CapTag::CNode)) => a.cnode_ptr() == b.cnode_ptr(),
         (Some(CapTag::Thread), Some(CapTag::Thread)) => a.thread_ptr() == b.thread_ptr(),
+        (Some(CapTag::IrqHandler), Some(CapTag::IrqHandler)) => {
+            a.irq_handler_irq() == b.irq_handler_irq()
+        }
         (Some(CapTag::PageTable), Some(CapTag::PageTable)) => {
             a.page_table_base_ptr() == b.page_table_base_ptr()
         }
@@ -1726,6 +1814,13 @@ fn finalize_cap(cap: &mut Cap, is_final: bool) {
                         (*n).set_bound_tcb(0);
                         crate::object::notification::finalize(n);
                     }
+                }
+            }
+        }
+        Some(CapTag::IrqHandler) => {
+            if is_final {
+                unsafe {
+                    crate::object::irq::delete_handler(cap.irq_handler_irq());
                 }
             }
         }

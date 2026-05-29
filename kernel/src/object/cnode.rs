@@ -182,6 +182,10 @@ unsafe fn is_mdb_parent_of(a: *mut Cte, b: *mut Cte) -> bool {
                 && cap_a.cnode_radix() == cap_b.cnode_radix()
         }
         CapTag::Thread => tag_b == CapTag::Thread && cap_a.thread_ptr() == cap_b.thread_ptr(),
+        CapTag::IrqControl => tag_b == CapTag::IrqControl || tag_b == CapTag::IrqHandler,
+        CapTag::IrqHandler => {
+            tag_b == CapTag::IrqHandler && cap_a.irq_handler_irq() == cap_b.irq_handler_irq()
+        }
         CapTag::Frame => {
             tag_b == CapTag::Frame
                 && cap_a.frame_base_ptr() == cap_b.frame_base_ptr()

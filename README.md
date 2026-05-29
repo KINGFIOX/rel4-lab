@@ -21,7 +21,13 @@ of rejecting slots with CDT children, which clears the `RETYPE0000..0002`
 teardown failures and the `VSPACE0006` ASID stress exhaustion; endpoint
 IPC now supports the pre-MCS single receive-slot cap-transfer path, which
 lets the serial server receive client shared-memory frame caps and clears
-all `SERSERV_*` failures.
+all `SERSERV_*` failures. The current M4.4 branch also has a first
+minimal IRQ path: `IRQControl_Get` can issue `IRQHandler` caps,
+`IRQHandler_SetNotification/Clear/Ack` dispatches through the real ABI
+labels, handler caps participate in the MDB, and the synthetic SBI timer
+IRQ can signal a bound notification. This is intentionally not a full
+PLIC implementation yet, so the 51 upstream-disabled tests remain
+disabled for now.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -52,7 +58,8 @@ all `SERSERV_*` failures.
 | M4.2e+ | `TCB_Configure` / `TCB_SetSpace` apply the `seL4_CNode_CapData` word (guard ‖ guard_size) to the cspace cap before storing — without this the child process's root CNode could only resolve cptrs equal to its own bits, and every libsel4allocman retype came back `IllegalOperation`. | ✅ Done |
 | M4.2f | Close the final enabled-suite gaps: CNode Delete follows `cteDelete(..., exposed=true)` / `emptySlot` semantics, and IPC cap transfer handles the single receive-slot path used by serial-server shared memory setup. | ✅ Done |
 | M4.3 | VM/cap/user fault forwarding to the configured fault endpoint; `PAGEFAULT0001..0005` and `PAGEFAULT1001..1004` pass. | ✅ Done |
-| M4.4 | PLIC IRQ chain, SBI timer + preemption, debug breakpoints (unlocks the 51 disabled tests) | ⏳ Pending |
+| M4.4a | Minimal IRQControl/IRQHandler ABI support: issue one handler cap per IRQ, derive it under IRQControl in the MDB, bind/clear Notification caps, finalize handler state on last delete, and signal the kernel timer IRQ notification from the SBI timer trap. `Ack` is accepted as a no-op and RISC-V trigger configuration is parsed but not programmed. | ✅ Done |
+| M4.4 | Full PLIC IRQ chain, userspace timer enablement, and debug breakpoints (unlocks the 51 disabled tests) | ⏳ Pending |
 
 A live run (kernel boots, the rootserver's `allocman` carves up untyped
 memory via dozens of `Untyped_Retype` calls, maps frames via
@@ -131,6 +138,7 @@ microkernel/
 │       │   ├── cnode.rs       # Cte + cnode_at / install_initial_cap / mdb_*
 │       │   ├── untyped.rs     # free-range splitter, untyped cap factory
 │       │   ├── notification.rs # min. Notification (state + badge + signal/wait)
+│       │   ├── irq.rs          # min. IRQHandler table + notification binding
 │       │   ├── endpoint.rs    # Endpoint (16 B: state-packed head ptr + tail),
 │       │   │                  #   wait-list queue ops, finalize wakes waiters
 │       │   ├── tcb.rs         # Tcb struct (context + scheduler/IPC state),
@@ -222,9 +230,11 @@ With the enabled sel4test suite green, the remaining work is about
 unlocking the 51 upstream-disabled tests and tightening semantics that
 are currently implemented only as far as sel4test needs:
 
-1. **Interrupt and timer stack.** Wire `seL4_IRQControl_Get`,
-   `seL4_IRQHandler_{Set,Ack,Clear}Notification`, PLIC delivery, and SBI
-   timer programming so the interrupt/preemption groups can be enabled.
+1. **Interrupt and timer stack.** The IRQControl/IRQHandler ABI path now
+   exists for cap issuing and notification binding, but the remaining M4
+   work is real PLIC claim/complete/masking, trigger programming, and
+   userspace timer enablement so the interrupt/preemption groups can be
+   turned back on.
 2. **Debug exceptions.** Implement hardware breakpoint and debug-fault
    forwarding needed by the `BREAKPOINT_*` tests still pruned from the
    active suite.

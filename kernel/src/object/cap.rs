@@ -243,6 +243,19 @@ impl Cap {
     }
 
     #[inline]
+    pub const fn new_irq_handler(irq: u64) -> Cap {
+        let mut c = Cap::null();
+        c.words[0] = (CapTag::IrqHandler as u64) << 59;
+        c.words[1] = irq & 0xFFF;
+        c
+    }
+
+    #[inline]
+    pub const fn irq_handler_irq(self) -> u64 {
+        self.words[1] & 0xFFF
+    }
+
+    #[inline]
     pub const fn new_asid_control() -> Cap {
         let mut c = Cap::null();
         c.words[0] = (CapTag::AsidControl as u64) << 59;

@@ -414,6 +414,9 @@ unsafe fn block_fault_sender(
 fn handle_timer_interrupt() {
     program_next_timer();
     unsafe {
+        crate::object::irq::signal_irq(crate::object::irq::KERNEL_TIMER_IRQ as u64);
+    }
+    unsafe {
         let cur = crate::object::tcb::current();
         if !cur.is_null() && (*cur).state == crate::object::tcb::ThreadState::Running as u8 {
             crate::object::tcb::rotate_to_tail(cur);
