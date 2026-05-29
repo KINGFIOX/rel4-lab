@@ -148,6 +148,20 @@ pub(crate) fn clear_process_mappings(pid: u64) {
     }
 }
 
+pub(crate) fn mapping_slots_available() -> usize {
+    unsafe {
+        let mut free = MAX_MAPPINGS.saturating_sub(MAPPING_COUNT);
+        let mut i = 0;
+        while i < MAPPING_COUNT {
+            if MAPPINGS[i].pid == 0 {
+                free += 1;
+            }
+            i += 1;
+        }
+        free
+    }
+}
+
 pub(crate) fn map_stack(alloc: &mut Allocator, child: &Child) {
     for i in 0..CHILD_STACK_PAGES {
         let va = CHILD_STACK_TOP - ((i as u64 + 1) * PAGE_SIZE);
@@ -316,9 +330,11 @@ pub(crate) fn copy_cstr_from_child(child: &Child, va: u64, out: &mut [u8]) -> Op
 pub(crate) fn clone_address_space(alloc: &mut Allocator, parent: &Child, child: &Child) {
     unsafe {
         let mut i = 0;
+        let live_heap_end = align_up(parent.brk);
         while i < MAPPING_COUNT {
             let m = MAPPINGS[i];
-            if m.pid == parent.pid && m.child_page != CHILD_IPC_BUFFER {
+            let freed_heap_page = m.child_page >= live_heap_end && m.child_page < CHILD_HEAP_LIMIT;
+            if m.pid == parent.pid && m.child_page != CHILD_IPC_BUFFER && !freed_heap_page {
                 let dst_alias =
                     map_fresh_child_page(alloc, child, m.child_page, m.writable, m.executable);
                 ptr::copy_nonoverlapping(

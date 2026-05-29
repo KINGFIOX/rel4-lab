@@ -107,7 +107,7 @@ trap cleanup EXIT INT TERM
 deadline=$(( $(date +%s) + TIMEOUT ))
 status=2
 while [[ $(date +%s) -lt ${deadline} ]]; do
-    if grep -qE 'xv6-host: exit\(' "${LOG_FILE}" 2>/dev/null; then
+    if grep -qE 'xv6-host: exit\([^)]*\) pid=1' "${LOG_FILE}" 2>/dev/null; then
         status=0
         break
     fi
@@ -117,7 +117,7 @@ while [[ $(date +%s) -lt ${deadline} ]]; do
     fi
     if ! kill -0 "${qemu_pid}" 2>/dev/null; then
         wait "${qemu_pid}" 2>/dev/null || true
-        if grep -qE 'xv6-host: exit\(' "${LOG_FILE}" 2>/dev/null; then
+        if grep -qE 'xv6-host: exit\([^)]*\) pid=1' "${LOG_FILE}" 2>/dev/null; then
             status=0
         else
             status=1
@@ -132,7 +132,7 @@ trap - EXIT INT TERM
 
 case "${status}" in
     0)
-        exit_line="$(grep -E 'xv6-host: exit\(' "${LOG_FILE}" | tail -1)"
+        exit_line="$(grep -E 'xv6-host: exit\([^)]*\) pid=1' "${LOG_FILE}" | tail -1)"
         echo "PASS: ${exit_line}"
         echo "      log: ${LOG_FILE}"
         ;;

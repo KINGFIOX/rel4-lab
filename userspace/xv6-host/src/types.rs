@@ -58,7 +58,7 @@ pub(crate) struct Mapping {
 #[derive(Copy, Clone)]
 pub(crate) struct FdEntry {
     pub(crate) kind: u8,
-    pub(crate) offset: usize,
+    pub(crate) file: usize,
     pub(crate) aux: usize,
     pub(crate) readable: bool,
     pub(crate) writable: bool,
@@ -68,7 +68,7 @@ impl FdEntry {
     pub(crate) const fn closed() -> Self {
         Self {
             kind: FD_CLOSED,
-            offset: 0,
+            file: crate::consts::MAX_OPEN_FILES,
             aux: 0,
             readable: false,
             writable: false,

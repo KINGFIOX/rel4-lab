@@ -74,6 +74,7 @@ state, and user `sstatus.FS` is left off. The Rust kernel now also builds for
 `f`/`d` target features, so a future accidental `rv64gc` kernel build fails
 immediately. This intentionally drops the previous FPU sel4test coverage in
 favor of keeping the Rust kernel free of floating-point save/restore machinery.
+
 M4.4h removes the remaining FPU compatibility surface from TCB handling:
 `Tcb` no longer stores a FPU-disabled flag, `TCBSetFlags` returns
 `IllegalOperation`, boot clears `sstatus.FS`, and the restore path masks
@@ -114,6 +115,13 @@ the exiting process's fds, and `close/dup/pipe` now work correctly across shell
 children. This is enough for scripted `sh` commands such as `echo`, `ls`,
 `cat README`, and `echo pipe data | wc` to exercise `fork -> exec -> wait`
 through the user-space seL4 server.
+
+M5.6 tightens Unix fd/fs semantics enough to run the first targeted xv6
+`usertests` case. `xv6-host` now uses shared open-file objects so `dup` and
+`fork` share file offsets, `fork` inherits cwd, the in-memory FS supports
+mutable files/directories plus `link`/`unlink`/`mkdir`, and `sbrk` keeps
+mapping-table headroom instead of halting the host during `usertests`
+`countfree()`. `usertests sharedfd` now reaches `OK` / `ALL TESTS PASSED`.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -157,6 +165,7 @@ through the user-space seL4 server.
 | M5.3 | seL4-style xv6 host: embed the xv6 user ELF into a no_std Rust 2024 Cargo rootserver, spawn it as a child TCB/VSpace with a fault endpoint, and handle xv6 syscalls via `UnknownSyscall` fault IPC. Smoke set passes: `echo`, `forktest`, `cat README`, `ls .`, `wc README`, `grep xv6 README`. | ✅ Done |
 | M5.4 | User-space xv6 process model v1: shared badged fault endpoint, host process table, real TCB/VSpace-backed `fork`, zombie `exit`, and `wait` reaping. `forktest` now creates real children up to the current process-table limit. | ✅ Done |
 | M5.5 | Scripted shell path: `XV6_CONSOLE_INPUT`/`--stdin`, blocking empty console reads, per-process fd tables, fd refcounting across `fork`, close-on-exit, and basic cross-process pipes. `sh` can run `echo`, `ls`, `cat README`, and `echo pipe data \| wc`. | ✅ Done |
+| M5.6 | Shared open-file table and mutable in-memory FS: `fork` inherits cwd, `dup`/`fork` share file offsets, file capacity is large enough for xv6 `sharedfd`, `sbrk` preserves mapping headroom, and targeted `usertests sharedfd` passes. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
@@ -255,7 +264,7 @@ Test suite passed. 124 tests passed. 43 tests disabled.
 All is well in the universe
 ```
 
-### xv6 Compatibility Checkpoint (M5.3-M5.5)
+### xv6 Compatibility Checkpoint (M5.3-M5.6)
 
 The current xv6 path is a user-space compatibility server, not a full Unix
 server yet. The helper builds one xv6 user program from
@@ -283,6 +292,7 @@ nix develop --command ./tools/run-xv6-user.sh wc README
 nix develop --command ./tools/run-xv6-user.sh grep xv6 README
 nix develop --command ./tools/run-xv6-user.sh --stdin $'echo scripted from sh\nls .\ncat README\n' sh
 nix develop --command ./tools/run-xv6-user.sh --stdin $'echo pipe data | wc\n' sh
+nix develop --command ./tools/run-xv6-user.sh usertests sharedfd
 ```
 
 Verified output includes:
@@ -311,20 +321,32 @@ xv6-host: fork parent=2 child=4
 xv6-host: exec echo pid=3
 xv6-host: exec wc pid=4
 1 2 10
+
+test sharedfd:
+xv6-host: fork parent=1 child=2
+xv6-host: fork parent=2 child=3
+xv6-host: exit(0) pid=3
+xv6-host: exit(0) pid=2
+OK
+ALL TESTS PASSED
+xv6-host: exit(0) pid=1
 ```
 
 Implemented host-side compatibility now has an explicit handler for every xv6
 syscall number 1..21. The currently functional subset is process exit,
 TCB/VSpace-backed `fork`, catalog-backed `exec`, zombie/blocking `wait`,
 scripted console input, console/file read-write where meaningful,
-per-process `open`/`close`/`dup`/`fstat`, `sbrk`, `getpid`, `uptime`, `pause`,
-root-only `chdir`, `mknod("console")`, and a fixed-size in-memory `pipe` ring
-buffer shared across forked processes. Remaining Unix gaps are `unlink`,
-`link`, `mkdir`, writable files, a real xv6 filesystem image, dynamic host
-keyboard input, pipe read blocking/backpressure, broader exec catalog coverage,
-and scaling process/cap/resource cleanup beyond the current fixed tables. With
-no scripted input, `init` now reaches `exec("sh")` and the shell blocks on
-console read instead of exiting and forcing `init` into a restart loop.
+per-process `open`/`close`/`dup`/`fstat`, shared open-file offsets across
+`dup`/`fork`, `sbrk`, `getpid`, `uptime`, `pause`, `chdir`,
+`mknod("console")`, `link`/`unlink`/`mkdir`, mutable in-memory files, and a
+fixed-size in-memory `pipe` ring buffer shared across forked processes.
+Remaining Unix gaps are a real xv6 filesystem image, persistence,
+permissions/devices beyond console, dynamic host keyboard input, pipe read
+blocking/backpressure, broader exec catalog coverage, full `sbrk` unmap/free
+semantics, and scalable process/cap/resource cleanup beyond the current fixed
+tables. With no scripted input, `init` now reaches `exec("sh")` and the shell
+blocks on console read instead of exiting and forcing `init` into a restart
+loop.
 
 
 ## Repository layout

@@ -3,8 +3,8 @@ use core::cmp::min;
 use crate::allocator::Allocator;
 use crate::child::{
     clear_process_mappings, clone_address_space, copy_cstr_from_child, copy_from_child,
-    copy_to_child, create_child, load_elf, map_fresh_child_page, map_stack, read_user_context,
-    reset_process_mappings, write_user_context,
+    copy_to_child, create_child, load_elf, map_fresh_child_page, map_stack,
+    mapping_slots_available, read_user_context, reset_process_mappings, write_user_context,
 };
 use crate::consts::*;
 use crate::sel4::{call_checked, msg_info, sel4_send, sel4_yield};
@@ -13,6 +13,7 @@ use crate::util::*;
 
 static mut TICKS: u64 = 0;
 static mut PIPES: [Pipe; MAX_PIPES] = [Pipe::closed(); MAX_PIPES];
+static mut OPEN_FILES: [OpenFile; MAX_OPEN_FILES] = [OpenFile::closed(); MAX_OPEN_FILES];
 static mut NEXT_PID: u64 = 2;
 static mut CONSOLE_INPUT_POS: usize = 0;
 static mut FS_NODES: [FsNode; MAX_FS_NODES] = [FsNode::empty(); MAX_FS_NODES];
@@ -43,6 +44,23 @@ impl Pipe {
             len: 0,
             readers: 0,
             writers: 0,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+struct OpenFile {
+    used: bool,
+    refs: u16,
+    offset: usize,
+}
+
+impl OpenFile {
+    const fn closed() -> Self {
+        Self {
+            used: false,
+            refs: 0,
+            offset: 0,
         }
     }
 }
@@ -121,7 +139,10 @@ fn sys_write(child: &mut Child, fd: usize, buf: u64, len: usize) -> i64 {
                 }
                 FD_PIPE_WRITE => unsafe { pipe_write(child.fds[fd].aux, &scratch[..n]) },
                 FD_FS_FILE if child.fds[fd].writable => {
-                    fs_write(child.fds[fd].aux, child.fds[fd].offset, &scratch[..n])
+                    let Some(offset) = fd_offset(child.fds[fd]) else {
+                        return -1;
+                    };
+                    fs_write(child.fds[fd].aux, offset, &scratch[..n])
                 }
                 _ => return -1,
             }
@@ -130,7 +151,7 @@ fn sys_write(child: &mut Child, fd: usize, buf: u64, len: usize) -> i64 {
             break;
         }
         if fd < MAX_FD && child.fds[fd].kind == FD_FS_FILE {
-            child.fds[fd].offset += wrote;
+            advance_fd_offset(child.fds[fd], wrote);
         }
         done += wrote;
     }
@@ -230,6 +251,10 @@ fn sys_close(child: &mut Child, fd: usize) -> i64 {
 
 fn close_fd(child: &mut Child, fd: usize) {
     let entry = child.fds[fd];
+    child.fds[fd] = FdEntry::closed();
+    if !release_open_file(entry) {
+        return;
+    }
     unsafe {
         match entry.kind {
             FD_PIPE_READ if entry.aux < MAX_PIPES && PIPES[entry.aux].readers > 0 => {
@@ -247,7 +272,6 @@ fn close_fd(child: &mut Child, fd: usize) {
             _ => {}
         }
     }
-    child.fds[fd] = FdEntry::closed();
 }
 
 fn sys_dup(child: &mut Child, fd: usize) -> i64 {
@@ -261,7 +285,7 @@ fn sys_dup(child: &mut Child, fd: usize) -> i64 {
     for i in 0..MAX_FD {
         if child.fds[i].kind == FD_CLOSED {
             child.fds[i] = entry;
-            inc_fd_ref(entry);
+            retain_open_file(entry);
             return i as i64;
         }
     }
@@ -302,12 +326,19 @@ fn sys_sbrk(alloc: &mut Allocator, child: &mut Child, increment: i64) -> i64 {
         return -1;
     }
     if new_brk > child.heap_mapped_end {
+        let target_end = align_up(new_brk);
+        let first_page = align_up(child.heap_mapped_end);
+        let needed = ((target_end.saturating_sub(first_page)) / PAGE_SIZE) as usize;
+        let available = mapping_slots_available();
+        if needed > available.saturating_sub(SBRK_MAPPING_HEADROOM) {
+            return -1;
+        }
         let mut page = align_up(child.heap_mapped_end);
-        while page < align_up(new_brk) {
+        while page < target_end {
             map_fresh_child_page(alloc, child, page, true, false);
             page += PAGE_SIZE;
         }
-        child.heap_mapped_end = align_up(new_brk);
+        child.heap_mapped_end = target_end;
     }
     child.brk = new_brk;
     old as i64
@@ -334,7 +365,8 @@ fn sys_fork(
     child.brk = parent.brk;
     child.heap_mapped_end = parent.heap_mapped_end;
     child.fds = parent.fds;
-    inc_fd_refs(&child);
+    child.cwd = parent.cwd;
+    retain_fd_refs(&child);
     clone_address_space(alloc, &parent, &child);
 
     let mut ctx = read_user_context(parent.tcb);
@@ -631,15 +663,24 @@ fn sys_pipe(child: &mut Child, fds_ptr: u64) -> i64 {
         let Some(read_fd) = find_free_fd(child) else {
             return -1;
         };
+        let Some(read_file) = alloc_open_file() else {
+            return -1;
+        };
         child.fds[read_fd] = FdEntry {
             kind: FD_PIPE_READ,
-            offset: 0,
+            file: read_file,
             aux: pipe_idx,
             readable: true,
             writable: false,
         };
         let Some(write_fd) = find_free_fd(child) else {
             child.fds[read_fd] = FdEntry::closed();
+            close_open_file(read_file);
+            return -1;
+        };
+        let Some(write_file) = alloc_open_file() else {
+            child.fds[read_fd] = FdEntry::closed();
+            close_open_file(read_file);
             return -1;
         };
 
@@ -648,7 +689,7 @@ fn sys_pipe(child: &mut Child, fds_ptr: u64) -> i64 {
         PIPES[pipe_idx].writers = 1;
         child.fds[write_fd] = FdEntry {
             kind: FD_PIPE_WRITE,
-            offset: 0,
+            file: write_file,
             aux: pipe_idx,
             readable: false,
             writable: true,
@@ -685,23 +726,37 @@ pub(crate) fn init_fds(child: &mut Child) {
             child.fds[i] = FdEntry::closed();
             i += 1;
         }
+        let mut of = 0;
+        while of < MAX_OPEN_FILES {
+            OPEN_FILES[of] = OpenFile::closed();
+            of += 1;
+        }
+        let Some(stdin_file) = alloc_open_file() else {
+            halt_loop();
+        };
+        let Some(stdout_file) = alloc_open_file() else {
+            halt_loop();
+        };
+        let Some(stderr_file) = alloc_open_file() else {
+            halt_loop();
+        };
         child.fds[0] = FdEntry {
             kind: FD_CONSOLE,
-            offset: 0,
+            file: stdin_file,
             aux: 0,
             readable: true,
             writable: true,
         };
         child.fds[1] = FdEntry {
             kind: FD_CONSOLE,
-            offset: 0,
+            file: stdout_file,
             aux: 0,
             readable: true,
             writable: true,
         };
         child.fds[2] = FdEntry {
             kind: FD_CONSOLE,
-            offset: 0,
+            file: stderr_file,
             aux: 0,
             readable: true,
             writable: true,
@@ -718,14 +773,17 @@ pub(crate) fn init_fds(child: &mut Child) {
 
 fn alloc_fd(child: &mut Child, kind: u8, aux: usize, readable: bool, writable: bool) -> i64 {
     if let Some(i) = find_free_fd(child) {
+        let Some(file) = alloc_open_file() else {
+            return -1;
+        };
         child.fds[i] = FdEntry {
             kind,
-            offset: 0,
+            file,
             aux,
             readable,
             writable,
         };
-        inc_fd_ref(child.fds[i]);
+        open_backing(child.fds[i]);
         return i as i64;
     }
     -1
@@ -749,13 +807,79 @@ fn find_free_proc(procs: &[Child; MAX_PROCS]) -> Option<usize> {
     None
 }
 
-fn inc_fd_refs(child: &Child) {
+fn retain_fd_refs(child: &Child) {
     for entry in child.fds {
-        inc_fd_ref(entry);
+        retain_open_file(entry);
     }
 }
 
-fn inc_fd_ref(entry: FdEntry) {
+fn alloc_open_file() -> Option<usize> {
+    unsafe {
+        let mut i = 0;
+        while i < MAX_OPEN_FILES {
+            if !OPEN_FILES[i].used {
+                OPEN_FILES[i] = OpenFile {
+                    used: true,
+                    refs: 1,
+                    offset: 0,
+                };
+                return Some(i);
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+fn retain_open_file(entry: FdEntry) {
+    unsafe {
+        if entry.file < MAX_OPEN_FILES && OPEN_FILES[entry.file].used {
+            OPEN_FILES[entry.file].refs = OPEN_FILES[entry.file].refs.saturating_add(1);
+        }
+    }
+}
+
+fn release_open_file(entry: FdEntry) -> bool {
+    unsafe {
+        if entry.file >= MAX_OPEN_FILES || !OPEN_FILES[entry.file].used {
+            return false;
+        }
+        if OPEN_FILES[entry.file].refs > 1 {
+            OPEN_FILES[entry.file].refs -= 1;
+            return false;
+        }
+        OPEN_FILES[entry.file] = OpenFile::closed();
+        true
+    }
+}
+
+fn close_open_file(file: usize) {
+    unsafe {
+        if file < MAX_OPEN_FILES {
+            OPEN_FILES[file] = OpenFile::closed();
+        }
+    }
+}
+
+fn fd_offset(entry: FdEntry) -> Option<usize> {
+    unsafe {
+        if entry.file < MAX_OPEN_FILES && OPEN_FILES[entry.file].used {
+            Some(OPEN_FILES[entry.file].offset)
+        } else {
+            None
+        }
+    }
+}
+
+fn advance_fd_offset(entry: FdEntry, by: usize) {
+    unsafe {
+        if entry.file < MAX_OPEN_FILES && OPEN_FILES[entry.file].used {
+            OPEN_FILES[entry.file].offset = OPEN_FILES[entry.file].offset.saturating_add(by);
+        }
+    }
+}
+
+fn open_backing(entry: FdEntry) {
     unsafe {
         match entry.kind {
             FD_PIPE_READ if entry.aux < MAX_PIPES => PIPES[entry.aux].readers += 1,
@@ -855,7 +979,9 @@ fn fs_read_file(child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
         if node >= MAX_FS_NODES || !FS_NODES[node].used {
             return -1;
         }
-        let offset = child.fds[fd].offset;
+        let Some(offset) = fd_offset(child.fds[fd]) else {
+            return -1;
+        };
         let size = fs_node_size(node);
         if offset >= size {
             return 0;
@@ -869,7 +995,7 @@ fn fs_read_file(child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
         if !ok {
             return -1;
         }
-        child.fds[fd].offset += n;
+        advance_fd_offset(child.fds[fd], n);
         n as i64
     }
 }
@@ -893,7 +1019,10 @@ fn fs_read_dir(child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
     let node = child.fds[fd].aux;
     let mut done = 0usize;
     while done < len {
-        let off = child.fds[fd].offset + done;
+        let Some(base_offset) = fd_offset(child.fds[fd]) else {
+            return -1;
+        };
+        let off = base_offset + done;
         let mut ent = [0u8; 16];
         if !dirent_at(node, off / 16, &mut ent) {
             break;
@@ -905,7 +1034,7 @@ fn fs_read_dir(child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
         }
         done += n;
     }
-    child.fds[fd].offset += done;
+    advance_fd_offset(child.fds[fd], done);
     done as i64
 }
 
