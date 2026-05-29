@@ -19,6 +19,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 KERNEL_ELF="${ROOT_DIR}/target/riscv64gc-unknown-none-elf/release/kernel"
 PACKED_IMAGE="${ROOT_DIR}/images/sel4test-driver-image-riscv-qemu-riscv-virt"
+SMP="${SMP:-1}"
 
 MODE="${MODE:-}"
 if [[ -z "${MODE}" ]]; then
@@ -38,7 +39,7 @@ case "${MODE}" in
         exec qemu-system-riscv64 \
             -machine virt \
             -cpu rv64 \
-            -smp 1 \
+            -smp "${SMP}" \
             -m 128M \
             -nographic \
             -bios none \
@@ -54,7 +55,7 @@ case "${MODE}" in
         exec qemu-system-riscv64 \
             -machine virt \
             -cpu rv64 \
-            -smp 1 \
+            -smp "${SMP}" \
             -m 3072 \
             -nographic \
             -bios none \

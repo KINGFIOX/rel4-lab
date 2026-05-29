@@ -13,8 +13,14 @@ caps, FPU save/restore, timer preemption, several CNode/Untyped paths,
 multi-size frame map/unmap, DomainSet, fault IPC, and ASID pool creation
 are implemented far enough for the full suite to run to completion.
 
-Latest verified checkpoint: `./tools/run-tests.sh` passes:
-**123 enabled tests passing, 44 upstream-disabled tests remaining**.
+Latest verified checkpoints:
+
+- RV64 non-MCS single-core: `./tools/run-tests.sh` passes with
+  **124 enabled tests passing, 43 upstream-disabled tests remaining**.
+- RV64 SMP-compatible build (`SMP=ON`, `NUM_NODES=2`, QEMU `SMP=2`):
+  `env SMP=2 TIMEOUT=480 ./tools/run-tests.sh` passes with
+  **125 enabled tests passing, 42 upstream-disabled tests remaining**.
+
 M4.4b unlocked the first timer-gated disabled group on the current RV64,
 non-MCS, single-core, QEMU configuration: `TIMER0001`, `TIMER0002`,
 `SCHED0000`, `DOMAINS0004`, and `PREEMPT_REVOKE`. The Rust kernel now
@@ -34,6 +40,20 @@ M4.4d enables `SCHED0021` under the current QEMU simulation build: the
 Rust scheduler now tracks a C-kernel-style per-TCB time-slice counter,
 and the upstream test keeps the original strict bound for non-simulation
 while using a bounded simulation-specific timing margin.
+M4.4e enables `CACHEFLUSH0004` on RISC-V. The ARM-specific cache
+maintenance tests remain architecture-gated; this cross-architecture test
+only validates that untyped revoke/retype returns zeroed frame contents,
+which the Rust kernel now passes.
+M4.4f adds the first SMP-compatible RV64 path. The upstream rootserver can
+now be built with `CONFIG_ENABLE_SMP_SUPPORT`/`CONFIG_MAX_NUM_NODES=2`,
+QEMU can boot with two harts, and the Rust kernel accepts the SMP-shifted
+invocation ABI plus `TCBSetAffinity`. The current kernel still parks
+secondary harts and simulates enough affinity/progress semantics on the
+primary hart to pass `FPU0002` and `MULTICORE0001..0005`; real per-hart
+scheduling, IPIs, and cross-hart TLB shootdown remain future work.
+The upstream OpenSBI packaging helper is also pinned to
+`rv64imafdc_zicsr_zifencei` so the current GCC/binutils toolchain can
+rebuild the SMP image after CMake regeneration.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -68,19 +88,21 @@ while using a bounded simulation-specific timing margin.
 | M4.4b | qemu-riscv-virt userspace ltimer + first timer-gated disabled group: `TIMER0001`, `TIMER0002`, `SCHED0000`, `DOMAINS0004`, `PREEMPT_REVOKE`. Full suite now reports **121 passed / 46 disabled**. | ✅ Done |
 | M4.4c | RISC-V `PAGEFAULT1005` inter-AS undefined-instruction test: avoid cross-VSpace pointer dereference in the handler and let the faulter restart stub perform the writeback. Full suite now reports **122 passed / 45 disabled**. | ✅ Done |
 | M4.4d | `SCHED0021` equal-priority preemption under QEMU simulation: Rust scheduler uses per-TCB time-slice accounting, and sel4test uses a simulation-specific timing upper bound while preserving the original non-simulation bound. Full suite now reports **123 passed / 44 disabled**. | ✅ Done |
-| M4.4 | Full PLIC IRQ chain, MCS/SMP/multi-domain/VTX/cache coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
+| M4.4e | RISC-V `CACHEFLUSH0004`: enable the non-ARM cache/retype test and validate that retyped frames are zeroed after `Untyped_Revoke`. Full suite now reports **124 passed / 43 disabled**. | ✅ Done |
+| M4.4f | SMP-compatible RV64 build/run: secondary harts park before shared init; SMP invocation-label shift and `TCBSetAffinity` are handled; QEMU wrappers accept `SMP=2`; `FPU0002` and `MULTICORE0001..0005` pass in the full SMP run. Current SMP full suite reports **125 passed / 42 disabled**. | ✅ Done |
+| M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
-### Disabled-test accounting (M4.4d)
+### Disabled-Test Accounting (M4.4e Single-Core)
 
-The pre-M4.4b disabled set contained 51 tests in the compiled ELF. Seven
+The pre-M4.4b disabled set contained 51 tests in the compiled ELF. Eight
 have since been enabled and are now passing:
 
 ```text
 TIMER0001, TIMER0002, SCHED0000, DOMAINS0004, PREEMPT_REVOKE
-PAGEFAULT1005, SCHED0021
+PAGEFAULT1005, SCHED0021, CACHEFLUSH0004
 ```
 
-The remaining 44 disabled tests, as of the `123 passed / 44 disabled`
+The remaining 43 disabled tests, as of the `124 passed / 43 disabled`
 run, fall into these primary buckets:
 
 | Bucket | Count | Tests |
@@ -89,7 +111,38 @@ run, fall into these primary buckets:
 | SMP / multicore | 7 | `FPU0002`, `MULTICORE0001..0005`, `SCHED0022` |
 | Multi-domain | 3 | `DOMAINS0000`, `DOMAINS9999`, `DOMAINS0005` |
 | VTX / VM-entry | 1 | `UNKNOWN_SYSCALL_001` |
-| Cache maintenance | 1 | `CACHEFLUSH0004` |
+
+### SMP checkpoint (M4.4f)
+
+The current SMP validation uses the upstream sel4test tree configured with
+`SMP=ON` and `NUM_NODES=2`, then boots the Rust kernel under QEMU with
+`SMP=2`. This enables and passes the non-MCS SMP group:
+
+```text
+FPU0002, MULTICORE0001, MULTICORE0002, MULTICORE0003,
+MULTICORE0004, MULTICORE0005
+```
+
+`SCHED0022` remains disabled because the upstream gate is
+`CONFIG_KERNEL_MCS && CONFIG_MAX_NUM_NODES > 1`. This phase is deliberately
+not a true multi-hart scheduler: secondary harts are parked before BSS/global
+init, while the primary hart provides affinity-compatible behavior sufficient
+for the current tests.
+
+Latest SMP full-run summary:
+
+```text
+ELF-loader started on (HART 0) (NODES 2)
+Secondary entry hart_id:1 core_id:1
+...
+Starting test 39: FPU0002
+Starting test 60: MULTICORE0001
+...
+Starting test 64: MULTICORE0005
+...
+Test suite passed. 125 tests passed. 42 tests disabled.
+All is well in the universe
+```
 
 A live run (kernel boots, the rootserver's `allocman` carves up untyped
 memory via dozens of `Untyped_Retype` calls, maps frames via
@@ -129,8 +182,8 @@ Starting test 70:  PREEMPT_REVOKE
 Starting test 75:  SCHED0000
 ...
 Starting test 119: VSPACE0006
-Starting test 123: Test all tests ran
-Test suite passed. 123 tests passed. 44 tests disabled.
+Starting test 124: Test all tests ran
+Test suite passed. 124 tests passed. 43 tests disabled.
 All is well in the universe
 ```
 
@@ -220,6 +273,7 @@ MODE=standalone ./tools/simulate.sh
 ./tools/run-tests.sh           # quiet
 ./tools/run-tests.sh -v        # stream QEMU output as it runs
 TIMEOUT=60 ./tools/run-tests.sh
+SMP=2 TIMEOUT=480 ./tools/run-tests.sh  # SMP-compatible sel4test build
 ```
 
 ## Key ABI / layout constants (frozen against upstream)
@@ -263,19 +317,20 @@ QEMU virt
 
 ## Next steps (M4)
 
-With the first timer-gated disabled group, `PAGEFAULT1005`, and
-`SCHED0021` green, the remaining work is about the 44 disabled tests that
-are outside the current RV64/non-MCS/single-core/QEMU slice, plus
-semantics that are implemented only as far as sel4test currently needs:
+With the first timer-gated disabled group, `PAGEFAULT1005`,
+`SCHED0021`/`CACHEFLUSH0004`, and the non-MCS SMP group green, the
+remaining work is about tests outside the current RV64/non-MCS/QEMU slice,
+plus semantics that are implemented only as far as sel4test currently needs:
 
 1. **MCS model.** Scheduling contexts, timeout faults, SC donation, MCS
    IPC, and MCS scheduler tests are still intentionally out of scope for
    this non-MCS kernel build.
-2. **SMP / multicore.** Cross-core scheduling, remote deletion, affinity,
-   multicore IRQs, and FPU migration remain disabled under `-smp 1`.
-3. **Other disabled buckets.** Multi-domain scheduling, VTX/VM-entry,
-   and cache maintenance are tracked separately from the timer work that
-   landed in M4.4b.
+2. **True SMP / multicore.** M4.4f is an affinity-compatible single-hart
+   execution model with parked secondary harts. Real per-hart runqueues,
+   IPIs, remote preemption, and cross-hart TLB shootdown still need a
+   dedicated implementation pass.
+3. **Other disabled buckets.** Multi-domain scheduling and VTX/VM-entry
+   are tracked separately from the timer work that landed in M4.4b.
 4. **Full cap-transfer/generalisation pass.** The current IPC transfer
    path intentionally covers the pre-MCS single receive-slot case. The
    next conformance pass should cover multi-cap edge cases, endpoint

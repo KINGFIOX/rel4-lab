@@ -225,6 +225,7 @@ pub unsafe fn map_user_4k(root: *mut PageTable, vaddr: usize, paddr: usize, mut 
     unsafe {
         (*pt).entries[i] = Pte::leaf(paddr as u64, flags);
     }
+    csr::sfence_vma_va(vaddr);
 }
 
 #[inline]
@@ -300,6 +301,7 @@ unsafe fn map_user_leaf(
     unsafe {
         (*pt).entries[i] = Pte::leaf(paddr as u64, flags);
     }
+    csr::sfence_vma_va(vaddr);
 }
 
 /// Remove the 4 KiB user mapping at `vaddr` if present and trim any

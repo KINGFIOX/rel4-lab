@@ -9,6 +9,7 @@
 
 use core::cell::UnsafeCell;
 use core::ptr;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::abi::types::MessageInfo;
 use crate::api::cspace;
@@ -19,6 +20,35 @@ use crate::object::cap::{Cap, CapTag};
 use crate::object::cnode::{Cte, cnode_at};
 use crate::object::mdb::MdbNode;
 use crate::object::tcb::{self, Tcb, ThreadState};
+
+const LABEL_SHIFT_UNKNOWN: usize = usize::MAX;
+static INVOCATION_LABEL_SHIFT: AtomicUsize = AtomicUsize::new(LABEL_SHIFT_UNKNOWN);
+
+#[inline]
+fn observe_label_shift(shift: usize) {
+    let _ = INVOCATION_LABEL_SHIFT.compare_exchange(
+        LABEL_SHIFT_UNKNOWN,
+        shift,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+}
+
+#[inline]
+fn current_label_shift() -> u64 {
+    match INVOCATION_LABEL_SHIFT.load(Ordering::Acquire) {
+        LABEL_SHIFT_UNKNOWN => 0,
+        shift => shift as u64,
+    }
+}
+
+#[inline]
+fn label_matches(label_id: u64, non_smp_label: u64) -> bool {
+    match INVOCATION_LABEL_SHIFT.load(Ordering::Acquire) {
+        LABEL_SHIFT_UNKNOWN => label_id == non_smp_label || label_id == non_smp_label + 1,
+        shift => label_id == non_smp_label + shift as u64,
+    }
+}
 
 /// Object type IDs as defined by `seL4_ObjectType` (`api_object` +
 /// `_mode_object` + `_object` for RISC-V).
@@ -41,8 +71,9 @@ mod obj {
 /// we actually handle.
 mod label {
     pub const UNTYPED_RETYPE: u64 = 1;
-    // Non-MCS ordering from `libsel4/include/sel4/invocation.h`. The
-    // TCB block occupies labels 2..=16; CNode ops begin at 17.
+    // Non-MCS, non-SMP ordering from `libsel4/include/sel4/invocation.h`.
+    // When CONFIG_ENABLE_SMP_SUPPORT is enabled, TCBSetAffinity is inserted
+    // at label 15 and every later non-arch/arch label shifts by +1.
     pub const CNODE_REVOKE: u64 = 17;
     pub const CNODE_DELETE: u64 = 18;
     pub const CNODE_CANCEL_BADGED_SENDS: u64 = 19;
@@ -302,8 +333,24 @@ pub fn handle_frame(
     const RISCV_PAGE_UNMAP: u64 = 36;
     const RISCV_PAGE_GET_ADDR: u64 = 37;
 
-    match label_id {
-        RISCV_PAGE_MAP => {
+    let is_page_map = label_id == RISCV_PAGE_MAP || (label_id == RISCV_PAGE_MAP + 1 && length >= 3);
+    let is_page_unmap = if label_id == RISCV_PAGE_UNMAP && length == 0 {
+        observe_label_shift(0);
+        true
+    } else if label_id == RISCV_PAGE_UNMAP + 1 && length == 0 && current_label_shift() == 1 {
+        true
+    } else {
+        false
+    };
+    let is_page_get_addr =
+        label_id == RISCV_PAGE_GET_ADDR && length == 0 && current_label_shift() == 0;
+
+    if is_page_map {
+        observe_label_shift((label_id - RISCV_PAGE_MAP) as usize);
+    }
+
+    match () {
+        _ if is_page_map => {
             if length < 3 {
                 return Err(SyscallError::TruncatedMessage);
             }
@@ -350,7 +397,7 @@ pub fn handle_frame(
             }
             Ok(())
         }
-        RISCV_PAGE_UNMAP => {
+        _ if is_page_unmap => {
             let frame_va = cap.frame_mapped_addr();
             if frame_va == 0 {
                 return Ok(());
@@ -378,7 +425,7 @@ pub fn handle_frame(
             }
             Ok(())
         }
-        RISCV_PAGE_GET_ADDR => {
+        _ if is_page_get_addr => {
             // Return the frame's physical address in mr0.
             let frame_pa = kva_to_pa(cap.frame_base_ptr());
             unsafe {
@@ -414,9 +461,23 @@ pub fn handle_page_table(
     const RISCV_PAGE_TABLE_MAP: u64 = 33;
     const RISCV_PAGE_TABLE_UNMAP: u64 = 34;
 
-    match label_id {
-        RISCV_PAGE_TABLE_MAP => Ok(()),
-        RISCV_PAGE_TABLE_UNMAP => Ok(()),
+    let is_map =
+        label_id == RISCV_PAGE_TABLE_MAP || (label_id == RISCV_PAGE_TABLE_MAP + 1 && _length >= 2);
+    let is_unmap = if label_id == RISCV_PAGE_TABLE_UNMAP && _length == 0 {
+        observe_label_shift(0);
+        true
+    } else if label_id == RISCV_PAGE_TABLE_UNMAP + 1 && _length == 0 && current_label_shift() == 1 {
+        true
+    } else {
+        false
+    };
+    if is_map {
+        observe_label_shift((label_id - RISCV_PAGE_TABLE_MAP) as usize);
+    }
+
+    match () {
+        _ if is_map => Ok(()),
+        _ if is_unmap => Ok(()),
         _ => {
             let _ = label_id;
             Err(SyscallError::IllegalOperation)
@@ -432,9 +493,10 @@ pub fn handle_asid_control(
     uc: &UserContext,
 ) -> Result<(), SyscallError> {
     const RISCV_ASID_CONTROL_MAKE_POOL: u64 = 38;
-    if label_id != RISCV_ASID_CONTROL_MAKE_POOL {
+    if !label_matches(label_id, RISCV_ASID_CONTROL_MAKE_POOL) {
         return Err(SyscallError::IllegalOperation);
     }
+    observe_label_shift((label_id - RISCV_ASID_CONTROL_MAKE_POOL) as usize);
     if length < 2 {
         return Err(SyscallError::TruncatedMessage);
     }
@@ -497,9 +559,10 @@ pub fn handle_asid_pool(
     _uc: &UserContext,
 ) -> Result<(), SyscallError> {
     const RISCV_ASID_POOL_ASSIGN: u64 = 39;
-    if label_id != RISCV_ASID_POOL_ASSIGN {
+    if !label_matches(label_id, RISCV_ASID_POOL_ASSIGN) {
         return Err(SyscallError::IllegalOperation);
     }
+    observe_label_shift((label_id - RISCV_ASID_POOL_ASSIGN) as usize);
 
     let vspace_cptr = read_extra_cap(thread, 0);
     let (vspace_cap, vspace_slot) =
@@ -533,13 +596,15 @@ pub fn handle_irq_control(
     uc: &mut UserContext,
 ) -> Result<(), SyscallError> {
     let (irq, index, depth) = match label_id {
-        label::IRQ_ISSUE_IRQ_HANDLER => {
+        id if label_matches(id, label::IRQ_ISSUE_IRQ_HANDLER) => {
+            observe_label_shift((id - label::IRQ_ISSUE_IRQ_HANDLER) as usize);
             if length < 3 {
                 return Err(SyscallError::TruncatedMessage);
             }
             (uc.regs[reg::A2], uc.regs[reg::A3], uc.regs[reg::A4] & 0xff)
         }
-        label::RISCV_IRQ_ISSUE_IRQ_HANDLER_TRIGGER => {
+        id if label_matches(id, label::RISCV_IRQ_ISSUE_IRQ_HANDLER_TRIGGER) => {
+            observe_label_shift((id - label::RISCV_IRQ_ISSUE_IRQ_HANDLER_TRIGGER) as usize);
             if length < 4 {
                 return Err(SyscallError::TruncatedMessage);
             }
@@ -585,8 +650,12 @@ pub fn handle_irq_handler(
 ) -> Result<(), SyscallError> {
     let irq = cap.irq_handler_irq();
     match label_id {
-        label::IRQ_ACK => Ok(()),
-        label::IRQ_SET_HANDLER => {
+        id if label_matches(id, label::IRQ_ACK) => {
+            observe_label_shift((id - label::IRQ_ACK) as usize);
+            Ok(())
+        }
+        id if label_matches(id, label::IRQ_SET_HANDLER) => {
+            observe_label_shift((id - label::IRQ_SET_HANDLER) as usize);
             let ntfn_cptr = read_extra_cap(thread, 0);
             let (ntfn_cap, ntfn_slot) = cspace::lookup_cap(thread, ntfn_cptr)
                 .map_err(|_| SyscallError::InvalidCapability)?;
@@ -596,7 +665,8 @@ pub fn handle_irq_handler(
             unsafe { crate::object::irq::set_notification(irq, ntfn_cap, ntfn_slot) };
             Ok(())
         }
-        label::IRQ_CLEAR_HANDLER => {
+        id if label_matches(id, label::IRQ_CLEAR_HANDLER) => {
+            observe_label_shift((id - label::IRQ_CLEAR_HANDLER) as usize);
             unsafe { crate::object::irq::clear_notification(irq) };
             Ok(())
         }
@@ -618,9 +688,10 @@ pub fn handle_domain(
 ) -> Result<(), SyscallError> {
     const DOMAIN_SET_SET: u64 = 30;
 
-    if label_id != DOMAIN_SET_SET {
+    if !label_matches(label_id, DOMAIN_SET_SET) {
         return Err(SyscallError::IllegalOperation);
     }
+    observe_label_shift((label_id - DOMAIN_SET_SET) as usize);
     if length < 1 {
         return Err(SyscallError::TruncatedMessage);
     }
@@ -687,6 +758,7 @@ pub fn handle_thread(
     const TCB_RESUME: u64 = 12;
     const TCB_BIND_NOTIFICATION: u64 = 13;
     const TCB_UNBIND_NOTIFICATION: u64 = 14;
+    const TCB_SET_AFFINITY: u64 = 15;
     const TCB_SET_TLS_BASE: u64 = 15;
     const TCB_SET_FLAGS: u64 = 16;
 
@@ -1086,7 +1158,31 @@ pub fn handle_thread(
             Ok(())
         }
 
-        TCB_SET_TLS_BASE => {
+        id if id == TCB_SET_AFFINITY && current_label_shift() == 1 => {
+            if length < 1 {
+                return Err(SyscallError::TruncatedMessage);
+            }
+            let affinity = uc.regs[reg::A2];
+            if affinity > 255 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            unsafe {
+                tcb::set_affinity(tcb_ptr, affinity as u8);
+                if affinity != 0 {
+                    let cur = tcb::current();
+                    if !cur.is_null() {
+                        let cur_prio = (*cur).priority;
+                        if (*tcb_ptr).priority < cur_prio {
+                            tcb::set_priority(tcb_ptr, cur_prio);
+                        }
+                        tcb::rotate_to_tail(cur);
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        id if id == TCB_SET_TLS_BASE + current_label_shift() => {
             if length < 1 {
                 return Err(SyscallError::TruncatedMessage);
             }
@@ -1094,7 +1190,7 @@ pub fn handle_thread(
             Ok(())
         }
 
-        TCB_SET_FLAGS => {
+        id if id == TCB_SET_FLAGS + current_label_shift() => {
             // libsel4: tag = MessageInfo(_, 0, 0, 2). mr0 = clear, mr1 = set.
             if length < 2 {
                 return Err(SyscallError::TruncatedMessage);
@@ -1178,15 +1274,42 @@ pub fn handle_cnode(
     uc: &mut UserContext,
 ) -> Result<(), SyscallError> {
     match label_id {
-        label::CNODE_REVOKE => cnode_op_revoke(dest_root_cap, length, uc),
-        label::CNODE_DELETE => cnode_op_delete(dest_root_cap, length, uc),
-        label::CNODE_COPY => cnode_op_copy_or_mint(thread, dest_root_cap, length, uc, false),
-        label::CNODE_MINT => cnode_op_copy_or_mint(thread, dest_root_cap, length, uc, true),
-        label::CNODE_MOVE => cnode_op_move_or_mutate(thread, dest_root_cap, length, uc, false),
-        label::CNODE_MUTATE => cnode_op_move_or_mutate(thread, dest_root_cap, length, uc, true),
-        label::CNODE_CANCEL_BADGED_SENDS => cnode_op_cancel_badged_sends(dest_root_cap, length, uc),
-        label::CNODE_ROTATE => cnode_op_rotate(thread, dest_root_cap, length, uc),
-        label::CNODE_SAVE_CALLER => cnode_op_save_caller(thread, dest_root_cap, length, uc),
+        id if label_matches(id, label::CNODE_REVOKE) => {
+            observe_label_shift((id - label::CNODE_REVOKE) as usize);
+            cnode_op_revoke(dest_root_cap, length, uc)
+        }
+        id if label_matches(id, label::CNODE_DELETE) => {
+            observe_label_shift((id - label::CNODE_DELETE) as usize);
+            cnode_op_delete(dest_root_cap, length, uc)
+        }
+        id if label_matches(id, label::CNODE_COPY) => {
+            observe_label_shift((id - label::CNODE_COPY) as usize);
+            cnode_op_copy_or_mint(thread, dest_root_cap, length, uc, false)
+        }
+        id if label_matches(id, label::CNODE_MINT) => {
+            observe_label_shift((id - label::CNODE_MINT) as usize);
+            cnode_op_copy_or_mint(thread, dest_root_cap, length, uc, true)
+        }
+        id if label_matches(id, label::CNODE_MOVE) => {
+            observe_label_shift((id - label::CNODE_MOVE) as usize);
+            cnode_op_move_or_mutate(thread, dest_root_cap, length, uc, false)
+        }
+        id if label_matches(id, label::CNODE_MUTATE) => {
+            observe_label_shift((id - label::CNODE_MUTATE) as usize);
+            cnode_op_move_or_mutate(thread, dest_root_cap, length, uc, true)
+        }
+        id if label_matches(id, label::CNODE_CANCEL_BADGED_SENDS) => {
+            observe_label_shift((id - label::CNODE_CANCEL_BADGED_SENDS) as usize);
+            cnode_op_cancel_badged_sends(dest_root_cap, length, uc)
+        }
+        id if label_matches(id, label::CNODE_ROTATE) => {
+            observe_label_shift((id - label::CNODE_ROTATE) as usize);
+            cnode_op_rotate(thread, dest_root_cap, length, uc)
+        }
+        id if label_matches(id, label::CNODE_SAVE_CALLER) => {
+            observe_label_shift((id - label::CNODE_SAVE_CALLER) as usize);
+            cnode_op_save_caller(thread, dest_root_cap, length, uc)
+        }
         _ => {
             let _ = label_id;
             Err(SyscallError::IllegalOperation)

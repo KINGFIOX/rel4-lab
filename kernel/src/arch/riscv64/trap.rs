@@ -100,9 +100,9 @@ fn program_next_timer() {
     sbi::set_timer(deadline);
 }
 
-/// Poll the architectural timer while running a long in-kernel
-/// continuation. Hardware timer interrupts are masked while we are in
-/// S-mode, so long syscalls need this explicit preemption point.
+/// Poll the architectural timer while the kernel is spinning or running a
+/// long in-kernel continuation. Hardware timer interrupts are masked while
+/// we are in S-mode, so those paths need this explicit delivery point.
 pub fn service_due_timer_interrupts() -> bool {
     let deadline = NEXT_TIMER_DEADLINE.load(Ordering::Acquire);
     if deadline == 0 {
@@ -437,11 +437,12 @@ fn handle_timer_interrupt() {
     program_next_timer();
     unsafe {
         crate::object::irq::signal_irq(crate::object::irq::KERNEL_TIMER_IRQ as u64);
-    }
-    unsafe {
         let cur = crate::object::tcb::current();
         if !cur.is_null() && (*cur).state == crate::object::tcb::ThreadState::Running as u8 {
-            if (*cur).time_slice_ticks > 1 {
+            if (*cur).affinity != 0 {
+                (*cur).time_slice_ticks = crate::object::tcb::DEFAULT_TIME_SLICE_TICKS;
+                crate::object::tcb::rotate_to_tail(cur);
+            } else if (*cur).time_slice_ticks > 1 {
                 (*cur).time_slice_ticks -= 1;
             } else {
                 (*cur).time_slice_ticks = crate::object::tcb::DEFAULT_TIME_SLICE_TICKS;

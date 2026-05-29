@@ -58,7 +58,6 @@ pub fn set_current(tcb: *mut Tcb) -> *mut Tcb {
 
 pub const NUM_PRIORITIES: usize = 256;
 pub const DEFAULT_TIME_SLICE_TICKS: u8 = 5;
-
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct Queue {
@@ -231,8 +230,9 @@ pub struct Tcb {
     pub priority: u8,
     pub mcp: u8,
     pub domain: u8,
+    pub affinity: u8,
     pub time_slice_ticks: u8,
-    pub _sched_pad: [u8; 3],
+    pub _sched_pad: [u8; 2],
     pub flags: u32,
 
     /// Cap roots. The full caps (not just pointers) so that the future
@@ -324,8 +324,9 @@ impl Tcb {
             priority: 0,
             mcp: 0,
             domain: 0,
+            affinity: 0,
             time_slice_ticks: 0,
-            _sched_pad: [0; 3],
+            _sched_pad: [0; 2],
             flags: 0,
             cspace_cap: Cap::null(),
             vspace_cap: Cap::null(),
@@ -481,6 +482,15 @@ pub unsafe fn set_flags(tcb: *mut Tcb, flags: u32) {
     }
     unsafe {
         (*tcb).flags = flags;
+    }
+}
+
+pub unsafe fn set_affinity(tcb: *mut Tcb, affinity: u8) {
+    if tcb.is_null() {
+        return;
+    }
+    unsafe {
+        (*tcb).affinity = affinity;
     }
 }
 

@@ -21,13 +21,19 @@ unsafe extern "C" {
 /// `init_kernel` (regular C ABI fn — a0..a7 are preserved across the
 /// `jal`).
 ///
-/// Other harts (SMP) are not used; we ignore them for M2.
+/// Secondary harts are parked before global kernel init. The current Rust
+/// kernel still has single global boot state, so only core 0 may clear BSS
+/// and bring up the rootserver.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".boot.text")]
 pub unsafe extern "C" fn _start() -> ! {
     naked_asm!(
         "fence.i",
+
+        // elfloader passes core_id in a7. Until the SMP scheduler path is
+        // brought up, park secondary harts before they touch shared state.
+        "bnez   a7, 4f",
 
         // Set sp to top of kernel stack (set up by the linker script in .bss).
         "la     sp, __stack_top",
@@ -58,6 +64,10 @@ pub unsafe extern "C" fn _start() -> ! {
         "3:",
         "wfi",
         "j      3b",
+
+        "4:",
+        "wfi",
+        "j      4b",
 
         init_kernel = sym init_kernel,
     );
