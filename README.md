@@ -708,8 +708,44 @@ The default full-suite log dropped from 621082 lines in
 `target/xv6-m618-usertests-full.log` to 17157 lines in
 `target/xv6-m619-usertests-full.log`.
 
-Remaining fs-server work is cleaner decomposition of the now-large
-`xv6-fs-server` implementation.
+M6.20 starts decomposing `xv6-fs-server` without changing behavior. Disk/runtime
+filesystem types and global state moved to `types.rs`; transaction, redo-log,
+disk IPC, and shared-block helpers moved to `block.rs`. This reduced
+`main.rs` from 1772 to 1322 lines while keeping the same fs.img-backed service
+topology.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m620-echo.log ./tools/run-xv6-user.sh echo split fs server
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m620-usertests-full.log ./tools/run-xv6-user.sh usertests
+```
+
+The full run log `target/xv6-m620-usertests-full.log` ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`.
+
+M6.21 continues the same decomposition by moving raw inode IO, open-reference
+tracking, inode allocation/free, truncation, data writes, bitmap allocation,
+and direct/indirect block mapping into `inode.rs`. `main.rs` now stays focused
+on IPC handlers plus directory/path operations and is down to 957 lines.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m621-echo.log ./tools/run-xv6-user.sh echo inode split
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m621-usertests-full.log ./tools/run-xv6-user.sh usertests
+```
+
+The full run log `target/xv6-m621-usertests-full.log` ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`.
+
+Remaining fs-server work is further decomposition of directory/path resolution,
+file operation handlers, and syscall dispatch so each server module has a clear
+ownership boundary.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -780,6 +816,8 @@ Remaining fs-server work is cleaner decomposition of the now-large
 | M6.17 | Host mirror removal: `xv6-host` no longer has in-memory filesystem nodes, directory entries, file blocks, cwd strings, README pseudo-file, or embedded exec catalog fallback. All filesystem objects and `exec()` images come from `xv6-fs-server -> virtio-disk-server -> fs.img`; no-host-mirror smoke and full `usertests` pass. | ✅ Done |
 | M6.18 | xv6 redo-log transaction layer in `xv6-fs-server`: mutating FS IPC operations use log absorption, commit through xv6's on-disk log header/data blocks, install logged home blocks, clear the header, and recover any committed log during `FS_OP_INIT`. Transaction smoke and full `usertests` pass. | ✅ Done |
 | M6.19 | Quieter default xv6 server logs: successful virtio block read/write traces are behind `XV6_TRACE_BLOCK_IO=1`, preserving error and startup logs while making smoke/full-suite logs inspectable. Full `usertests` still passes, and the default full-suite log drops from 621082 to 17157 lines. | ✅ Done |
+| M6.20 | First xv6-fs-server module split: disk/runtime FS types and statics moved to `types.rs`; transaction, redo-log, disk IPC, and shared-block helpers moved to `block.rs`. Full `usertests` still passes. | ✅ Done |
+| M6.21 | Inode-layer split: raw dinode IO, open-reference tracking, inode allocation/free, truncation, data writes, bitmap allocation, and direct/indirect block mapping moved to `inode.rs`. Full `usertests` still passes. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
