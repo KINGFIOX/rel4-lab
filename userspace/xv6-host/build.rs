@@ -14,6 +14,8 @@ fn main() {
     println!("cargo:rustc-link-arg-bin=xv6-host=-zmax-page-size=4096");
 
     println!("cargo:rerun-if-env-changed=XV6_PAYLOAD_ELF");
+    println!("cargo:rerun-if-env-changed=XV6_FS_SERVER_ELF");
+    println!("cargo:rerun-if-env-changed=XV6_DISK_SERVER_ELF");
     println!("cargo:rerun-if-env-changed=XV6_EXEC_CATALOG_RS");
     println!("cargo:rerun-if-env-changed=XV6_CONSOLE_INPUT");
     println!("cargo:rerun-if-env-changed=XV6_PAYLOAD_PROGRAM");
@@ -26,6 +28,24 @@ fn main() {
     });
     println!("cargo:rerun-if-changed={payload}");
     println!("cargo:rustc-env=XV6_PAYLOAD_ELF={payload}");
+
+    let fs_server = env::var("XV6_FS_SERVER_ELF").unwrap_or_else(|_| {
+        panic!(
+            "XV6_FS_SERVER_ELF must point to the xv6-fs-server ELF; \
+             use tools/build-xv6-user-rootserver.sh PROGRAM [ARG...]"
+        )
+    });
+    println!("cargo:rerun-if-changed={fs_server}");
+    println!("cargo:rustc-env=XV6_FS_SERVER_ELF={fs_server}");
+
+    let disk_server = env::var("XV6_DISK_SERVER_ELF").unwrap_or_else(|_| {
+        panic!(
+            "XV6_DISK_SERVER_ELF must point to the virtio-disk-server ELF; \
+             use tools/build-xv6-user-rootserver.sh PROGRAM [ARG...]"
+        )
+    });
+    println!("cargo:rerun-if-changed={disk_server}");
+    println!("cargo:rustc-env=XV6_DISK_SERVER_ELF={disk_server}");
 
     let catalog = env::var("XV6_EXEC_CATALOG_RS").unwrap_or_else(|_| {
         panic!(

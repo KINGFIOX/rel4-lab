@@ -41,6 +41,17 @@ pub(crate) fn create_child(
     fault_ep: u64,
 ) -> Child {
     let untyped = alloc.process_untyped(proc_slot);
+    create_child_from_untyped(alloc, proc_slot, pid, parent_pid, fault_ep, untyped)
+}
+
+pub(crate) fn create_child_from_untyped(
+    alloc: &mut Allocator,
+    proc_slot: usize,
+    pid: u64,
+    parent_pid: u64,
+    fault_ep: u64,
+    untyped: u64,
+) -> Child {
     let tcb = alloc.retype_one_from(untyped, OBJ_TCB, 0);
     let cnode = alloc.retype_one_from(untyped, OBJ_CAP_TABLE, CHILD_CNODE_BITS);
     let vspace = alloc.retype_one_from(untyped, OBJ_PAGE_TABLE, 0);
@@ -254,12 +265,38 @@ pub(crate) fn map_stack(alloc: &mut Allocator, child: &mut Child) {
 }
 
 pub(crate) fn start_child(child: &Child) {
+    start_child_with_a0(child, 0);
+}
+
+pub(crate) fn start_child_with_a0(child: &Child, a0: u64) {
+    start_child_with_a0_a1(child, a0, 0);
+}
+
+pub(crate) fn start_child_with_a0_a1(child: &Child, a0: u64, a1: u64) {
     let mut ctx = [0u64; USER_CONTEXT_WORDS];
     ctx[0] = child.entry;
     ctx[2] = child.heap_start;
-    ctx[16] = 0;
-    ctx[17] = 0;
+    ctx[16] = a0;
+    ctx[17] = a1;
     write_user_context(child.tcb, &ctx, true);
+}
+
+pub(crate) fn mint_cap_to_child(
+    child: &Child,
+    dst_cptr: u64,
+    src_cap: u64,
+    rights: u64,
+    badge: u64,
+) {
+    let mrs = [
+        dst_cptr,
+        CHILD_CNODE_BITS,
+        src_cap,
+        ROOT_CNODE_DEPTH,
+        rights,
+        badge,
+    ];
+    call_checked(child.cnode, LABEL_CNODE_MINT, &[ROOT_CNODE], &mrs);
 }
 
 pub(crate) fn map_fresh_child_page(
@@ -313,6 +350,46 @@ pub(crate) fn map_lazy_child_page(
         false,
         needs_zero,
     )
+}
+
+pub(crate) fn map_existing_child_frame(
+    alloc: &mut Allocator,
+    child: &Child,
+    frame_slot: u64,
+    child_va: u64,
+    writable: bool,
+    executable: bool,
+) -> u64 {
+    map_existing_frame(
+        alloc,
+        child.proc_slot,
+        child.pid,
+        frame_slot,
+        child.vspace,
+        child_va,
+        writable,
+        executable,
+        false,
+        false,
+    )
+}
+
+pub(crate) fn frame_paddr(frame_slot: u64) -> u64 {
+    let reply = unsafe {
+        sel4_call(
+            frame_slot,
+            msg_info(LABEL_RISCV_PAGE_GET_ADDRESS, 0, 0, 0),
+            &[],
+        )
+    };
+    let err = msg_label(reply.info);
+    if err != 0 {
+        log("xv6-host: Page_GetAddress failed err=");
+        print_u64(err);
+        log("\n");
+        halt_loop();
+    }
+    reply.mrs[0]
 }
 
 fn map_existing_frame(

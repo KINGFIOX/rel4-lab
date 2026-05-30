@@ -1,16 +1,19 @@
 use crate::consts::{
     LABEL_CNODE_COPY, LABEL_CNODE_DELETE, LABEL_CNODE_REVOKE, LABEL_UNTYPED_RETYPE, MAX_PROCS,
     MAX_RECYCLED_SLOTS, OBJ_UNTYPED, PROCESS_UNTYPED_BITS, PROCESS_UNTYPED_PARENT_BITS, ROOT_CNODE,
-    ROOT_CNODE_DEPTH,
+    ROOT_CNODE_DEPTH, VIRTIO_MMIO_BASE, VIRTIO_MMIO_SIZE,
 };
 use crate::sel4::call_checked;
 use crate::types::BootInfo;
-use crate::util::{halt_loop, log};
+use crate::util::{halt_loop, log, print_hex};
 
 pub(crate) struct Allocator {
     next_slot: u64,
     empty_end: u64,
     untyped_slot: u64,
+    device_untyped_slot: u64,
+    device_cursor_pa: u64,
+    device_top_pa: u64,
     process_untyped_slots: [u64; MAX_PROCS],
     recycled_len: usize,
 }
@@ -22,6 +25,9 @@ impl Allocator {
         let mut selected = 0;
         let mut process_parent = 0;
         let mut process_parent_bits = 0u8;
+        let mut device_untyped_slot = 0;
+        let mut device_cursor_pa = 0;
+        let mut device_top_pa = 0;
         let start = bi.untyped.start as usize;
         let end = bi.untyped.end as usize;
         let mut slot = bi.untyped.start;
@@ -38,6 +44,16 @@ impl Allocator {
                     process_parent_bits = desc.size_bits;
                 }
             }
+            if desc.is_device != 0 {
+                let top = desc.paddr.saturating_add(1u64 << desc.size_bits);
+                if desc.paddr <= VIRTIO_MMIO_BASE
+                    && top >= VIRTIO_MMIO_BASE.saturating_add(VIRTIO_MMIO_SIZE)
+                {
+                    device_untyped_slot = slot;
+                    device_cursor_pa = desc.paddr;
+                    device_top_pa = top;
+                }
+            }
             slot += 1;
         }
         if selected == 0 {
@@ -48,10 +64,19 @@ impl Allocator {
             log("xv6-host: no process untyped parent\n");
             halt_loop();
         }
+        if device_untyped_slot == 0 {
+            log("xv6-host: no virtio-mmio device untyped for pa=");
+            print_hex(VIRTIO_MMIO_BASE);
+            log("\n");
+            halt_loop();
+        }
         let mut alloc = Self {
             next_slot: bi.empty.start,
             empty_end: bi.empty.end,
             untyped_slot: selected,
+            device_untyped_slot,
+            device_cursor_pa,
+            device_top_pa,
             process_untyped_slots: [0; MAX_PROCS],
             recycled_len: 0,
         };
@@ -91,6 +116,27 @@ impl Allocator {
         let mrs = [ty, user_size, 0, 0, slot, 1];
         call_checked(untyped_slot, LABEL_UNTYPED_RETYPE, &[ROOT_CNODE], &mrs);
         slot
+    }
+
+    pub(crate) fn retype_device_4k_at(&mut self, paddr: u64) -> u64 {
+        if paddr & (crate::consts::PAGE_SIZE - 1) != 0
+            || paddr < self.device_cursor_pa
+            || paddr.saturating_add(crate::consts::PAGE_SIZE) > self.device_top_pa
+        {
+            log("xv6-host: invalid device frame request pa=");
+            print_hex(paddr);
+            log("\n");
+            halt_loop();
+        }
+        while self.device_cursor_pa < paddr {
+            let remaining = paddr - self.device_cursor_pa;
+            let size_bits = largest_aligned_chunk_bits(self.device_cursor_pa, remaining);
+            let _ = self.retype_one_from(self.device_untyped_slot, OBJ_UNTYPED, size_bits as u64);
+            self.device_cursor_pa += 1u64 << size_bits;
+        }
+        let frame = self.retype_one_from(self.device_untyped_slot, crate::consts::OBJ_4K, 0);
+        self.device_cursor_pa += crate::consts::PAGE_SIZE;
+        frame
     }
 
     pub(crate) fn process_untyped(&self, proc_slot: usize) -> u64 {
@@ -137,4 +183,19 @@ impl Allocator {
             &[slot, ROOT_CNODE_DEPTH],
         );
     }
+}
+
+fn largest_aligned_chunk_bits(cursor: u64, remaining: u64) -> u8 {
+    let max_by_size = 63 - remaining.leading_zeros() as u8;
+    let max_by_align = if cursor == 0 {
+        63
+    } else {
+        cursor.trailing_zeros() as u8
+    };
+    let bits = core::cmp::min(max_by_size, max_by_align);
+    if bits < 12 {
+        log("xv6-host: device untyped skip lost page alignment\n");
+        halt_loop();
+    }
+    bits
 }

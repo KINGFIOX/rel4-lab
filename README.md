@@ -52,6 +52,28 @@ Latest verified checkpoints:
   server crates that compile against the shared ABI/protocol. The current
   booted xv6 path still uses the in-host in-memory filesystem; fs.img-backed
   virtio block I/O is the next migration step, not completed in M6.1.
+- M6.2 adds the xv6 disk-image/QEMU side of that migration. `tools/run-xv6-user.sh`
+  now builds xv6's native `fs.img` into `target/xv6compat/fs.img` and attaches
+  it to QEMU as a `virtio-blk-device` by default, matching xv6's own QEMU
+  layout at MMIO base `0x10001000`. `userspace/xv6-abi` now also carries the
+  xv6 on-disk FS structs and virtio-mmio register/queue constants that the fs
+  and disk servers will share.
+- M6.3 now boots the first real service-server topology. `xv6-host` embeds and
+  starts `xv6-fs-server` and `virtio-disk-server` as independent user-mode
+  TCB/CNode/VSpace instances, each with its own private service endpoint at
+  child cptr 2. The fs server also receives a disk endpoint cap at cptr 3.
+  Before launching the xv6 payload, `xv6-host` performs a synchronous
+  `FS_OP_INIT` call; `xv6-fs-server` answers it by calling
+  `DISK_OP_GET_INFO` on `virtio-disk-server`. Verified log path:
+  host init -> fs init -> disk get-info -> host fs-ready.
+- M6.4 maps the real QEMU virtio-mmio block device into
+  `virtio-disk-server`. `xv6-host` carves the `0x10001000` device frame from
+  BootInfo device untyped caps, maps it at `0x50000000` in the disk server,
+  allocates a DMA page, obtains its physical address with `RISCV_Page_GetAddress`,
+  and maps it at `0x50001000`. The disk server now initializes queue 0 and
+  reads xv6 `fs.img` block 1 via virtio-blk, validating the on-disk superblock
+  magic `0x10203040` during `FS_OP_INIT`. The remaining staged part is routing
+  xv6 file syscalls out of the in-host in-memory FS and into the fs server.
 
 M4.4b unlocked the first timer-gated disabled group on the current RV64,
 non-MCS, single-core, QEMU configuration: `TIMER0001`, `TIMER0002`,
@@ -213,9 +235,52 @@ helpers, and small endian/alignment utilities) is now the reusable
 `userspace/sel4-user` crate. xv6-facing constants and the first host<->fs /
 fs<->disk IPC operation numbers live in `userspace/xv6-abi`. New
 `xv6-fs-server` and `virtio-disk-server` crates build as no_std user servers and
-log their protocol versions at boot. They are not yet spawned or connected by
-the rootserver; `xv6-host` still owns the current in-memory FS state so existing
-`usertests` remain green while the split is staged.
+log their protocol versions at boot. At this point `xv6-host` still owned the
+current in-memory FS state so existing `usertests` stayed green while the split
+was staged.
+
+M6.2 wires the outer disk-image environment into the normal xv6 run path.
+`tools/build-xv6-fs-img.sh` builds xv6's native `fs.img` with the same
+`rv64imac/lp64` no-F/D user-program flags as the payload builder, uses the nix
+shell host C compiler for `mkfs`, and copies the image to
+`target/xv6compat/fs.img`. `tools/run-xv6-user.sh` now attaches that image as a
+modern virtio-mmio block device by default:
+`-global virtio-mmio.force-legacy=false`, `-drive file=...,if=none,format=raw`,
+and `-device virtio-blk-device,...,bus=virtio-mmio-bus.0`. Set
+`XV6_ATTACH_FS_IMG=0` to boot without the disk, or `XV6_BUILD_FS_IMG=0` to reuse
+an existing `XV6_FS_IMG`.
+
+M6.3 connects the staged service processes with actual seL4 IPC. The xv6 host
+now allocates separate service untypeds, creates both servers outside the xv6
+process table, loads their embedded ELFs, maps stacks/IPCBuffers, and resumes
+them before the xv6 payload starts. `virtio-disk-server` boots first and waits
+on `XV6_SERVICE_ENDPOINT_CPTR`; `xv6-fs-server` boots with both its own service
+endpoint and a badged disk endpoint cap at `XV6_DISK_ENDPOINT_CPTR`. The startup
+handshake is:
+
+```text
+xv6-host --FS_OP_INIT--> xv6-fs-server --DISK_OP_GET_INFO--> virtio-disk-server
+```
+
+M6.4 replaces the disk server's static geometry proof with a real virtio block
+read. `xv6-host` finds the BootInfo device untyped covering QEMU's first
+virtio-mmio transport at physical `0x10001000`, consumes the prefix needed to
+carve the 4KiB device frame, and maps that frame into `virtio-disk-server` at
+`0x50000000`. It also maps a regular DMA frame at `0x50001000` and passes its
+physical address in `a1`. The disk server initializes virtqueue 0, uses the DMA
+page for descriptor/avail/used rings plus a 1KiB data buffer, reads xv6 FS block
+1, and returns only after the superblock magic is verified:
+
+```text
+virtio-disk-server: mmio vendor=0x554d4551
+virtio-disk-server: virtqueue ready dma=...
+virtio-disk-server: get-info superblock=0x10203040
+```
+
+This proves the first real `fs.img` data path inside a user-mode driver server.
+The fs server still does not expose general read/write operations over shared
+buffers, and `xv6-host` still services current xv6 file syscalls from its
+in-memory compatibility FS while that migration is staged.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -268,6 +333,9 @@ the rootserver; `xv6-host` still owns the current in-memory FS state so existing
 | M5.12 | Unified xv6 process termination: `exit`, fault kill, and `kill(pid)` share fd cleanup, blocked reply-cap cleanup, pipe waiter wakeups, reparenting, zombie status, and waiting-parent reply behavior. `usertests killstatus`, `preempt`, `reparent`, and full `usertests` pass. | ✅ Done |
 | M5.13 | Full xv6 `UPROGS` exec catalog: the default catalog now embeds `cat`, `echo`, `forktest`, `grep`, `init`, `kill`, `ln`, `ls`, `mkdir`, `rm`, `sh`, `stressfs`, `usertests`, `grind`, `wc`, `zombie`, `logstress`, `forphan`, and `dorphan`; direct `stressfs`, shell `exec stressfs`, and full `usertests` pass. | ✅ Done |
 | M6.1 | Split groundwork for xv6 service servers: extracted `sel4-user`, added `xv6-abi`, migrated `xv6-host` to shared crates, and added compiling no_std `xv6-fs-server` / `virtio-disk-server` skeletons. | ✅ Done |
+| M6.2 | xv6 `fs.img` and virtio-blk QEMU path: build `target/xv6compat/fs.img`, attach it by default in `run-xv6-user.sh`, and add shared xv6 on-disk FS / virtio-mmio ABI constants for the future fs/disk servers. | ✅ Done |
+| M6.3 | Service topology and control-plane IPC: `xv6-host` spawns `xv6-fs-server` and `virtio-disk-server` as separate seL4 user servers, mints endpoint caps, and verifies host->fs->disk init/get-info IPC before starting the xv6 payload. | ✅ Done |
+| M6.4 | First real virtio disk-server data path: map virtio-mmio and a DMA frame into `virtio-disk-server`, initialize virtqueue 0, and read/validate xv6 `fs.img` superblock magic through virtio-blk during fs init. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
@@ -366,7 +434,7 @@ Test suite passed. 124 tests passed. 43 tests disabled.
 All is well in the universe
 ```
 
-### xv6 Compatibility Checkpoint (M5.3-M6.1)
+### xv6 Compatibility Checkpoint (M5.3-M6.4)
 
 The current xv6 path is a user-space compatibility server, not a full Unix
 server yet. The helper builds one xv6 user program from
@@ -568,6 +636,7 @@ TIMEOUT=60 ./tools/run-tests.sh
 SMP=2 TIMEOUT=480 ./tools/run-tests.sh  # SMP-compatible sel4test build
 
 # xv6 user-program smoke path:
+./tools/build-xv6-fs-img.sh
 ./tools/run-xv6-user.sh echo hello from xv6
 ./tools/run-xv6-user.sh forktest
 ./tools/run-xv6-user.sh cat README
@@ -636,7 +705,8 @@ plus semantics that are implemented only as far as sel4test currently needs:
 5. **Zombie/finalisation fidelity.** CNode/TCB finalisation is good
    enough for the enabled tests, but should be brought closer to the C
    kernel's Zombie reduction model before expanding coverage further.
-6. **xv6 service split.** Next xv6 work is to spawn `xv6-fs-server` and
-   `virtio-disk-server` as separate user servers, pass endpoint/device caps
-   through a small supervisor/rootserver setup, attach xv6 `fs.img` to QEMU as
-   a virtio block device, and replace the in-host in-memory FS with IPC calls.
+6. **xv6 service split.** Next xv6 work is to add shared-memory request buffers
+   between `xv6-fs-server` and `virtio-disk-server`, implement general disk
+   block read/write operations, parse xv6's on-disk inode/directory structures
+   in the fs server, and replace the in-host in-memory FS with IPC calls over
+   the attached xv6 `fs.img`.

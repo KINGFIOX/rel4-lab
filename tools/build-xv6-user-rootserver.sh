@@ -90,6 +90,8 @@ PAYLOAD_ELF="${OUT_DIR}/_${PROGRAM}-payload"
 CATALOG_RS="${OUT_DIR}/exec_catalog-${PROGRAM}.rs"
 HOST_ELF="${OUT_DIR}/xv6-host-${PROGRAM}-rootserver"
 HOST_BUILD_ELF="${ROOT_DIR}/target/${RUST_TARGET}/release/xv6-host"
+FS_SERVER_ELF="${ROOT_DIR}/target/${RUST_TARGET}/release/xv6-fs-server"
+DISK_SERVER_ELF="${ROOT_DIR}/target/${RUST_TARGET}/release/virtio-disk-server"
 LINKER_SCRIPT="${OUT_DIR}/user-${XV6_USER_BASE}.ld"
 
 args=("${PROGRAM}" "$@")
@@ -158,7 +160,15 @@ root_is_init=0
 if [[ "${PROGRAM}" == "init" ]]; then
     root_is_init=1
 fi
+cargo build \
+    --manifest-path "${ROOT_DIR}/Cargo.toml" \
+    --release \
+    --target "${RUST_TARGET}" \
+    -p xv6-fs-server \
+    -p virtio-disk-server
 XV6_PAYLOAD_ELF="${PAYLOAD_ELF}" \
+XV6_FS_SERVER_ELF="${FS_SERVER_ELF}" \
+XV6_DISK_SERVER_ELF="${DISK_SERVER_ELF}" \
 XV6_EXEC_CATALOG_RS="${CATALOG_RS}" \
 XV6_PAYLOAD_PROGRAM="${PROGRAM}" \
 XV6_ROOT_IS_INIT="${root_is_init}" \

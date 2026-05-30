@@ -71,6 +71,16 @@ pub const FS_CONSOLE_NODE: usize = 2;
 pub const XV6_HOST_TO_FS_PROTOCOL: u64 = 0x7836_6673;
 pub const XV6_FS_TO_DISK_PROTOCOL: u64 = 0x7836_626c_6b;
 
+pub const XV6_SERVICE_ENDPOINT_CPTR: u64 = 2;
+pub const XV6_DISK_ENDPOINT_CPTR: u64 = 3;
+pub const XV6_FS_SERVER_BADGE: u64 = 0x6673;
+pub const XV6_DISK_SERVER_BADGE: u64 = 0x6469_736b;
+
+pub const XV6_OK: u64 = 0;
+pub const XV6_EINVAL: u64 = 22;
+pub const XV6_ENOSYS: u64 = 38;
+
+pub const FS_OP_INIT: u64 = 0;
 pub const FS_OP_OPEN: u64 = 1;
 pub const FS_OP_CLOSE: u64 = 2;
 pub const FS_OP_READ: u64 = 3;
@@ -102,6 +112,8 @@ pub const XV6_FS_MAXFILE_BLOCKS: usize = XV6_FS_NDIRECT + XV6_FS_NINDIRECT;
 pub const VIRTIO_MMIO_BASE: u64 = 0x1000_1000;
 pub const VIRTIO_MMIO_SIZE: u64 = 0x1000;
 pub const VIRTIO0_IRQ: u64 = 1;
+pub const XV6_VIRTIO_MMIO_VADDR: u64 = 0x5000_0000;
+pub const XV6_VIRTIO_DMA_VADDR: u64 = 0x5000_1000;
 
 pub const VIRTIO_MMIO_MAGIC_VALUE: u64 = 0x000;
 pub const VIRTIO_MMIO_VERSION: u64 = 0x004;
@@ -128,6 +140,14 @@ pub const VIRTIO_CONFIG_S_ACKNOWLEDGE: u32 = 1;
 pub const VIRTIO_CONFIG_S_DRIVER: u32 = 2;
 pub const VIRTIO_CONFIG_S_DRIVER_OK: u32 = 4;
 pub const VIRTIO_CONFIG_S_FEATURES_OK: u32 = 8;
+
+pub const VIRTIO_BLK_F_RO: u32 = 5;
+pub const VIRTIO_BLK_F_SCSI: u32 = 7;
+pub const VIRTIO_BLK_F_CONFIG_WCE: u32 = 11;
+pub const VIRTIO_BLK_F_MQ: u32 = 12;
+pub const VIRTIO_F_ANY_LAYOUT: u32 = 27;
+pub const VIRTIO_RING_F_INDIRECT_DESC: u32 = 28;
+pub const VIRTIO_RING_F_EVENT_IDX: u32 = 29;
 
 pub const VIRTIO_BLK_DEVICE_ID: u32 = 2;
 pub const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;

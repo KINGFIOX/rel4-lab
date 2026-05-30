@@ -11,7 +11,6 @@ OUT_DIR="${OUT_DIR:-${ROOT_DIR}/target/xv6compat}"
 XV6_FS_IMG="${XV6_FS_IMG:-${OUT_DIR}/fs.img}"
 XV6_USER_MARCH="${XV6_USER_MARCH:-rv64imac}"
 XV6_USER_MABI="${XV6_USER_MABI:-lp64}"
-XV6_FORCE_REBUILD="${XV6_FORCE_REBUILD:-0}"
 
 log() { printf '[build-xv6-fs-img] %s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
@@ -30,6 +29,8 @@ infer_toolprefix() {
 
 TOOLPREFIX="${TOOLPREFIX:-$(infer_toolprefix || true)}"
 [[ -n "${TOOLPREFIX}" ]] || die "could not find a RISC-V ELF toolchain"
+HOST_CC="${HOST_CC:-$(command -v cc || command -v clang || command -v gcc || true)}"
+[[ -n "${HOST_CC}" ]] || die "could not find a host C compiler for mkfs"
 
 CFLAGS=(
     -Wall -Werror -Wno-unknown-attributes -O -fno-omit-frame-pointer
@@ -45,13 +46,11 @@ CFLAGS=(
     -I. -fno-stack-protector -fno-pie -no-pie
 )
 
-make_args=(-C "${XV6_DIR}" TOOLPREFIX="${TOOLPREFIX}" CFLAGS="${CFLAGS[*]}" fs.img)
-if [[ "${XV6_FORCE_REBUILD}" == "1" ]]; then
-    make_args=(-B "${make_args[@]}")
-fi
+log "building host mkfs"
+"${HOST_CC}" -Wno-unknown-attributes -I"${XV6_DIR}" -o "${XV6_DIR}/mkfs/mkfs" "${XV6_DIR}/mkfs/mkfs.c"
 
 log "building xv6 fs.img"
-make "${make_args[@]}" >/dev/null
+make -C "${XV6_DIR}" TOOLPREFIX="${TOOLPREFIX}" CFLAGS="${CFLAGS[*]}" fs.img >/dev/null
 
 mkdir -p "$(dirname "${XV6_FS_IMG}")"
 install -m 0644 "${XV6_DIR}/fs.img" "${XV6_FS_IMG}"
