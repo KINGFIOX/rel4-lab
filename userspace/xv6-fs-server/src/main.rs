@@ -13,7 +13,7 @@ mod types;
 
 use block::{
     exercise_disk_write, handle_transactional, read_disk_block, read_superblock_from_shared,
-    recover_log, shared_block,
+    recover_log,
 };
 use dir::{
     add_dir_entry_to_inode, clear_dirent, count_dir_entries, create_node_from, find_dir_entry,
