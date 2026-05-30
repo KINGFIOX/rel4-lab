@@ -36,56 +36,6 @@ impl FdEntry {
 }
 
 #[derive(Copy, Clone)]
-pub(crate) struct FsNode {
-    pub(crate) used: bool,
-    pub(crate) kind: u8,
-    pub(crate) ino: u32,
-    pub(crate) parent: usize,
-    pub(crate) nlink: u16,
-    pub(crate) open_refs: u16,
-    pub(crate) size: usize,
-    pub(crate) exec_index: usize,
-    pub(crate) blocks: [u16; crate::consts::MAX_FILE_BLOCK_REFS],
-}
-
-impl FsNode {
-    pub(crate) const fn empty() -> Self {
-        Self {
-            used: false,
-            kind: crate::consts::FS_UNUSED,
-            ino: 0,
-            parent: 0,
-            nlink: 0,
-            open_refs: 0,
-            size: 0,
-            exec_index: 0,
-            blocks: [crate::consts::NO_FILE_BLOCK; crate::consts::MAX_FILE_BLOCK_REFS],
-        }
-    }
-}
-
-#[derive(Copy, Clone)]
-pub(crate) struct DirEntry {
-    pub(crate) used: bool,
-    pub(crate) parent: usize,
-    pub(crate) node: usize,
-    pub(crate) name_len: u8,
-    pub(crate) name: [u8; crate::consts::DIRSIZ],
-}
-
-impl DirEntry {
-    pub(crate) const fn empty() -> Self {
-        Self {
-            used: false,
-            parent: 0,
-            node: 0,
-            name_len: 0,
-            name: [0; crate::consts::DIRSIZ],
-        }
-    }
-}
-
-#[derive(Copy, Clone)]
 pub(crate) struct Child {
     pub(crate) pid: u64,
     pub(crate) proc_slot: usize,
@@ -104,7 +54,7 @@ pub(crate) struct Child {
     pub(crate) heap_mapped_end: u64,
     pub(crate) sparse_reserved: u64,
     pub(crate) fds: [FdEntry; crate::consts::MAX_FD],
-    pub(crate) cwd: usize,
+    pub(crate) cwd_inum: u32,
     pub(crate) wait_status_ptr: u64,
     pub(crate) wait_reply_slot: u64,
     pub(crate) wait_reply_mrs: [u64; 11],
@@ -136,7 +86,7 @@ impl Child {
             heap_mapped_end: 0,
             sparse_reserved: 0,
             fds: [FdEntry::closed(); crate::consts::MAX_FD],
-            cwd: crate::consts::FS_ROOT_NODE,
+            cwd_inum: crate::consts::ROOT_INO,
             wait_status_ptr: 0,
             wait_reply_slot: 0,
             wait_reply_mrs: [0; 11],

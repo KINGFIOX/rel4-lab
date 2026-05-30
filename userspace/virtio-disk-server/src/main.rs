@@ -12,17 +12,18 @@ use sel4_user::{
     sel4_recv, sel4_reply_recv, sel4_yield,
 };
 use xv6_abi::{
-    DISK_OP_GET_INFO, DISK_OP_READ, FS_BLOCK_SIZE, VIRTIO_BLK_DEVICE_ID, VIRTIO_BLK_F_CONFIG_WCE,
-    VIRTIO_BLK_F_MQ, VIRTIO_BLK_F_RO, VIRTIO_BLK_F_SCSI, VIRTIO_BLK_SECTOR_SIZE, VIRTIO_BLK_T_IN,
-    VIRTIO_CONFIG_S_ACKNOWLEDGE, VIRTIO_CONFIG_S_DRIVER, VIRTIO_CONFIG_S_DRIVER_OK,
-    VIRTIO_CONFIG_S_FEATURES_OK, VIRTIO_F_ANY_LAYOUT, VIRTIO_MMIO_DEVICE_DESC_HIGH,
-    VIRTIO_MMIO_DEVICE_DESC_LOW, VIRTIO_MMIO_DEVICE_FEATURES, VIRTIO_MMIO_DEVICE_ID,
-    VIRTIO_MMIO_DRIVER_DESC_HIGH, VIRTIO_MMIO_DRIVER_DESC_LOW, VIRTIO_MMIO_DRIVER_FEATURES,
-    VIRTIO_MMIO_INTERRUPT_ACK, VIRTIO_MMIO_INTERRUPT_STATUS, VIRTIO_MMIO_MAGIC,
-    VIRTIO_MMIO_MAGIC_VALUE, VIRTIO_MMIO_QUEUE_DESC_HIGH, VIRTIO_MMIO_QUEUE_DESC_LOW,
-    VIRTIO_MMIO_QUEUE_NOTIFY, VIRTIO_MMIO_QUEUE_NUM, VIRTIO_MMIO_QUEUE_NUM_MAX,
-    VIRTIO_MMIO_QUEUE_READY, VIRTIO_MMIO_QUEUE_SEL, VIRTIO_MMIO_STATUS, VIRTIO_MMIO_VENDOR_ID,
-    VIRTIO_MMIO_VERSION, VIRTIO_MMIO_VERSION_MODERN, VIRTIO_QUEUE_NUM, VIRTIO_RING_F_EVENT_IDX,
+    DISK_OP_GET_INFO, DISK_OP_READ, DISK_OP_WRITE, FS_BLOCK_SIZE, VIRTIO_BLK_DEVICE_ID,
+    VIRTIO_BLK_F_CONFIG_WCE, VIRTIO_BLK_F_MQ, VIRTIO_BLK_F_RO, VIRTIO_BLK_F_SCSI,
+    VIRTIO_BLK_SECTOR_SIZE, VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT, VIRTIO_CONFIG_S_ACKNOWLEDGE,
+    VIRTIO_CONFIG_S_DRIVER, VIRTIO_CONFIG_S_DRIVER_OK, VIRTIO_CONFIG_S_FEATURES_OK,
+    VIRTIO_F_ANY_LAYOUT, VIRTIO_MMIO_DEVICE_DESC_HIGH, VIRTIO_MMIO_DEVICE_DESC_LOW,
+    VIRTIO_MMIO_DEVICE_FEATURES, VIRTIO_MMIO_DEVICE_ID, VIRTIO_MMIO_DRIVER_DESC_HIGH,
+    VIRTIO_MMIO_DRIVER_DESC_LOW, VIRTIO_MMIO_DRIVER_FEATURES, VIRTIO_MMIO_INTERRUPT_ACK,
+    VIRTIO_MMIO_INTERRUPT_STATUS, VIRTIO_MMIO_MAGIC, VIRTIO_MMIO_MAGIC_VALUE,
+    VIRTIO_MMIO_QUEUE_DESC_HIGH, VIRTIO_MMIO_QUEUE_DESC_LOW, VIRTIO_MMIO_QUEUE_NOTIFY,
+    VIRTIO_MMIO_QUEUE_NUM, VIRTIO_MMIO_QUEUE_NUM_MAX, VIRTIO_MMIO_QUEUE_READY,
+    VIRTIO_MMIO_QUEUE_SEL, VIRTIO_MMIO_STATUS, VIRTIO_MMIO_VENDOR_ID, VIRTIO_MMIO_VERSION,
+    VIRTIO_MMIO_VERSION_MODERN, VIRTIO_QUEUE_NUM, VIRTIO_RING_F_EVENT_IDX,
     VIRTIO_RING_F_INDIRECT_DESC, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, XV6_ABI_VERSION,
     XV6_DISK_SHARED_BUFFER_VADDR, XV6_EINVAL, XV6_ENOSYS, XV6_FS_SIZE_BLOCKS,
     XV6_FS_TO_DISK_PROTOCOL, XV6_OK, XV6_SERVICE_ENDPOINT_CPTR, XV6_VIRTIO_DMA_VADDR,
@@ -36,6 +37,7 @@ const REQ_OFF: u64 = 0x300;
 const DATA_OFF: u64 = 0x400;
 const STATUS_OFF: u64 = 0x900;
 const VIRTIO_TIMEOUT_POLLS: usize = 10_000_000;
+const TRACE_BLOCK_IO: bool = option_env!("XV6_TRACE_BLOCK_IO").is_some();
 
 static mut DMA_PADDR: u64 = 0;
 static mut USED_IDX: u16 = 0;
@@ -71,6 +73,7 @@ fn handle_request(msg: &IpcMessage) -> [u64; 4] {
     match msg_label(msg.info) {
         DISK_OP_GET_INFO => handle_get_info(msg),
         DISK_OP_READ => handle_read(msg),
+        DISK_OP_WRITE => handle_write(msg),
         op => {
             log("virtio-disk-server: unsupported op=");
             print_u64(op);
@@ -115,7 +118,7 @@ fn handle_read(msg: &IpcMessage) -> [u64; 4] {
         log("\n");
         return [XV6_EINVAL, 0, 0, 0];
     }
-    if !read_block(blockno) {
+    if !submit_block(blockno, VIRTIO_BLK_T_IN, true, "read") {
         return [XV6_EINVAL, 0, 0, 0];
     }
     unsafe {
@@ -126,9 +129,39 @@ fn handle_read(msg: &IpcMessage) -> [u64; 4] {
         );
     }
     fence(Ordering::SeqCst);
-    log("virtio-disk-server: read block=");
-    print_u64(blockno);
-    log("\n");
+    trace_block_io("read", blockno);
+    [XV6_OK, FS_BLOCK_SIZE as u64, blockno, 0]
+}
+
+fn handle_write(msg: &IpcMessage) -> [u64; 4] {
+    if msg.mrs[0] != XV6_FS_TO_DISK_PROTOCOL || msg.mrs[1] != XV6_ABI_VERSION {
+        log("virtio-disk-server: bad write protocol\n");
+        return [XV6_EINVAL, 0, 0, 0];
+    }
+    if unsafe { !DISK_READY } {
+        log("virtio-disk-server: write before ready\n");
+        return [XV6_EINVAL, 0, 0, 0];
+    }
+    let blockno = msg.mrs[2];
+    if blockno >= XV6_FS_SIZE_BLOCKS as u64 {
+        log("virtio-disk-server: write out of range block=");
+        print_u64(blockno);
+        log("\n");
+        return [XV6_EINVAL, 0, 0, 0];
+    }
+    fence(Ordering::SeqCst);
+    unsafe {
+        ptr::copy_nonoverlapping(
+            XV6_DISK_SHARED_BUFFER_VADDR as *const u8,
+            dma_va(DATA_OFF) as *mut u8,
+            FS_BLOCK_SIZE,
+        );
+    }
+    fence(Ordering::SeqCst);
+    if !submit_block(blockno, VIRTIO_BLK_T_OUT, false, "write") {
+        return [XV6_EINVAL, 0, 0, 0];
+    }
+    trace_block_io("write", blockno);
     [XV6_OK, FS_BLOCK_SIZE as u64, blockno, 0]
 }
 
@@ -231,20 +264,19 @@ fn check_identity() -> bool {
     false
 }
 
-fn read_block(blockno: u64) -> bool {
+fn submit_block(blockno: u64, request_type: u32, data_writable_by_device: bool, op: &str) -> bool {
     let sector = blockno * (FS_BLOCK_SIZE / VIRTIO_BLK_SECTOR_SIZE) as u64;
-    write32(REQ_OFF, VIRTIO_BLK_T_IN);
+    write32(REQ_OFF, request_type);
     write32(REQ_OFF + 4, 0);
     write64(REQ_OFF + 8, sector);
 
     write_desc(0, dma_pa(REQ_OFF), 16, VIRTQ_DESC_F_NEXT, 1);
-    write_desc(
-        1,
-        dma_pa(DATA_OFF),
-        FS_BLOCK_SIZE as u32,
-        VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,
-        2,
-    );
+    let data_flags = if data_writable_by_device {
+        VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT
+    } else {
+        VIRTQ_DESC_F_NEXT
+    };
+    write_desc(1, dma_pa(DATA_OFF), FS_BLOCK_SIZE as u32, data_flags, 2);
     unsafe {
         ptr::write_volatile(dma_va(STATUS_OFF) as *mut u8, 0xff);
     }
@@ -264,7 +296,9 @@ fn read_block(blockno: u64) -> bool {
     while read16(USED_OFF + 2) == unsafe { USED_IDX } {
         polls += 1;
         if polls > VIRTIO_TIMEOUT_POLLS {
-            log("virtio-disk-server: read timeout block=");
+            log("virtio-disk-server: ");
+            log(op);
+            log(" timeout block=");
             print_u64(blockno);
             log("\n");
             return false;
@@ -283,6 +317,17 @@ fn read_block(blockno: u64) -> bool {
         mmio_write32(VIRTIO_MMIO_INTERRUPT_ACK, irq_status);
     }
     status == 0
+}
+
+fn trace_block_io(op: &str, blockno: u64) {
+    if !TRACE_BLOCK_IO {
+        return;
+    }
+    log("virtio-disk-server: ");
+    log(op);
+    log(" block=");
+    print_u64(blockno);
+    log("\n");
 }
 
 fn write_queue_addr(low_reg: u64, high_reg: u64, paddr: u64) {

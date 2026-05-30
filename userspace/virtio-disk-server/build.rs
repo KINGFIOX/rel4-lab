@@ -12,4 +12,5 @@ fn main() {
     );
     println!("cargo:rustc-link-arg-bin=virtio-disk-server=--no-relax");
     println!("cargo:rustc-link-arg-bin=virtio-disk-server=-zmax-page-size=4096");
+    println!("cargo:rerun-if-env-changed=XV6_TRACE_BLOCK_IO");
 }

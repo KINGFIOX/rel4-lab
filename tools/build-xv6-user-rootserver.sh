@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Build one xv6 user program as the initial payload embedded in the xv6-host
-# seL4 rootserver, plus a small exec() catalog of xv6 user ELFs.
+# seL4 rootserver.
 #
 # The xv6 program is still linked with xv6's ulib/usys stubs. A tiny generated
 # entry point calls main(argc, argv), because xv6 normally relies on exec() to
@@ -14,7 +14,6 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 XV6_DIR="${XV6_DIR:-${ROOT_DIR}/third_party/xv6-riscv}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/target/xv6compat}"
 XV6_USER_BASE="${XV6_USER_BASE:-0x10000}"
-XV6_EXEC_PROGRAMS="${XV6_EXEC_PROGRAMS:-cat echo forktest grep init kill ln ls mkdir rm sh stressfs usertests grind wc zombie logstress forphan dorphan}"
 XV6_USER_MARCH="${XV6_USER_MARCH:-rv64imac}"
 XV6_USER_MABI="${XV6_USER_MABI:-lp64}"
 RUST_TARGET="${RUST_TARGET:-riscv64imac-unknown-none-elf}"
@@ -76,18 +75,12 @@ CFLAGS=(
 )
 
 log "building xv6 objects for ${PROGRAM}"
-read -r -a EXEC_PROGRAMS <<<"${XV6_EXEC_PROGRAMS}"
 make_targets=("user/${PROGRAM}.o" user/ulib.o user/usys.o user/printf.o user/umalloc.o)
-for prog in "${EXEC_PROGRAMS[@]}"; do
-    [[ -f "${XV6_DIR}/user/${prog}.c" ]] || die "xv6 exec catalog program not found: user/${prog}.c"
-    make_targets+=("user/${prog}.o")
-done
 make -B -C "${XV6_DIR}" TOOLPREFIX="${TOOLPREFIX}" CFLAGS="${CFLAGS[*]}" "${make_targets[@]}" >/dev/null
 
 ARGS_C="${OUT_DIR}/${PROGRAM}_argv.c"
 ARGS_O="${OUT_DIR}/${PROGRAM}_argv.o"
 PAYLOAD_ELF="${OUT_DIR}/_${PROGRAM}-payload"
-CATALOG_RS="${OUT_DIR}/exec_catalog-${PROGRAM}.rs"
 HOST_ELF="${OUT_DIR}/xv6-host-${PROGRAM}-rootserver"
 HOST_BUILD_ELF="${ROOT_DIR}/target/${RUST_TARGET}/release/xv6-host"
 FS_SERVER_ELF="${ROOT_DIR}/target/${RUST_TARGET}/release/xv6-fs-server"
@@ -131,30 +124,6 @@ log "linking payload ${PAYLOAD_ELF}"
     "${XV6_DIR}/user/printf.o" \
     "${XV6_DIR}/user/umalloc.o"
 
-cat >"${CATALOG_RS}" <<'EOF'
-pub(crate) struct ExecImage {
-    pub(crate) name: &'static [u8],
-    pub(crate) elf: &'static [u8],
-}
-
-pub(crate) static EXEC_IMAGES: &[ExecImage] = &[
-EOF
-
-for prog in "${EXEC_PROGRAMS[@]}"; do
-    exec_elf="${OUT_DIR}/_${prog}-exec"
-    log "linking exec payload ${exec_elf}"
-    "${LD}" -z max-page-size=4096 -T "${LINKER_SCRIPT}" -e start \
-        -o "${exec_elf}" \
-        "${XV6_DIR}/user/${prog}.o" \
-        "${XV6_DIR}/user/ulib.o" \
-        "${XV6_DIR}/user/usys.o" \
-        "${XV6_DIR}/user/printf.o" \
-        "${XV6_DIR}/user/umalloc.o"
-    printf '    ExecImage { name: b"%s", elf: include_bytes!("%s") },\n' \
-        "${prog}" "${exec_elf}" >>"${CATALOG_RS}"
-done
-printf '];\n' >>"${CATALOG_RS}"
-
 log "building xv6-host rootserver ${HOST_ELF}"
 root_is_init=0
 if [[ "${PROGRAM}" == "init" ]]; then
@@ -169,7 +138,6 @@ cargo build \
 XV6_PAYLOAD_ELF="${PAYLOAD_ELF}" \
 XV6_FS_SERVER_ELF="${FS_SERVER_ELF}" \
 XV6_DISK_SERVER_ELF="${DISK_SERVER_ELF}" \
-XV6_EXEC_CATALOG_RS="${CATALOG_RS}" \
 XV6_PAYLOAD_PROGRAM="${PROGRAM}" \
 XV6_ROOT_IS_INIT="${root_is_init}" \
 cargo build \

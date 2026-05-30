@@ -1,6 +1,8 @@
 use core::cmp::min;
+use core::sync::atomic::{Ordering, fence};
 
 use crate::allocator::Allocator;
+use crate::child::elf_image_valid;
 use crate::child::{
     clear_process_mappings, clone_address_space, clone_page_count, copy_cstr_from_child,
     copy_from_child, copy_to_child, create_child, destroy_child_objects, frame_pool_available,
@@ -8,9 +10,9 @@ use crate::child::{
     read_user_context, reset_process_mappings, unmap_child_range, write_user_context,
 };
 use crate::consts::*;
-use crate::sel4::{call_checked, msg_info, sel4_send, sel4_yield};
-use crate::types::{Child, DirEntry, FdEntry, FsNode};
+use crate::types::{Child, FdEntry};
 use crate::util::*;
+use sel4_user::{call_checked, msg_info, msg_label, sel4_call, sel4_send, sel4_yield};
 
 static mut TICKS: u64 = 0;
 static mut PIPES: [Pipe; MAX_PIPES] = [Pipe::closed(); MAX_PIPES];
@@ -18,18 +20,20 @@ static mut OPEN_FILES: [OpenFile; MAX_OPEN_FILES] = [OpenFile::closed(); MAX_OPE
 static mut NEXT_PID: u64 = 2;
 static mut CONSOLE_INPUT_POS: usize = 0;
 static mut SPARSE_EAGER_RESERVED: u64 = 0;
-static mut FS_NODES: [FsNode; MAX_FS_NODES] = [FsNode::empty(); MAX_FS_NODES];
-static mut DIR_ENTRIES: [DirEntry; MAX_DIR_ENTRIES] = [DirEntry::empty(); MAX_DIR_ENTRIES];
-static mut FILE_BLOCKS: [[u8; FS_BLOCK_SIZE]; MAX_FILE_BLOCKS] =
-    [[0; FS_BLOCK_SIZE]; MAX_FILE_BLOCKS];
-static mut FILE_BLOCK_USED: [bool; MAX_FILE_BLOCKS] = [false; MAX_FILE_BLOCKS];
-static mut NEXT_INO: u32 = 4;
+static mut EXEC_IMAGE_BUF: [u8; MAX_FILE_BYTES] = [0; MAX_FILE_BYTES];
+static mut FS_SERVER_EP: u64 = 0;
 
 pub(crate) enum SyscallResult {
     Reply(i64),
     ReplyFrame([u64; 11]),
     Block,
     Stop,
+}
+
+pub(crate) fn init_fs_client(fs_ep: u64) {
+    unsafe {
+        FS_SERVER_EP = fs_ep;
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -68,6 +72,13 @@ impl OpenFile {
             offset: 0,
         }
     }
+}
+
+#[derive(Copy, Clone)]
+struct FsServerMeta {
+    inum: u32,
+    typ: u16,
+    size: usize,
 }
 
 pub(crate) fn tick() {
@@ -136,7 +147,7 @@ pub(crate) fn handle_xv6_syscall(
         SYS_KILL => sys_kill(alloc, procs, a0 as i64),
         SYS_CHDIR => sys_chdir(alloc, &mut procs[proc_idx], a0),
         SYS_PIPE => sys_pipe(alloc, &mut procs[proc_idx], a0),
-        SYS_MKNOD => sys_mknod(alloc, &procs[proc_idx], a0),
+        SYS_MKNOD => sys_mknod(alloc, &procs[proc_idx], a0, a1 as u16, a2 as u16),
         SYS_EXEC => return sys_exec(alloc, &mut procs[proc_idx], a0, a1),
         SYS_UNLINK => sys_unlink(alloc, &procs[proc_idx], a0),
         SYS_LINK => sys_link(alloc, &procs[proc_idx], a0, a1),
@@ -206,11 +217,8 @@ fn sys_write(
                     n
                 }
                 FD_PIPE_WRITE => unsafe { pipe_write(child.fds[fd].aux, &scratch[..n]) },
-                FD_FS_FILE if child.fds[fd].writable => {
-                    let Some(offset) = fd_offset(child.fds[fd]) else {
-                        return SyscallResult::Reply(-1);
-                    };
-                    match fs_write(child.fds[fd].aux, offset, &scratch[..n]) {
+                FD_FS_SERVER_FILE if child.fds[fd].writable => {
+                    match fs_server_write_file(child.fds[fd], &scratch[..n]) {
                         Some(written) => written,
                         None if done == 0 => return SyscallResult::Reply(-1),
                         None => 0,
@@ -232,7 +240,7 @@ fn sys_write(
             }
             break;
         }
-        if fd < MAX_FD && child.fds[fd].kind == FD_FS_FILE {
+        if fd < MAX_FD && child.fds[fd].kind == FD_FS_SERVER_FILE {
             advance_fd_offset(child.fds[fd], wrote);
         }
         done += wrote;
@@ -424,11 +432,11 @@ fn sys_read(
     let entry = child.fds[fd];
     match entry.kind {
         FD_CONSOLE => sys_read_console(alloc, child, dst, len),
-        FD_FS_FILE if entry.readable => {
-            SyscallResult::Reply(fs_read_file(alloc, child, fd, dst, len))
+        FD_FS_SERVER_FILE if entry.readable => {
+            SyscallResult::Reply(fs_server_read_file(alloc, child, entry, dst, len))
         }
-        FD_FS_DIR if entry.readable => {
-            SyscallResult::Reply(fs_read_dir(alloc, child, fd, dst, len))
+        FD_FS_SERVER_DIR if entry.readable => {
+            SyscallResult::Reply(fs_server_read_dir(alloc, child, entry, dst, len))
         }
         FD_PIPE_READ => {
             let ret = unsafe { pipe_read(alloc, child, entry.aux, dst, len) };
@@ -464,6 +472,356 @@ fn sys_read_console(alloc: &mut Allocator, child: &Child, dst: u64, len: usize) 
     }
 }
 
+fn fs_server_open(child: &Child, path: &[u8], flags: u32) -> Option<FsServerMeta> {
+    if path.is_empty() || path.len() > 128 || unsafe { FS_SERVER_EP } == 0 {
+        return None;
+    }
+    let mut mrs = [0u64; 21];
+    mrs[0] = XV6_HOST_TO_FS_PROTOCOL;
+    mrs[1] = XV6_ABI_VERSION;
+    mrs[2] = child.cwd_inum as u64;
+    mrs[3] = flags as u64;
+    mrs[4] = path.len() as u64;
+    let mut i = 0usize;
+    while i < path.len() {
+        mrs[5 + i / 8] |= (path[i] as u64) << ((i % 8) * 8);
+        i += 1;
+    }
+    let len = 5 + path.len().div_ceil(8);
+    let reply = unsafe {
+        sel4_call(
+            FS_SERVER_EP,
+            msg_info(FS_OP_OPEN, 0, 0, len as u64),
+            &mrs[..len],
+        )
+    };
+    if msg_label(reply.info) != 0 || reply.mrs[0] != XV6_OK {
+        return None;
+    }
+    Some(FsServerMeta {
+        inum: reply.mrs[1] as u32,
+        typ: reply.mrs[2] as u16,
+        size: reply.mrs[3] as usize,
+    })
+}
+
+fn fs_server_read_exec_image(child: &Child, path: &[u8]) -> Option<&'static [u8]> {
+    let meta = fs_server_open(child, path, 0)?;
+    if meta.typ != T_FILE || meta.size == 0 || meta.size > MAX_FILE_BYTES {
+        fs_server_close(meta.inum);
+        return None;
+    }
+
+    let dst = core::ptr::addr_of_mut!(EXEC_IMAGE_BUF).cast::<u8>();
+    let mut done = 0usize;
+    while done < meta.size {
+        let request = min(meta.size - done, FS_BLOCK_SIZE);
+        let Some(n) = fs_server_read_chunk(FS_OP_READ, meta.inum, done, request) else {
+            fs_server_close(meta.inum);
+            return None;
+        };
+        if n == 0 {
+            fs_server_close(meta.inum);
+            return None;
+        }
+        fence(Ordering::SeqCst);
+        unsafe {
+            core::ptr::copy_nonoverlapping(fs_shared_buffer().as_ptr(), dst.add(done), n);
+        }
+        done += n;
+    }
+    fs_server_close(meta.inum);
+
+    let image = unsafe {
+        core::slice::from_raw_parts(core::ptr::addr_of!(EXEC_IMAGE_BUF).cast::<u8>(), done)
+    };
+    elf_image_valid(image).then_some(image)
+}
+
+fn fs_server_read_file(
+    alloc: &mut Allocator,
+    child: &Child,
+    entry: FdEntry,
+    dst: u64,
+    len: usize,
+) -> i64 {
+    fs_server_read_stream(alloc, child, entry, dst, len, FS_OP_READ)
+}
+
+fn fs_server_read_dir(
+    alloc: &mut Allocator,
+    child: &Child,
+    entry: FdEntry,
+    dst: u64,
+    len: usize,
+) -> i64 {
+    fs_server_read_stream(alloc, child, entry, dst, len, FS_OP_READDIR)
+}
+
+fn fs_server_read_stream(
+    alloc: &mut Allocator,
+    child: &Child,
+    entry: FdEntry,
+    dst: u64,
+    len: usize,
+    op: u64,
+) -> i64 {
+    let Some(offset) = fd_offset(entry) else {
+        return -1;
+    };
+    let mut done = 0usize;
+    while done < len {
+        let block_remaining = FS_BLOCK_SIZE - ((offset + done) % FS_BLOCK_SIZE);
+        let request = min(len - done, block_remaining);
+        let Some(n) = fs_server_read_chunk(op, entry.aux as u32, offset + done, request) else {
+            return if done == 0 { -1 } else { done as i64 };
+        };
+        if n == 0 {
+            break;
+        }
+        fence(Ordering::SeqCst);
+        if !copy_to_child(alloc, child, dst + done as u64, &fs_shared_buffer()[..n]) {
+            return -1;
+        }
+        done += n;
+        if n < request {
+            break;
+        }
+    }
+    advance_fd_offset(entry, done);
+    done as i64
+}
+
+fn fs_server_read_chunk(op: u64, inum: u32, offset: usize, len: usize) -> Option<usize> {
+    if unsafe { FS_SERVER_EP } == 0 {
+        return None;
+    }
+    let request = min(len, FS_BLOCK_SIZE);
+    let reply = unsafe {
+        sel4_call(
+            FS_SERVER_EP,
+            msg_info(op, 0, 0, 5),
+            &[
+                XV6_HOST_TO_FS_PROTOCOL,
+                XV6_ABI_VERSION,
+                inum as u64,
+                offset as u64,
+                request as u64,
+            ],
+        )
+    };
+    if msg_label(reply.info) != 0 || reply.mrs[0] != XV6_OK {
+        return None;
+    }
+    let n = reply.mrs[1] as usize;
+    (n <= request && n <= FS_BLOCK_SIZE).then_some(n)
+}
+
+fn fs_server_write_file(entry: FdEntry, src: &[u8]) -> Option<usize> {
+    let offset = fd_offset(entry)?;
+    if src.is_empty() || unsafe { FS_SERVER_EP } == 0 {
+        return Some(0);
+    }
+    let request = min(src.len(), FS_BLOCK_SIZE);
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            src.as_ptr(),
+            XV6_DISK_SHARED_BUFFER_VADDR as *mut u8,
+            request,
+        );
+    }
+    fence(Ordering::SeqCst);
+    let reply = unsafe {
+        sel4_call(
+            FS_SERVER_EP,
+            msg_info(FS_OP_WRITE, 0, 0, 5),
+            &[
+                XV6_HOST_TO_FS_PROTOCOL,
+                XV6_ABI_VERSION,
+                entry.aux as u64,
+                offset as u64,
+                request as u64,
+            ],
+        )
+    };
+    if msg_label(reply.info) != 0 || reply.mrs[0] != XV6_OK {
+        return None;
+    }
+    let n = reply.mrs[1] as usize;
+    (n <= request).then_some(n)
+}
+
+fn fs_server_close(inum: u32) {
+    if unsafe { FS_SERVER_EP } == 0 {
+        return;
+    }
+    let _ = unsafe {
+        sel4_call(
+            FS_SERVER_EP,
+            msg_info(FS_OP_CLOSE, 0, 0, 3),
+            &[XV6_HOST_TO_FS_PROTOCOL, XV6_ABI_VERSION, inum as u64],
+        )
+    };
+}
+
+fn fs_server_chdir(child: &Child, path: &[u8]) -> Option<u32> {
+    let len = path.len();
+    if len == 0 || len > 128 || unsafe { FS_SERVER_EP } == 0 {
+        return None;
+    }
+    let mut mrs = [0u64; 21];
+    mrs[0] = XV6_HOST_TO_FS_PROTOCOL;
+    mrs[1] = XV6_ABI_VERSION;
+    mrs[2] = child.cwd_inum as u64;
+    mrs[4] = len as u64;
+    pack_path_words(path, &mut mrs, 5);
+    let msg_len = 5 + len.div_ceil(8);
+    let reply = unsafe {
+        sel4_call(
+            FS_SERVER_EP,
+            msg_info(FS_OP_CHDIR, 0, 0, msg_len as u64),
+            &mrs[..msg_len],
+        )
+    };
+    if msg_label(reply.info) == 0 && reply.mrs[0] == XV6_OK {
+        Some(reply.mrs[1] as u32)
+    } else {
+        None
+    }
+}
+
+fn fs_server_fstat(inum: u32) -> Option<(u16, u16, u64)> {
+    if unsafe { FS_SERVER_EP } == 0 {
+        return None;
+    }
+    let reply = unsafe {
+        sel4_call(
+            FS_SERVER_EP,
+            msg_info(FS_OP_FSTAT, 0, 0, 3),
+            &[XV6_HOST_TO_FS_PROTOCOL, XV6_ABI_VERSION, inum as u64],
+        )
+    };
+    if msg_label(reply.info) != 0 || reply.mrs[0] != XV6_OK {
+        return None;
+    }
+    Some((reply.mrs[1] as u16, reply.mrs[2] as u16, reply.mrs[3]))
+}
+
+fn fs_server_unlink(child: &Child, path: &[u8]) -> bool {
+    if path.is_empty() || path.len() > 128 || unsafe { FS_SERVER_EP } == 0 {
+        return false;
+    }
+    let mut mrs = [0u64; 20];
+    mrs[0] = XV6_HOST_TO_FS_PROTOCOL;
+    mrs[1] = XV6_ABI_VERSION;
+    mrs[2] = child.cwd_inum as u64;
+    mrs[3] = path.len() as u64;
+    pack_path_words(path, &mut mrs, 4);
+    let len = 4 + path.len().div_ceil(8);
+    let reply = unsafe {
+        sel4_call(
+            FS_SERVER_EP,
+            msg_info(FS_OP_UNLINK, 0, 0, len as u64),
+            &mrs[..len],
+        )
+    };
+    msg_label(reply.info) == 0 && reply.mrs[0] == XV6_OK
+}
+
+fn fs_server_link(child: &Child, old_path: &[u8], new_path: &[u8]) -> bool {
+    if old_path.is_empty()
+        || old_path.len() > 128
+        || new_path.is_empty()
+        || new_path.len() > 128
+        || unsafe { FS_SERVER_EP } == 0
+    {
+        return false;
+    }
+    let old_words = old_path.len().div_ceil(8);
+    let new_words = new_path.len().div_ceil(8);
+    let mut mrs = [0u64; 37];
+    mrs[0] = XV6_HOST_TO_FS_PROTOCOL;
+    mrs[1] = XV6_ABI_VERSION;
+    mrs[2] = child.cwd_inum as u64;
+    mrs[3] = old_path.len() as u64;
+    mrs[4] = new_path.len() as u64;
+    pack_path_words(old_path, &mut mrs, 5);
+    pack_path_words(new_path, &mut mrs, 5 + old_words);
+    let len = 5 + old_words + new_words;
+    let reply = unsafe {
+        sel4_call(
+            FS_SERVER_EP,
+            msg_info(FS_OP_LINK, 0, 0, len as u64),
+            &mrs[..len],
+        )
+    };
+    msg_label(reply.info) == 0 && reply.mrs[0] == XV6_OK
+}
+
+fn fs_server_mkdir(child: &Child, path: &[u8]) -> bool {
+    if path.is_empty() || path.len() > 128 || unsafe { FS_SERVER_EP } == 0 {
+        return false;
+    }
+    let mut mrs = [0u64; 20];
+    mrs[0] = XV6_HOST_TO_FS_PROTOCOL;
+    mrs[1] = XV6_ABI_VERSION;
+    mrs[2] = child.cwd_inum as u64;
+    mrs[3] = path.len() as u64;
+    pack_path_words(path, &mut mrs, 4);
+    let len = 4 + path.len().div_ceil(8);
+    let reply = unsafe {
+        sel4_call(
+            FS_SERVER_EP,
+            msg_info(FS_OP_MKDIR, 0, 0, len as u64),
+            &mrs[..len],
+        )
+    };
+    msg_label(reply.info) == 0 && reply.mrs[0] == XV6_OK
+}
+
+fn fs_server_mknod(child: &Child, path: &[u8], major: u16, minor: u16) -> bool {
+    if path.is_empty() || path.len() > 128 || unsafe { FS_SERVER_EP } == 0 {
+        return false;
+    }
+    let mut mrs = [0u64; 22];
+    mrs[0] = XV6_HOST_TO_FS_PROTOCOL;
+    mrs[1] = XV6_ABI_VERSION;
+    mrs[2] = child.cwd_inum as u64;
+    mrs[3] = major as u64;
+    mrs[4] = minor as u64;
+    mrs[5] = path.len() as u64;
+    pack_path_words(path, &mut mrs, 6);
+    let len = 6 + path.len().div_ceil(8);
+    let reply = unsafe {
+        sel4_call(
+            FS_SERVER_EP,
+            msg_info(FS_OP_MKNOD, 0, 0, len as u64),
+            &mrs[..len],
+        )
+    };
+    msg_label(reply.info) == 0 && reply.mrs[0] == XV6_OK
+}
+
+fn fs_server_route_path_len(path: &[u8], out: &mut [u8; 128]) -> Option<usize> {
+    if unsafe { FS_SERVER_EP } == 0 || path.is_empty() || path.len() > out.len() {
+        return None;
+    }
+    out[..path.len()].copy_from_slice(path);
+    Some(path.len())
+}
+
+fn pack_path_words(path: &[u8], mrs: &mut [u64], start: usize) {
+    let mut i = 0usize;
+    while i < path.len() {
+        mrs[start + i / 8] |= (path[i] as u64) << ((i % 8) * 8);
+        i += 1;
+    }
+}
+
+fn fs_shared_buffer() -> &'static [u8] {
+    unsafe { core::slice::from_raw_parts(XV6_DISK_SHARED_BUFFER_VADDR as *const u8, FS_BLOCK_SIZE) }
+}
+
 fn sys_open(alloc: &mut Allocator, child: &mut Child, path_ptr: u64, flags: u32) -> i64 {
     let mut path = [0u8; 128];
     let Some(len) = copy_cstr_from_child(alloc, child, path_ptr, &mut path) else {
@@ -474,42 +832,30 @@ fn sys_open(alloc: &mut Allocator, child: &mut Child, path_ptr: u64, flags: u32)
     let readable = flags & O_WRONLY == 0 || flags & O_RDWR != 0;
     let writable = flags & (O_WRONLY | O_RDWR) != 0;
 
-    let node = match lookup_path(child, path) {
-        Some(node) => node,
-        None if flags & O_CREATE != 0 => {
-            let Some((parent, name, name_len)) = lookup_parent(child, path) else {
-                return -1;
-            };
-            let Some(node) = create_fs_node(parent, &name[..name_len], FS_FILE) else {
-                return -1;
-            };
-            node
-        }
-        None => return -1,
-    };
-
-    let kind = unsafe { FS_NODES[node].kind };
-    if kind == FS_CONSOLE {
-        return alloc_fd(child, FD_CONSOLE, 0, true, true);
-    }
-    if kind == FS_DIR && wants_write {
+    let mut server_path = [0u8; 128];
+    let Some(server_len) = fs_server_route_path_len(path, &mut server_path) else {
         return -1;
-    }
-    if (kind == FS_README || kind == FS_EXEC) && wants_write {
-        return -1;
-    }
-    if kind == FS_FILE && flags & O_TRUNC != 0 && writable {
-        unsafe {
-            truncate_file(node);
-        }
-    }
-
-    let fd_kind = if kind == FS_DIR {
-        FD_FS_DIR
-    } else {
-        FD_FS_FILE
     };
-    alloc_fd(child, fd_kind, node, readable, writable)
+    let Some(meta) = fs_server_open(child, &server_path[..server_len], flags) else {
+        return -1;
+    };
+    let fd_kind = match meta.typ {
+        T_FILE => FD_FS_SERVER_FILE,
+        T_DIR if !wants_write => FD_FS_SERVER_DIR,
+        T_DEVICE => {
+            fs_server_close(meta.inum);
+            return alloc_fd(child, FD_CONSOLE, 0, readable, writable);
+        }
+        _ => {
+            fs_server_close(meta.inum);
+            return -1;
+        }
+    };
+    let fd = alloc_fd(child, fd_kind, meta.inum as usize, readable, writable);
+    if fd < 0 {
+        fs_server_close(meta.inum);
+    }
+    fd
 }
 
 fn sys_close(child: &mut Child, fd: usize) -> i64 {
@@ -534,11 +880,8 @@ fn close_fd(child: &mut Child, fd: usize) {
             FD_PIPE_WRITE if entry.aux < MAX_PIPES && PIPES[entry.aux].writers > 0 => {
                 PIPES[entry.aux].writers -= 1;
             }
-            FD_FS_FILE | FD_FS_DIR if entry.aux < MAX_FS_NODES => {
-                if FS_NODES[entry.aux].open_refs > 0 {
-                    FS_NODES[entry.aux].open_refs -= 1;
-                }
-                maybe_free_node(entry.aux);
+            FD_FS_SERVER_FILE | FD_FS_SERVER_DIR => {
+                fs_server_close(entry.aux as u32);
             }
             _ => {}
         }
@@ -568,17 +911,22 @@ fn sys_fstat(alloc: &mut Allocator, child: &Child, fd: usize, dst: u64) -> i64 {
         return -1;
     }
     let entry = child.fds[fd];
-    let (typ, ino, size) = match entry.kind {
-        FD_CONSOLE => (T_DEVICE, CONSOLE_INO, 0u64),
-        FD_FS_FILE | FD_FS_DIR => fs_stat(entry.aux),
-        FD_PIPE_READ | FD_PIPE_WRITE => (T_FILE, 4 + entry.aux as u32, 0u64),
+    let (typ, ino, nlink, size) = match entry.kind {
+        FD_CONSOLE => (T_DEVICE, CONSOLE_INO, 1u16, 0u64),
+        FD_FS_SERVER_FILE | FD_FS_SERVER_DIR => {
+            let Some((typ, nlink, size)) = fs_server_fstat(entry.aux as u32) else {
+                return -1;
+            };
+            (typ, entry.aux as u32, nlink, size)
+        }
+        FD_PIPE_READ | FD_PIPE_WRITE => (T_FILE, 4 + entry.aux as u32, 1u16, 0u64),
         _ => return -1,
     };
     let mut st = [0u8; 24];
     write_i32(&mut st, 0, 1);
     write_u32(&mut st, 4, ino);
     write_u16(&mut st, 8, typ);
-    write_u16(&mut st, 10, 1);
+    write_u16(&mut st, 10, nlink);
     write_u64_bytes(&mut st, 16, size);
     if !copy_to_child(alloc, child, dst, &st) {
         return -1;
@@ -761,7 +1109,7 @@ fn sys_fork(
         let _ = reserve_sparse_eager(&mut child, parent.sparse_reserved);
     }
     child.fds = parent.fds;
-    child.cwd = parent.cwd;
+    child.cwd_inum = parent.cwd_inum;
     retain_fd_refs(&child);
     clone_address_space(alloc, &parent, &child);
 
@@ -959,19 +1307,24 @@ fn sys_exec(
     let Some(path_len) = copy_cstr_from_child(alloc, child, path_ptr, &mut path) else {
         return SyscallResult::Reply(-1);
     };
-    let name = basename(&path[..path_len]);
-    let Some(image) = find_exec_image(name) else {
-        return SyscallResult::Reply(-1);
-    };
-
     let mut args = [[0u8; MAX_EXEC_ARG_LEN]; MAX_EXEC_ARGS];
     let mut arg_lens = [0usize; MAX_EXEC_ARGS];
     let Some(argc) = collect_exec_args(alloc, child, argv_ptr, &mut args, &mut arg_lens) else {
         return SyscallResult::Reply(-1);
     };
 
+    let path_bytes = &path[..path_len];
+    let mut server_path = [0u8; 128];
+    let Some(server_len) = fs_server_route_path_len(path_bytes, &mut server_path) else {
+        return SyscallResult::Reply(-1);
+    };
+    let Some(image) = fs_server_read_exec_image(child, &server_path[..server_len]) else {
+        return SyscallResult::Reply(-1);
+    };
+    let name = basename(path_bytes);
+
     reset_process_mappings(alloc, child.pid);
-    load_elf(alloc, child, image.elf);
+    load_elf(alloc, child, image);
     map_stack(alloc, child);
     let Some((sp, argv_va)) = setup_exec_stack(alloc, child, &args, &arg_lens, argc) else {
         return SyscallResult::Reply(-1);
@@ -996,15 +1349,6 @@ fn sys_exec(
     print_u64(child.pid);
     log("\n");
     SyscallResult::ReplyFrame(reply)
-}
-
-fn find_exec_image(name: &[u8]) -> Option<&'static ExecImage> {
-    for image in EXEC_IMAGES {
-        if image.name == name {
-            return Some(image);
-        }
-    }
-    None
 }
 
 fn collect_exec_args(
@@ -1085,15 +1429,15 @@ fn sys_chdir(alloc: &mut Allocator, child: &mut Child, path_ptr: u64) -> i64 {
     let Some(len) = copy_cstr_from_child(alloc, child, path_ptr, &mut path) else {
         return -1;
     };
-    let Some(node) = lookup_path(child, &path[..len]) else {
+
+    let mut server_path = [0u8; 128];
+    let Some(server_len) = fs_server_route_path_len(&path[..len], &mut server_path) else {
         return -1;
     };
-    unsafe {
-        if FS_NODES[node].kind != FS_DIR {
-            return -1;
-        }
-    }
-    child.cwd = node;
+    let Some(cwd_inum) = fs_server_chdir(child, &server_path[..server_len]) else {
+        return -1;
+    };
+    child.cwd_inum = cwd_inum;
     0
 }
 
@@ -1157,12 +1501,16 @@ fn sys_pipe(alloc: &mut Allocator, child: &mut Child, fds_ptr: u64) -> i64 {
     }
 }
 
-fn sys_mknod(alloc: &mut Allocator, child: &Child, path_ptr: u64) -> i64 {
+fn sys_mknod(alloc: &mut Allocator, child: &Child, path_ptr: u64, major: u16, minor: u16) -> i64 {
     let mut path = [0u8; 128];
     let Some(len) = copy_cstr_from_child(alloc, child, path_ptr, &mut path) else {
         return -1;
     };
-    if basename(&path[..len]) == b"console" {
+    let mut server_path = [0u8; 128];
+    let Some(server_len) = fs_server_route_path_len(&path[..len], &mut server_path) else {
+        return -1;
+    };
+    if fs_server_mknod(child, &server_path[..server_len], major, minor) {
         0
     } else {
         -1
@@ -1217,7 +1565,6 @@ pub(crate) fn init_fds(child: &mut Child) {
             p += 1;
         }
         CONSOLE_INPUT_POS = 0;
-        init_fs();
     }
 }
 
@@ -1334,9 +1681,6 @@ fn open_backing(entry: FdEntry) {
         match entry.kind {
             FD_PIPE_READ if entry.aux < MAX_PIPES => PIPES[entry.aux].readers += 1,
             FD_PIPE_WRITE if entry.aux < MAX_PIPES => PIPES[entry.aux].writers += 1,
-            FD_FS_FILE | FD_FS_DIR if entry.aux < MAX_FS_NODES => {
-                FS_NODES[entry.aux].open_refs = FS_NODES[entry.aux].open_refs.saturating_add(1);
-            }
             _ => {}
         }
     }
@@ -1350,513 +1694,39 @@ fn close_all_fds(child: &mut Child) {
     }
 }
 
-fn init_fs() {
-    unsafe {
-        let mut i = 0;
-        while i < MAX_FS_NODES {
-            FS_NODES[i] = FsNode::empty();
-            i += 1;
-        }
-        let mut d = 0;
-        while d < MAX_DIR_ENTRIES {
-            DIR_ENTRIES[d] = DirEntry::empty();
-            d += 1;
-        }
-        let mut b = 0;
-        while b < MAX_FILE_BLOCKS {
-            FILE_BLOCK_USED[b] = false;
-            b += 1;
-        }
-        NEXT_INO = 4;
-
-        FS_NODES[FS_ROOT_NODE] = FsNode {
-            used: true,
-            kind: FS_DIR,
-            ino: ROOT_INO,
-            parent: FS_ROOT_NODE,
-            nlink: 1,
-            open_refs: 0,
-            size: 0,
-            exec_index: 0,
-            blocks: [NO_FILE_BLOCK; MAX_FILE_BLOCK_REFS],
-        };
-        FS_NODES[FS_README_NODE] = FsNode {
-            used: true,
-            kind: FS_README,
-            ino: README_INO,
-            parent: FS_ROOT_NODE,
-            nlink: 1,
-            open_refs: 0,
-            size: README_BYTES.len(),
-            exec_index: 0,
-            blocks: [NO_FILE_BLOCK; MAX_FILE_BLOCK_REFS],
-        };
-        FS_NODES[FS_CONSOLE_NODE] = FsNode {
-            used: true,
-            kind: FS_CONSOLE,
-            ino: CONSOLE_INO,
-            parent: FS_ROOT_NODE,
-            nlink: 1,
-            open_refs: 0,
-            size: 0,
-            exec_index: 0,
-            blocks: [NO_FILE_BLOCK; MAX_FILE_BLOCK_REFS],
-        };
-        let _ = add_dir_entry(FS_ROOT_NODE, b"README", FS_README_NODE);
-        let _ = add_dir_entry(FS_ROOT_NODE, b"console", FS_CONSOLE_NODE);
-        init_exec_files();
-    }
-}
-
-fn init_exec_files() {
-    let mut i = 0usize;
-    while i < EXEC_IMAGES.len() {
-        let name = EXEC_IMAGES[i].name;
-        if name.len() <= DIRSIZ && find_dir_entry(FS_ROOT_NODE, name).is_none() {
-            if let Some(node) = create_fs_node(FS_ROOT_NODE, name, FS_EXEC) {
-                unsafe {
-                    FS_NODES[node].size = EXEC_IMAGES[i].elf.len();
-                    FS_NODES[node].exec_index = i;
-                }
-            }
-        }
-        i += 1;
-    }
-}
-
-fn fs_stat(node: usize) -> (u16, u32, u64) {
-    unsafe {
-        if node >= MAX_FS_NODES || !FS_NODES[node].used {
-            return (T_FILE, 0, 0);
-        }
-        let typ = match FS_NODES[node].kind {
-            FS_DIR => T_DIR,
-            FS_CONSOLE => T_DEVICE,
-            _ => T_FILE,
-        };
-        (typ, FS_NODES[node].ino, fs_node_size(node) as u64)
-    }
-}
-
-fn fs_node_size(node: usize) -> usize {
-    unsafe {
-        match FS_NODES[node].kind {
-            FS_README => README_BYTES.len(),
-            FS_EXEC => EXEC_IMAGES[FS_NODES[node].exec_index].elf.len(),
-            FS_DIR => dir_entry_count(node) * DIRENT_SIZE,
-            _ => FS_NODES[node].size,
-        }
-    }
-}
-
-fn fs_read_file(alloc: &mut Allocator, child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
-    let node = child.fds[fd].aux;
-    unsafe {
-        if node >= MAX_FS_NODES || !FS_NODES[node].used {
-            return -1;
-        }
-        let Some(offset) = fd_offset(child.fds[fd]) else {
-            return -1;
-        };
-        let size = fs_node_size(node);
-        if offset >= size {
-            return 0;
-        }
-        let n = min(len, size - offset);
-        let ok = match FS_NODES[node].kind {
-            FS_README => copy_to_child(alloc, child, dst, &README_BYTES[offset..offset + n]),
-            FS_EXEC => {
-                let image = &EXEC_IMAGES[FS_NODES[node].exec_index].elf[offset..offset + n];
-                copy_to_child(alloc, child, dst, image)
-            }
-            FS_FILE => fs_read_mutable_file(alloc, child, node, offset, dst, n),
-            _ => false,
-        };
-        if !ok {
-            return -1;
-        }
-        advance_fd_offset(child.fds[fd], n);
-        n as i64
-    }
-}
-
-fn fs_write(node: usize, offset: usize, src: &[u8]) -> Option<usize> {
-    unsafe {
-        if node >= MAX_FS_NODES || !FS_NODES[node].used || FS_NODES[node].kind != FS_FILE {
-            return None;
-        }
-        if offset > FS_NODES[node].size || offset >= MAX_FILE_BYTES {
-            return None;
-        }
-        let mut done = 0usize;
-        let target = min(src.len(), MAX_FILE_BYTES - offset);
-        while done < target {
-            let cur = offset + done;
-            let block_ref = cur / FS_BLOCK_SIZE;
-            let block_off = cur % FS_BLOCK_SIZE;
-            let n = min(target - done, FS_BLOCK_SIZE - block_off);
-            let block = ensure_file_block(node, block_ref)?;
-            FILE_BLOCKS[block][block_off..block_off + n].copy_from_slice(&src[done..done + n]);
-            done += n;
-        }
-        FS_NODES[node].size = FS_NODES[node].size.max(offset + done);
-        Some(done)
-    }
-}
-
-unsafe fn fs_read_mutable_file(
-    alloc: &mut Allocator,
-    child: &Child,
-    node: usize,
-    offset: usize,
-    dst: u64,
-    len: usize,
-) -> bool {
-    unsafe {
-        let mut done = 0usize;
-        while done < len {
-            let cur = offset + done;
-            let block_ref = cur / FS_BLOCK_SIZE;
-            let block_off = cur % FS_BLOCK_SIZE;
-            let n = min(len - done, FS_BLOCK_SIZE - block_off);
-            if block_ref >= MAX_FILE_BLOCK_REFS {
-                return false;
-            }
-            let block = FS_NODES[node].blocks[block_ref] as usize;
-            if block >= MAX_FILE_BLOCKS {
-                return false;
-            }
-            if !copy_to_child(
-                alloc,
-                child,
-                dst + done as u64,
-                &FILE_BLOCKS[block][block_off..block_off + n],
-            ) {
-                return false;
-            }
-            done += n;
-        }
-        true
-    }
-}
-
-unsafe fn ensure_file_block(node: usize, block_ref: usize) -> Option<usize> {
-    unsafe {
-        if block_ref >= MAX_FILE_BLOCK_REFS {
-            return None;
-        }
-        let existing = FS_NODES[node].blocks[block_ref] as usize;
-        if existing < MAX_FILE_BLOCKS {
-            return Some(existing);
-        }
-        let block = alloc_file_block()?;
-        FS_NODES[node].blocks[block_ref] = block as u16;
-        Some(block)
-    }
-}
-
-unsafe fn alloc_file_block() -> Option<usize> {
-    unsafe {
-        let mut i = 0usize;
-        while i < MAX_FILE_BLOCKS {
-            if !FILE_BLOCK_USED[i] {
-                FILE_BLOCK_USED[i] = true;
-                FILE_BLOCKS[i] = [0; FS_BLOCK_SIZE];
-                return Some(i);
-            }
-            i += 1;
-        }
-        None
-    }
-}
-
-fn fs_read_dir(alloc: &mut Allocator, child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
-    let node = child.fds[fd].aux;
-    let mut done = 0usize;
-    while done < len {
-        let Some(base_offset) = fd_offset(child.fds[fd]) else {
-            return -1;
-        };
-        let off = base_offset + done;
-        let mut ent = [0u8; 16];
-        if !dirent_at(node, off / DIRENT_SIZE, &mut ent) {
-            break;
-        }
-        let start = off % DIRENT_SIZE;
-        let n = min(DIRENT_SIZE - start, len - done);
-        if !copy_to_child(alloc, child, dst + done as u64, &ent[start..start + n]) {
-            return -1;
-        }
-        done += n;
-    }
-    advance_fd_offset(child.fds[fd], done);
-    done as i64
-}
-
-fn dir_entry_count(parent: usize) -> usize {
-    let mut count = 2;
-    unsafe {
-        let mut i = 0;
-        while i < MAX_DIR_ENTRIES {
-            if DIR_ENTRIES[i].used && DIR_ENTRIES[i].parent == parent {
-                count += 1;
-            }
-            i += 1;
-        }
-    }
-    count
-}
-
-fn dirent_at(parent: usize, idx: usize, out: &mut [u8; 16]) -> bool {
-    if idx == 0 {
-        return write_dirent(out, parent, b".");
-    }
-    if idx == 1 {
-        let p = unsafe { FS_NODES[parent].parent };
-        return write_dirent(out, p, b"..");
-    }
-    let mut seen = 2;
-    unsafe {
-        let mut i = 0;
-        while i < MAX_DIR_ENTRIES {
-            let ent = DIR_ENTRIES[i];
-            if ent.used && ent.parent == parent {
-                if seen == idx {
-                    return write_dirent(out, ent.node, &ent.name[..ent.name_len as usize]);
-                }
-                seen += 1;
-            }
-            i += 1;
-        }
-    }
-    false
-}
-
-fn write_dirent(out: &mut [u8; 16], node: usize, name: &[u8]) -> bool {
-    unsafe {
-        if node >= MAX_FS_NODES || !FS_NODES[node].used {
-            return false;
-        }
-        for b in out.iter_mut() {
-            *b = 0;
-        }
-        write_u16(out, 0, FS_NODES[node].ino as u16);
-        let n = min(DIRSIZ, name.len());
-        out[2..2 + n].copy_from_slice(&name[..n]);
-        true
-    }
-}
-
-fn lookup_path(child: &Child, path: &[u8]) -> Option<usize> {
-    if path.is_empty() || path == b"." {
-        return Some(child.cwd);
-    }
-    let mut cur = if path[0] == b'/' {
-        FS_ROOT_NODE
-    } else {
-        child.cwd
-    };
-    let mut pos = 0usize;
-    while pos < path.len() {
-        while pos < path.len() && path[pos] == b'/' {
-            pos += 1;
-        }
-        if pos >= path.len() {
-            break;
-        }
-        let start = pos;
-        while pos < path.len() && path[pos] != b'/' {
-            pos += 1;
-        }
-        let comp = &path[start..pos];
-        if comp == b"." {
-            continue;
-        }
-        if comp == b".." {
-            cur = unsafe { FS_NODES[cur].parent };
-            continue;
-        }
-        let ent = find_dir_entry(cur, comp)?;
-        cur = unsafe { DIR_ENTRIES[ent].node };
-    }
-    Some(cur)
-}
-
-fn lookup_parent(child: &Child, path: &[u8]) -> Option<(usize, [u8; DIRSIZ], usize)> {
-    let mut end = path.len();
-    while end > 0 && path[end - 1] == b'/' {
-        end -= 1;
-    }
-    if end == 0 {
-        return None;
-    }
-    let mut slash = end;
-    while slash > 0 && path[slash - 1] != b'/' {
-        slash -= 1;
-    }
-    let name = &path[slash..end];
-    if name.is_empty() || name == b"." || name == b".." {
-        return None;
-    }
-    let parent = if slash == 0 {
-        if path[0] == b'/' {
-            FS_ROOT_NODE
-        } else {
-            child.cwd
-        }
-    } else {
-        lookup_path(child, &path[..slash])?
-    };
-    unsafe {
-        if FS_NODES[parent].kind != FS_DIR {
-            return None;
-        }
-    }
-    let mut out = [0u8; DIRSIZ];
-    let name_len = dir_name_len(name);
-    out[..name_len].copy_from_slice(&name[..name_len]);
-    Some((parent, out, name_len))
-}
-
-fn create_fs_node(parent: usize, name: &[u8], kind: u8) -> Option<usize> {
-    if find_dir_entry(parent, name).is_some() {
-        return None;
-    }
-    unsafe {
-        let mut node = 0usize;
-        while node < MAX_FS_NODES {
-            if !FS_NODES[node].used {
-                FS_NODES[node] = FsNode {
-                    used: true,
-                    kind,
-                    ino: NEXT_INO,
-                    parent,
-                    nlink: 1,
-                    open_refs: 0,
-                    size: 0,
-                    exec_index: 0,
-                    blocks: [NO_FILE_BLOCK; MAX_FILE_BLOCK_REFS],
-                };
-                if kind == FS_DIR && ensure_dir_block(node, 0).is_none() {
-                    FS_NODES[node] = FsNode::empty();
-                    return None;
-                }
-                NEXT_INO = NEXT_INO.wrapping_add(1);
-                if add_dir_entry(parent, name, node).is_some() {
-                    return Some(node);
-                }
-                release_node_blocks(node);
-                FS_NODES[node] = FsNode::empty();
-                return None;
-            }
-            node += 1;
-        }
-    }
-    None
-}
-
-fn add_dir_entry(parent: usize, name: &[u8], node: usize) -> Option<usize> {
-    if name.is_empty() || find_dir_entry(parent, name).is_some() {
-        return None;
-    }
-    unsafe {
-        if parent >= MAX_FS_NODES || !FS_NODES[parent].used || FS_NODES[parent].kind != FS_DIR {
-            return None;
-        }
-        let mut i = 0;
-        while i < MAX_DIR_ENTRIES {
-            if !DIR_ENTRIES[i].used {
-                let entry_index = dir_entry_count(parent);
-                ensure_dir_block(parent, entry_index / DIRENTS_PER_BLOCK)?;
-                let mut stored = [0u8; DIRSIZ];
-                let name_len = dir_name_len(name);
-                stored[..name_len].copy_from_slice(&name[..name_len]);
-                DIR_ENTRIES[i] = DirEntry {
-                    used: true,
-                    parent,
-                    node,
-                    name_len: name_len as u8,
-                    name: stored,
-                };
-                return Some(i);
-            }
-            i += 1;
-        }
-    }
-    None
-}
-
-unsafe fn ensure_dir_block(node: usize, block_ref: usize) -> Option<usize> {
-    unsafe {
-        if node >= MAX_FS_NODES
-            || !FS_NODES[node].used
-            || FS_NODES[node].kind != FS_DIR
-            || block_ref >= MAX_FILE_BLOCK_REFS
-        {
-            return None;
-        }
-        let existing = FS_NODES[node].blocks[block_ref] as usize;
-        if existing < MAX_FILE_BLOCKS {
-            return Some(existing);
-        }
-        let block = alloc_file_block()?;
-        FS_NODES[node].blocks[block_ref] = block as u16;
-        Some(block)
-    }
-}
-
-fn find_dir_entry(parent: usize, name: &[u8]) -> Option<usize> {
-    if name.is_empty() {
-        return None;
-    }
-    let name_len = dir_name_len(name);
-    unsafe {
-        let mut i = 0;
-        while i < MAX_DIR_ENTRIES {
-            let ent = DIR_ENTRIES[i];
-            if ent.used
-                && ent.parent == parent
-                && ent.name_len as usize == name_len
-                && &ent.name[..name_len] == &name[..name_len]
-            {
-                return Some(i);
-            }
-            i += 1;
-        }
-    }
-    None
-}
-
-fn dir_name_len(name: &[u8]) -> usize {
-    min(DIRSIZ, name.len())
-}
-
 fn sys_unlink(alloc: &mut Allocator, child: &Child, path_ptr: u64) -> i64 {
     let mut path = [0u8; 128];
     let Some(len) = copy_cstr_from_child(alloc, child, path_ptr, &mut path) else {
         return -1;
     };
-    let Some((parent, name, name_len)) = lookup_parent(child, &path[..len]) else {
+    if final_component_is_dot_or_dotdot(&path[..len]) {
         return -1;
-    };
-    let Some(ent_idx) = find_dir_entry(parent, &name[..name_len]) else {
-        return -1;
-    };
-    unsafe {
-        let node = DIR_ENTRIES[ent_idx].node;
-        if node == FS_README_NODE || node == FS_CONSOLE_NODE {
-            return -1;
-        }
-        if FS_NODES[node].kind == FS_DIR && !is_dir_empty(node) {
-            return -1;
-        }
-        DIR_ENTRIES[ent_idx] = DirEntry::empty();
-        if FS_NODES[node].nlink > 0 {
-            FS_NODES[node].nlink -= 1;
-        }
-        maybe_free_node(node);
     }
-    0
+    let mut server_path = [0u8; 128];
+    let Some(server_len) = fs_server_route_path_len(&path[..len], &mut server_path) else {
+        return -1;
+    };
+    if fs_server_unlink(child, &server_path[..server_len]) {
+        0
+    } else {
+        -1
+    }
+}
+
+fn final_component_is_dot_or_dotdot(path: &[u8]) -> bool {
+    let mut end = path.len();
+    while end > 0 && path[end - 1] == b'/' {
+        end -= 1;
+    }
+    if end == 0 {
+        return false;
+    }
+    let mut start = end;
+    while start > 0 && path[start - 1] != b'/' {
+        start -= 1;
+    }
+    let component = &path[start..end];
+    component == b"." || component == b".."
 }
 
 fn sys_link(alloc: &mut Allocator, child: &Child, old_ptr: u64, new_ptr: u64) -> i64 {
@@ -1868,22 +1738,25 @@ fn sys_link(alloc: &mut Allocator, child: &Child, old_ptr: u64, new_ptr: u64) ->
     let Some(new_len) = copy_cstr_from_child(alloc, child, new_ptr, &mut new_path) else {
         return -1;
     };
-    let Some(node) = lookup_path(child, &old_path[..old_len]) else {
+    let mut old_server_path = [0u8; 128];
+    let mut new_server_path = [0u8; 128];
+    let Some(old_server_len) = fs_server_route_path_len(&old_path[..old_len], &mut old_server_path)
+    else {
         return -1;
     };
-    let Some((parent, name, name_len)) = lookup_parent(child, &new_path[..new_len]) else {
+    let Some(new_server_len) = fs_server_route_path_len(&new_path[..new_len], &mut new_server_path)
+    else {
         return -1;
     };
-    unsafe {
-        if FS_NODES[node].kind != FS_FILE && FS_NODES[node].kind != FS_README {
-            return -1;
-        }
-        if add_dir_entry(parent, &name[..name_len], node).is_none() {
-            return -1;
-        }
-        FS_NODES[node].nlink = FS_NODES[node].nlink.saturating_add(1);
+    if fs_server_link(
+        child,
+        &old_server_path[..old_server_len],
+        &new_server_path[..new_server_len],
+    ) {
+        0
+    } else {
+        -1
     }
-    0
 }
 
 fn sys_mkdir(alloc: &mut Allocator, child: &Child, path_ptr: u64) -> i64 {
@@ -1891,72 +1764,14 @@ fn sys_mkdir(alloc: &mut Allocator, child: &Child, path_ptr: u64) -> i64 {
     let Some(len) = copy_cstr_from_child(alloc, child, path_ptr, &mut path) else {
         return -1;
     };
-    let Some((parent, name, name_len)) = lookup_parent(child, &path[..len]) else {
+    let mut server_path = [0u8; 128];
+    let Some(server_len) = fs_server_route_path_len(&path[..len], &mut server_path) else {
         return -1;
     };
-    if create_fs_node(parent, &name[..name_len], FS_DIR).is_some() {
+    if fs_server_mkdir(child, &server_path[..server_len]) {
         0
     } else {
         -1
-    }
-}
-
-fn is_dir_empty(node: usize) -> bool {
-    unsafe {
-        let mut i = 0;
-        while i < MAX_DIR_ENTRIES {
-            if DIR_ENTRIES[i].used && DIR_ENTRIES[i].parent == node {
-                return false;
-            }
-            i += 1;
-        }
-    }
-    true
-}
-
-fn maybe_free_node(node: usize) {
-    unsafe {
-        if node >= MAX_FS_NODES || !FS_NODES[node].used {
-            return;
-        }
-        if FS_NODES[node].nlink == 0 && FS_NODES[node].open_refs == 0 {
-            truncate_file(node);
-            FS_NODES[node] = FsNode::empty();
-        }
-    }
-}
-
-unsafe fn truncate_file(node: usize) {
-    unsafe {
-        if node >= MAX_FS_NODES || !FS_NODES[node].used {
-            return;
-        }
-        if FS_NODES[node].kind != FS_FILE && FS_NODES[node].kind != FS_DIR {
-            if node < MAX_FS_NODES {
-                FS_NODES[node].size = 0;
-            }
-            return;
-        }
-        release_node_blocks(node);
-        FS_NODES[node].size = 0;
-    }
-}
-
-unsafe fn release_node_blocks(node: usize) {
-    unsafe {
-        if node >= MAX_FS_NODES {
-            return;
-        }
-        let mut i = 0usize;
-        while i < MAX_FILE_BLOCK_REFS {
-            let block = FS_NODES[node].blocks[i] as usize;
-            if block < MAX_FILE_BLOCKS {
-                FILE_BLOCK_USED[block] = false;
-                FILE_BLOCKS[block] = [0; FS_BLOCK_SIZE];
-                FS_NODES[node].blocks[i] = NO_FILE_BLOCK;
-            }
-            i += 1;
-        }
     }
 }
 

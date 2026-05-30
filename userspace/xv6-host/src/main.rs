@@ -9,7 +9,6 @@ use core::ptr;
 mod allocator;
 mod child;
 mod consts;
-mod sel4;
 mod types;
 mod util;
 mod xv6;
@@ -22,20 +21,20 @@ use child::{
 use consts::{
     DISK_SERVER_ELF, DISK_SERVER_PID, DISK_SERVER_PROC_SLOT, FAULT_UNKNOWN_SYSCALL, FAULT_VM_FAULT,
     FS_OP_INIT, FS_SERVER_ELF, FS_SERVER_PID, FS_SERVER_PROC_SLOT, LABEL_IRQ_ISSUE_IRQ_HANDLER,
-    LABEL_IRQ_SET_NOTIFICATION, VIRTIO_BLK_SECTOR_SIZE, XV6_ABI_VERSION, XV6_DISK_ENDPOINT_CPTR,
-    XV6_DISK_SHARED_BUFFER_VADDR, XV6_HOST_TO_FS_PROTOCOL, XV6_OK, XV6_VIRTIO_DMA_VADDR,
-    XV6_VIRTIO_MMIO_VADDR,
+    LABEL_IRQ_SET_NOTIFICATION, LABEL_RISCV_PAGE_MAP, VIRTIO_BLK_SECTOR_SIZE, XV6_ABI_VERSION,
+    XV6_DISK_ENDPOINT_CPTR, XV6_DISK_SHARED_BUFFER_VADDR, XV6_HOST_TO_FS_PROTOCOL, XV6_OK,
+    XV6_VIRTIO_DMA_VADDR, XV6_VIRTIO_MMIO_VADDR,
 };
 use consts::{
-    INIT_TCB, IRQ_CONTROL, KERNEL_TIMER_IRQ, MAX_PROCS, OBJ_4K, OBJ_ENDPOINT, OBJ_NOTIFICATION,
-    OBJ_UNTYPED,
+    INIT_TCB, INIT_VSPACE, IRQ_CONTROL, KERNEL_TIMER_IRQ, MAX_PROCS, OBJ_4K, OBJ_ENDPOINT,
+    OBJ_NOTIFICATION, OBJ_UNTYPED,
 };
 use consts::{LABEL_TCB_BIND_NOTIFICATION, ROOT_CNODE_DEPTH};
 use consts::{
     PROC_UNUSED, ROOT_CNODE, SERVICE_UNTYPED_BITS, XV6_DISK_SERVER_BADGE, XV6_FS_SERVER_BADGE,
     XV6_SERVICE_ENDPOINT_CPTR,
 };
-use sel4::{
+use sel4_user::{
     call_checked, cap_rights, init_ipc_buffer, msg_info, msg_label, sel4_call, sel4_recv,
     sel4_reply_recv,
 };
@@ -75,6 +74,7 @@ fn run(bi_ptr: *const BootInfo) -> ! {
     let mut procs = [Child::empty(); MAX_PROCS];
     let service_eps = spawn_service_servers(&mut alloc, fault_ep);
     init_service_servers(service_eps.fs);
+    xv6::init_fs_client(service_eps.fs);
     procs[0] = create_child(&mut alloc, 0, 1, 0, fault_ep);
     xv6::init_fds(&mut procs[0]);
     setup_timer_notification(&mut alloc);
@@ -167,6 +167,7 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
     let virtio_dma_frame = alloc.retype_one(OBJ_4K, 0);
     let virtio_dma_paddr = frame_paddr(virtio_dma_frame);
     let disk_shared_frame = alloc.retype_one(OBJ_4K, 0);
+    map_shared_frame_into_host(disk_shared_frame);
     spawn_service_server(
         alloc,
         DISK_SERVER_PROC_SLOT,
@@ -204,6 +205,19 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
         0,
     );
     ServiceEndpoints { fs: fs_ep }
+}
+
+fn map_shared_frame_into_host(frame_slot: u64) {
+    call_checked(
+        frame_slot,
+        LABEL_RISCV_PAGE_MAP,
+        &[INIT_VSPACE],
+        &[
+            XV6_DISK_SHARED_BUFFER_VADDR,
+            cap_rights(false, false, true, true),
+            1,
+        ],
+    );
 }
 
 fn spawn_service_server(

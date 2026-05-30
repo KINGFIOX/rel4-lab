@@ -3,9 +3,9 @@ use crate::consts::{
     MAX_RECYCLED_SLOTS, OBJ_UNTYPED, PROCESS_UNTYPED_BITS, PROCESS_UNTYPED_PARENT_BITS, ROOT_CNODE,
     ROOT_CNODE_DEPTH, VIRTIO_MMIO_BASE, VIRTIO_MMIO_SIZE,
 };
-use crate::sel4::call_checked;
 use crate::types::BootInfo;
 use crate::util::{halt_loop, log, print_hex};
+use sel4_user::call_checked;
 
 pub(crate) struct Allocator {
     next_slot: u64,

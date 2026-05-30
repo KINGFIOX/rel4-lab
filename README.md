@@ -28,10 +28,13 @@ Latest verified checkpoints:
   suite but reports **121 enabled tests passing, 42 upstream-disabled tests
   remaining, and 4 FPU tests failing** after the M4.4g/M4.4h "no kernel
   floating point" changes.
-- xv6 user-program compatibility smoke path: xv6 user ELFs from
-  `third_party/xv6-riscv/user` are embedded into the `xv6-host` rootserver,
-  loaded into a child TCB/VSpace, and handled through seL4 fault IPC via
-  `./tools/run-xv6-user.sh`. Verified:
+- xv6 user-program compatibility smoke path: the initially requested xv6 user
+  ELF is embedded into the `xv6-host` rootserver, loaded into a child
+  TCB/VSpace, and handled through seL4 fault IPC via
+  `./tools/run-xv6-user.sh`. Subsequent `exec()` calls now load real xv6 user
+  ELF bytes from `fs.img` through `xv6-host -> xv6-fs-server ->
+  virtio-disk-server` instead of using the host's embedded exec catalog.
+  Verified:
   `echo`, `forktest`, `cat README`, `ls .`, `wc README`, and
   `grep xv6 README` end in `xv6-host: exit(0)`. The `sh` path can now consume
   scripted console input and run `fork/exec/wait` command lines, including a
@@ -85,8 +88,102 @@ Latest verified checkpoints:
   verifies the root inode, scans the root directory from data blocks, and finds
   the real `README` inode from `fs.img` (`ino=2`, `size=2441`, `nlink=1` in the
   current xv6 image). It also exposes a first read-only `FS_OP_OPEN` path lookup
-  entry point for root-level files. The remaining staged part is routing xv6
-  file syscalls out of the in-host in-memory FS and into the fs server.
+  entry point for root-level files.
+- M6.7 wires the first xv6 file syscalls through the fs server. `xv6-host`
+  maps the shared block page into its own VSpace, records the fs-server
+  endpoint, and routes read-only regular-file `open`, `read`, and `fstat`
+  through `FS_OP_OPEN`, `FS_OP_READ`, and `FS_OP_FSTAT`. Verified:
+  `cat README`, `wc README`, `grep xv6 README`, and full
+  `env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests` all exit cleanly, with
+  logs showing `xv6-fs-server` inode lookup and `virtio-disk-server` block
+  reads from `fs.img`.
+- M6.8 extends the fs-server route to read-only directory iteration.
+  `xv6-fs-server` now handles `FS_OP_READDIR` for xv6 directory files, and
+  `xv6-host` can open pristine root directories as fs-server fds so `ls .`
+  reads raw dirents from the real `fs.img`. A host-FS mutation guard keeps
+  runtime-created directories and files on the host compatibility path until
+  write/create/link/unlink/mkdir are moved into the fs server. Verified:
+  `ls .`, `cat README`, targeted `usertests concreate`, and full `usertests`.
+- M6.9 adds the first reversible block-write path to the split disk stack.
+  `virtio-disk-server` now supports `DISK_OP_WRITE` with virtio-blk OUT
+  requests, and `xv6-fs-server` performs a boot-time write/read/restore check
+  on the last xv6 filesystem block through the shared page at `0x50002000`.
+  Verified logs include `virtio-disk-server: write block=1999` and
+  `xv6-fs-server: disk write verified block=1999`; `ls .`, `cat README`, and
+  full `usertests` still pass afterward. This is only the block-write
+  foundation. Real xv6 fs mutation semantics still need to move into the fs
+  server.
+- M6.10 moves the first real filesystem metadata mutations into
+  `xv6-fs-server`. `FS_OP_LINK` now appends or reuses a root-directory dirent
+  for an existing regular file and increments the target dinode `nlink`;
+  `FS_OP_UNLINK` clears the dirent and decrements `nlink`. Both operations
+  write the real xv6 `fs.img` through `DISK_OP_WRITE`. Verified with a shell
+  script that runs `ln README readlink`, `cat readlink`, `rm readlink`, and a
+  failing second `cat readlink`; full `usertests` still reaches
+  `ALL TESTS PASSED`, with `linkunlink` now logging fs-server
+  `link cat -> x` / `unlink x` cycles.
+- M6.11 extends the fs-server-owned mutation path to fresh root-level
+  `open(O_CREATE)`, writable file descriptors, `write`, `O_TRUNC`, direct and
+  indirect data-block allocation, inode/block bitmap updates, and immediate
+  inode reclamation when `unlink` drops `nlink` to zero with no open refs.
+  `xv6-host` now routes fresh writable regular-file fds through
+  `FS_OP_OPEN`/`FS_OP_WRITE`/`FS_OP_CLOSE`, while a hybrid mutation guard keeps
+  later full-suite host-only directory semantics on the host compatibility
+  model once that model has been mutated. Verified with shell
+  `echo hello > newfile; cat newfile; rm newfile; cat newfile`, targeted
+  `usertests sharedfd` and `usertests concreate`, and full
+  `env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests`.
+- User-space seL4 ABI cleanup: `xv6-host` no longer keeps a private
+  `src/sel4.rs` shim. The host, fs server, and virtio-disk server now import
+  the shared syscall/BootInfo/IPCBuf helpers directly from `userspace/sel4-user`
+  and share xv6 protocol constants through `userspace/xv6-abi`.
+- M6.12 moves nested directory mutation into the fs-server-owned path.
+  `xv6-fs-server` now resolves multi-component paths, handles `.` / `..`
+  through real xv6 dirents, creates directories with `.` and `..`, creates
+  device inodes through `FS_OP_MKNOD`, rejects non-empty directory unlink, and
+  applies hard-link/unlink/create under subdirectories. `xv6-host` now builds
+  fs-server absolute paths from its cwd mirror for relative paths after
+  `chdir`, and mutation syscalls no longer fall back to the host mirror when
+  the fs server rejects an fs-owned path. Verified with subdirectory shell
+  smoke, targeted `usertests subdir`, and full
+  `env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests`.
+- M6.13 reduces the remaining cwd/exec dependency on the host filesystem
+  mirror. `xv6-host` now tracks a canonical absolute cwd path per process,
+  normalizes relative fs-server paths from that path, and validates `chdir`
+  and `exec` existence with new `FS_OP_CHDIR` / `FS_OP_EXEC_LOOKUP` requests
+  against the real `fs.img` server. `unlink(".")` / `unlink("..")` are rejected
+  before canonicalization so xv6 `rmdot` semantics stay intact. Verified with
+  cwd/exec shell smoke, targeted `usertests rmdot`, and full `usertests`.
+- M6.14 makes normalized filesystem paths authoritative in the fs server.
+  `xv6-host` no longer carries the global `HOST_FS_MUTATED` escape hatch:
+  open/create/truncate, mkdir, mknod, link, unlink, and chdir all use
+  `xv6-fs-server` whenever a path can be normalized for the server, and a
+  server-side rejection is returned directly to the xv6 process. The legacy
+  host mirror remains only as a fallback for paths that cannot be sent to the
+  fs server. Verified with a shell create/link/unlink/chdir smoke and full
+  `usertests`.
+- M6.15 removes the embedded-catalog data source from the normal `exec()`
+  path. For normalized paths, `xv6-host` opens the executable through
+  `xv6-fs-server`, streams its ELF bytes from `fs.img` via `FS_OP_READ`, checks
+  the ELF headers before destroying the old address space, and then loads that
+  image into the child VSpace. The embedded catalog is now only a fallback for
+  paths that cannot be represented in the current fixed-size fs-server IPC
+  format. Verified with shell `/echo` + `/cat README`, targeted
+  `usertests execout`, and full `usertests`.
+- M6.16 removes the normal-runtime host-mirror fallback for filesystem path
+  syscalls. `xv6-host` now tracks each process's fs-server cwd inode and sends
+  `(cwd_inum, raw path)` to `xv6-fs-server`; the fs server resolves relative
+  paths from that inode, so deep `chdir`/`mkdir`/`open`/`unlink` no longer need
+  a host-expanded absolute path. This fixed `usertests iref`, where repeated
+  relative `mkdir("irefd")` exceeded the old 128-byte canonical cwd buffer.
+  Verified with the no-host-fallback shell smoke, targeted `usertests iref`,
+  and full `usertests`.
+- M6.17 deletes the old host-side filesystem mirror from `xv6-host`. Regular
+  files, directories, device nodes, cwd resolution, metadata mutation, and
+  `exec()` now go through `xv6-host -> xv6-fs-server -> virtio-disk-server`;
+  the host keeps only process state, fd offset/refcount state, console, and pipe
+  behavior. The generated embedded exec catalog and non-normal host mirror
+  fallback were removed. Full `usertests` still reaches `ALL TESTS PASSED`.
 
 M4.4b unlocked the first timer-gated disabled group on the current RV64,
 non-MCS, single-core, QEMU configuration: `TIMER0001`, `TIMER0002`,
@@ -309,9 +406,10 @@ xv6-fs-server: superblock magic=270544960
 ```
 
 This keeps the disk server at the block-device layer and puts filesystem
-validation in the filesystem server. Current xv6 file syscalls still go through
-the host's in-memory compatibility FS; on-disk inode/dir parsing and syscall
-routing to `xv6-fs-server` are the next migration step.
+validation in the filesystem server. At this M6.5 checkpoint, xv6 file syscalls
+still went through the host's in-memory compatibility FS; M6.6 and M6.7 below
+move on-disk parsing and the first read-only syscall routing into
+`xv6-fs-server`.
 
 M6.6 adds the first real on-disk filesystem parser to `xv6-fs-server`. The fs
 server now stores the parsed superblock, reads xv6 dinodes from `IBLOCK(inum)`,
@@ -325,9 +423,293 @@ xv6-fs-server: root entries=22 README ino=2 size=2441 nlink=1
 
 There is also an initial read-only `FS_OP_OPEN` handler that accepts a packed
 path in IPC message registers and returns `(inum, type, size)` for root-level
-paths. It is not yet wired into `xv6-host`'s file syscalls; the host still owns
-the compatibility file table and mutable in-memory FS while the fs-server data
-path is expanded to reads, writes, and directory mutation.
+paths.
+
+M6.7 routes read-only regular-file syscalls through the split servers. The host
+maps the same 4KiB shared block page into its own VSpace, tries `FS_OP_OPEN`
+for non-writing opens, stores returned inode numbers in a new fs-server fd kind,
+and implements `read`/`fstat` with `FS_OP_READ` and `FS_OP_FSTAT`. The fs
+server reads direct and indirect xv6 data blocks via `DISK_OP_READ`, shifts
+partial-block reads to the front of the shared page, and returns the byte count
+for the host to copy into the xv6 child VSpace. Verified commands:
+
+```text
+env TIMEOUT=180 ./tools/run-xv6-user.sh cat README
+env TIMEOUT=180 ./tools/run-xv6-user.sh wc README
+env TIMEOUT=180 ./tools/run-xv6-user.sh grep xv6 README
+env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests
+```
+
+The user-facing smoke commands now read `README` from the real xv6 `fs.img`
+through `xv6-host -> xv6-fs-server -> virtio-disk-server`.
+
+M6.8 extends that path to read-only directory iteration. `xv6-fs-server`
+implements `FS_OP_READDIR` by validating a directory inode and copying raw xv6
+dirent bytes from direct or indirect directory data blocks into the shared page.
+`xv6-host` allocates a separate fs-server directory fd kind and uses
+`FS_OP_READDIR` for `read(fd, &dirent, 16)` calls. At this milestone a
+conservative host-mutation guard still existed to protect runtime-created
+compatibility entries; later M6.10-M6.14 moved those mutating operations to the
+fs server and removed that guard. Verified commands:
+
+```text
+env TIMEOUT=180 ./tools/run-xv6-user.sh ls .
+env TIMEOUT=240 ./tools/run-xv6-user.sh usertests concreate
+env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests
+```
+
+M6.9 adds the first write side of the virtio disk-server boundary.
+`DISK_OP_WRITE(block)` copies the fs-server shared page into the disk server's
+DMA buffer and submits a virtio-blk OUT request. During `FS_OP_INIT`, the file
+server reads the last xv6 filesystem block, saves it, writes a deterministic
+test pattern through `DISK_OP_WRITE`, reads the block back to verify the
+pattern, then restores the original contents through the same write path.
+Expected verification logs:
+
+```text
+virtio-disk-server: write block=1999
+virtio-disk-server: write block=1999
+xv6-fs-server: disk write verified block=1999
+```
+
+Verified commands:
+
+```text
+env TIMEOUT=180 ./tools/run-xv6-user.sh echo disk write verify
+env TIMEOUT=180 ./tools/run-xv6-user.sh ls .
+env TIMEOUT=180 ./tools/run-xv6-user.sh cat README
+env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests
+```
+
+Catalog-backed `exec`, console, file creation, file writes, directory creation,
+and allocation-heavy filesystem operations still fall back to the host-side
+compatibility model until the fs server owns those operations too.
+
+M6.10 moves root-level hard-link and unlink metadata into the filesystem
+server. The host first tries `FS_OP_LINK`/`FS_OP_UNLINK` for root-visible
+paths; on success, the fs server updates the on-disk xv6 root directory and
+dinode metadata through `DISK_OP_WRITE`, and the host only keeps its
+compatibility mirror from reappearing as a stale fallback. This currently
+supports existing regular files in the root directory and link targets that fit
+in an existing root directory data block. It deliberately does not allocate new
+inodes or blocks yet.
+
+Expected verification logs:
+
+```text
+xv6-fs-server: link README -> readlink ino=2 nlink=2
+xv6-fs-server: unlink readlink ino=2 nlink=1
+```
+
+Verified commands:
+
+```text
+env TIMEOUT=240 ./tools/run-xv6-user.sh --stdin $'ln README readlink\ncat readlink\nrm readlink\ncat readlink\n' sh
+env TIMEOUT=180 ./tools/run-xv6-user.sh cat README
+env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests
+```
+
+`usertests linkunlink` now also exercises the fs-server path for repeated
+`link("cat", "x")` / `unlink("x")`.
+
+M6.11 moves the first root-level create/write/truncate path into the filesystem
+server. On a fresh fs-server-backed run, `xv6-host` opens writable regular
+files through `FS_OP_OPEN`, writes data through the shared block page with
+`FS_OP_WRITE`, and sends `FS_OP_CLOSE` when the last duplicated/fork-shared
+open-file reference closes. The fs server now writes full dinodes, allocates
+inodes from the on-disk inode table, allocates/frees bitmap blocks, supports
+direct and single-indirect file data blocks, handles `O_TRUNC`, and frees an
+unlinked inode immediately when `nlink == 0` and no server-side open refs
+remain.
+
+The host-side compatibility filesystem is still present for xv6 behaviours not
+yet owned by the fs server, especially nested directories, `mkdir`, device
+nodes, and full xv6 log/transaction semantics. A hybrid mutation guard keeps
+the two models from mixing after the host compatibility model has performed a
+host-only mutation: fresh shell create/write smoke goes to the real
+`fs.img`, while later full-suite host-only directory tests continue on the
+host model.
+
+Expected verification logs:
+
+```text
+xv6-fs-server: create newfile ino=22
+virtio-disk-server: write block=...
+xv6-fs-server: unlink newfile ino=22 nlink=0
+```
+
+Verified commands:
+
+```text
+env TIMEOUT=240 ./tools/run-xv6-user.sh --stdin $'echo hello > newfile\ncat newfile\nrm newfile\ncat newfile\n' sh
+env TIMEOUT=300 ./tools/run-xv6-user.sh usertests sharedfd
+env TIMEOUT=300 ./tools/run-xv6-user.sh usertests concreate
+env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests
+```
+
+M6.12 extends that ownership to nested directory mutation. The fs server now
+resolves multi-component paths by walking real xv6 directory entries, supports
+`mkdir` with `.` / `..`, `mknod`, hard links and unlinks under subdirectories,
+and rejects non-empty directory unlink before the host compatibility mirror can
+mis-handle it. The host keeps a lightweight cwd mirror so relative paths after
+`chdir` can still be converted to fs-server absolute paths while the process
+model remains in `xv6-host`.
+
+Verified commands:
+
+```text
+env TIMEOUT=300 ./tools/run-xv6-user.sh --stdin $'mkdir dir\necho hello > dir/file\ncat dir/file\nls dir\nrm dir/file\nrm dir\nls .\n' sh
+env TIMEOUT=300 ./tools/run-xv6-user.sh --stdin $'mkdir d\ncd d\n/echo cwd-ok > f\n/cat f\ncd ..\nrm d/f\nrm d\n' sh
+env TIMEOUT=300 ./tools/run-xv6-user.sh usertests subdir
+env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests
+```
+
+M6.13 moves cwd and exec validation closer to the fs-server boundary.
+`xv6-host` keeps a canonical cwd path alongside the legacy node mirror, uses
+that string to normalize relative fs-server paths, asks `xv6-fs-server` to
+validate `chdir` targets through `FS_OP_CHDIR`, and checks `exec` paths through
+`FS_OP_EXEC_LOOKUP` before loading the embedded executable image. The host also
+preserves xv6's raw-path `unlink(".")` / `unlink("..")` behavior before
+canonicalization, which caught and fixed a full-suite `rmdot` regression.
+
+Verified commands:
+
+```text
+env TIMEOUT=300 ./tools/run-xv6-user.sh --stdin $'mkdir d\ncd d\n/echo cwd-ok > f\n/cat ./../d/./f\ncd ..\nrm d/f\nrm d\n' sh
+env TIMEOUT=300 ./tools/run-xv6-user.sh usertests rmdot
+env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests
+```
+
+M6.14 removes the host's global mutation switch. Once `xv6-host` can build an
+absolute server path, filesystem syscalls now use the real `fs.img` server as
+the source of truth: open/create/truncate, mkdir, mknod, link, unlink, and
+chdir either succeed through `xv6-fs-server` or fail directly. This prevents
+later operations from silently drifting back into the host mirror after an
+earlier mutation. The fallback mirror still exists for the exceptional case
+where a path cannot be represented in the current fixed-size fs-server IPC
+format, and embedded exec images are still loaded by the host after
+fs-server-side lookup validation.
+
+Verified commands:
+
+```text
+env TIMEOUT=300 ./tools/run-xv6-user.sh --stdin $'mkdir d\ncd d\n/echo one > f\n/ln f g\n/cat ../d/g\n/rm f\n/cat g\ncd ..\nrm d/g\nrm d\n' sh
+env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests
+```
+
+M6.15 removes that embedded-exec dependency from the normal path. Once
+`xv6-host` has a normalized absolute fs-server path for `exec()`, it opens the
+file through `FS_OP_OPEN`, uses the returned inode and size to stream the ELF
+from `fs.img` with `FS_OP_READ`, validates the ELF header/program headers, and
+only then resets the process mappings and loads the new image. This means shell
+commands such as `/echo` and `/cat` now execute the same files that `ls` and
+`cat` see on the real xv6 disk image. The host still keeps the generated exec
+catalog as a fallback for paths that cannot fit in the current fixed-size
+fs-server IPC path buffer.
+
+Verified commands:
+
+```text
+env TIMEOUT=300 ./tools/run-xv6-user.sh --stdin $'/echo fs-exec\n/cat README\n' sh
+env TIMEOUT=300 ./tools/run-xv6-user.sh usertests execout
+env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests
+```
+
+The full run log `target/xv6-m615-usertests-full.log` ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`.
+
+M6.16 makes filesystem path syscalls cwd-inode relative instead of
+host-canonical-path relative. The host records the fs-server cwd inode returned
+by `FS_OP_CHDIR`, inherits it across `fork`, and sends `(cwd_inum, raw path)`
+for `open`, `exec`, `chdir`, `mkdir`, `mknod`, `link`, and `unlink`. The fs
+server now starts path walks from `cwd_inum` for relative paths and from root
+for absolute paths. In normal runtime, a path that cannot be sent to the fs
+server now fails directly instead of falling back to the host mirror. The
+legacy host mirror code remains only for non-normal fallback paths and should be
+deleted once the boot/service assumptions are made explicit.
+
+This specifically fixes xv6's `iref` test: repeated `chdir("irefd")` followed
+by relative `mkdir("irefd")` no longer depends on expanding the full cwd into a
+128-byte host buffer.
+
+Verified commands:
+
+```text
+env TIMEOUT=300 ./tools/run-xv6-user.sh --stdin $'mkdir d\ncd d\n/echo one > f\n/ln f g\n/cat ../d/g\n/rm f\n/cat g\ncd ..\nrm d/g\nrm d\n/echo still-exec\n' sh
+env TIMEOUT=300 ./tools/run-xv6-user.sh usertests iref
+env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests
+```
+
+The full run log `target/xv6-m616-usertests-full.log` ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`.
+
+M6.17 removes the now-dead host filesystem mirror from `xv6-host`. The host no
+longer carries `FsNode`/`DirEntry` tables, in-memory file blocks, README/exec
+pseudo-files, cwd path strings, or the generated embedded exec catalog fallback.
+Path syscalls still preserve the same xv6 process/fd behavior at the host
+boundary, but all filesystem objects are now owned by `xv6-fs-server` and backed
+by the real xv6 `fs.img` through `virtio-disk-server`.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command ./tools/build-xv6-user-rootserver.sh echo hello from xv6
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m617-echo.log ./tools/run-xv6-user.sh echo hello from xv6
+nix develop --command env TIMEOUT=300 LOG_FILE=target/xv6-m617-no-host-mirror-smoke.log ./tools/run-xv6-user.sh --stdin $'mkdir d\ncd d\n/echo one > f\n/cat f\ncd ..\nrm d/f\nrm d\n' sh
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m617-usertests-full.log ./tools/run-xv6-user.sh usertests
+```
+
+The full run log `target/xv6-m617-usertests-full.log` ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`.
+
+M6.18 adds xv6-style redo logging to `xv6-fs-server`. Mutating filesystem IPC
+operations now run inside a single-server transaction: modified home blocks are
+absorbed in an in-memory transaction cache, subsequent reads in the same
+transaction see dirty blocks, commit writes the block images into xv6's on-disk
+log area, writes the log header as the commit point, installs the logged blocks
+to their home locations, then clears the header. `FS_OP_INIT` also performs
+xv6-compatible log recovery before exposing the filesystem.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m618-echo.log ./tools/run-xv6-user.sh echo hello from xv6
+nix develop --command env TIMEOUT=300 LOG_FILE=target/xv6-m618-transaction-smoke.log ./tools/run-xv6-user.sh --stdin $'mkdir d\ncd d\n/echo one > f\n/cat f\n/ln f g\n/cat g\nrm f\ncat g\ncd ..\nrm d/g\nrm d\n' sh
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m618-usertests-full.log ./tools/run-xv6-user.sh usertests
+```
+
+The full run log `target/xv6-m618-usertests-full.log` ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`.
+
+M6.19 reduces the default xv6 server log volume. `virtio-disk-server` no longer
+prints a line for every successful `DISK_OP_READ` / `DISK_OP_WRITE`; startup,
+geometry, queue setup, protocol errors, out-of-range requests, and timeout
+logs remain enabled. Rebuild with `XV6_TRACE_BLOCK_IO=1` when detailed block
+traffic is needed for disk debugging.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m619-echo.log ./tools/run-xv6-user.sh echo quiet disk
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m619-usertests-full.log ./tools/run-xv6-user.sh usertests
+```
+
+The echo log still shows both servers booting and the xv6 program exiting
+cleanly, while no successful `virtio-disk-server: read block=` or
+`virtio-disk-server: write block=` lines are emitted by default. The full
+`usertests` log ended with `ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`.
+The default full-suite log dropped from 621082 lines in
+`target/xv6-m618-usertests-full.log` to 17157 lines in
+`target/xv6-m619-usertests-full.log`.
+
+Remaining fs-server work is cleaner decomposition of the now-large
+`xv6-fs-server` implementation.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -385,6 +767,19 @@ path is expanded to reads, writes, and directory mutation.
 | M6.4 | First real virtio disk-server data path: map virtio-mmio and a DMA frame into `virtio-disk-server`, initialize virtqueue 0, and prove xv6 `fs.img` block reads through virtio-blk. | ✅ Done |
 | M6.5 | First fs<->disk shared-memory block read: map a shared frame at `0x50002000`, make `DISK_OP_GET_INFO` geometry-only, implement `DISK_OP_READ(block)`, and validate the xv6 superblock inside `xv6-fs-server`. | ✅ Done |
 | M6.6 | First xv6 on-disk fs parser in `xv6-fs-server`: parse superblock/inodes/root directory from `fs.img`, resolve `README`, and add a read-only root-level `FS_OP_OPEN` lookup entry point. | ✅ Done |
+| M6.7 | First host syscall routing to the fs server: read-only regular-file `open/read/fstat` now flow through `xv6-host -> xv6-fs-server -> virtio-disk-server`, with `cat README`, `wc README`, `grep xv6 README`, and full `usertests` passing. | ✅ Done |
+| M6.8 | Read-only fs-server directory iteration: pristine root directory fds use `FS_OP_READDIR` over real xv6 dirent blocks from `fs.img`, while host-FS mutation falls back to the compatibility directory model. `ls .`, `usertests concreate`, and full `usertests` pass. | ✅ Done |
+| M6.9 | Reversible virtio disk-server block write: `DISK_OP_WRITE` submits virtio-blk OUT requests, and fs-server boot verifies write/read/restore on the last xv6 filesystem block before continuing. `ls .`, `cat README`, and full `usertests` pass afterward. | ✅ Done |
+| M6.10 | First fs-server metadata mutations: root-level `FS_OP_LINK`/`FS_OP_UNLINK` update real xv6 dirents and dinode `nlink` through `DISK_OP_WRITE`; shell `ln README readlink; cat readlink; rm readlink`, `cat README`, and full `usertests` pass. | ✅ Done |
+| M6.11 | First fs-server create/write/truncate path: fresh root-level `open(O_CREATE)`/`write`/`O_TRUNC` use real inode and block bitmap allocation through `xv6-fs-server -> virtio-disk-server`, with inode reclaim on final unlink and a hybrid guard for later host-only directory semantics. Shell create/write, `usertests sharedfd`, `usertests concreate`, and full `usertests` pass. | ✅ Done |
+| M6.12 | Nested fs-server directory mutation: multi-component lookup, `.` / `..`, `FS_OP_MKDIR`, `FS_OP_MKNOD`, subdirectory create/link/unlink, non-empty directory unlink rejection, and host cwd-to-absolute fs-server routing. Subdirectory smoke, `usertests subdir`, and full `usertests` pass. | ✅ Done |
+| M6.13 | Fs-server-owned cwd/exec validation: per-process canonical cwd paths in `xv6-host`, `FS_OP_CHDIR`, `FS_OP_EXEC_LOOKUP`, relative path normalization independent of the host mirror, and raw `unlink(".")` / `unlink("..")` rejection before canonicalization. Cwd smoke, `usertests rmdot`, and full `usertests` pass. | ✅ Done |
+| M6.14 | Fs-server-authoritative normalized paths: removed the global `HOST_FS_MUTATED` escape hatch so normalized open/create/truncate, mkdir, mknod, link, unlink, and chdir return fs-server results directly instead of falling back to the host mirror. Create/link/unlink smoke and full `usertests` pass. | ✅ Done |
+| M6.15 | fs.img-backed exec: normalized `exec()` paths now open/read ELF files through `xv6-fs-server -> virtio-disk-server`, validate before replacing the address space, and keep the embedded catalog only as an unrepresentable-path fallback. Shell `/echo`, `usertests execout`, and full `usertests` pass. | ✅ Done |
+| M6.16 | Cwd-inode fs routing: `xv6-host` sends `(cwd_inum, raw path)` to the fs server for path syscalls, the fs server resolves relative paths from that inode, and normal-runtime path failures no longer fall back to the host mirror. Shell no-host-fallback smoke, `usertests iref`, and full `usertests` pass. | ✅ Done |
+| M6.17 | Host mirror removal: `xv6-host` no longer has in-memory filesystem nodes, directory entries, file blocks, cwd strings, README pseudo-file, or embedded exec catalog fallback. All filesystem objects and `exec()` images come from `xv6-fs-server -> virtio-disk-server -> fs.img`; no-host-mirror smoke and full `usertests` pass. | ✅ Done |
+| M6.18 | xv6 redo-log transaction layer in `xv6-fs-server`: mutating FS IPC operations use log absorption, commit through xv6's on-disk log header/data blocks, install logged home blocks, clear the header, and recover any committed log during `FS_OP_INIT`. Transaction smoke and full `usertests` pass. | ✅ Done |
+| M6.19 | Quieter default xv6 server logs: successful virtio block read/write traces are behind `XV6_TRACE_BLOCK_IO=1`, preserving error and startup logs while making smoke/full-suite logs inspectable. Full `usertests` still passes, and the default full-suite log drops from 621082 to 17157 lines. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
@@ -483,7 +878,7 @@ Test suite passed. 124 tests passed. 43 tests disabled.
 All is well in the universe
 ```
 
-### xv6 Compatibility Checkpoint (M5.3-M6.5)
+### xv6 Compatibility Checkpoint (M5.3-M6.17)
 
 The current xv6 path is a user-space compatibility server, not a full Unix
 server yet. The helper builds one xv6 user program from
@@ -492,6 +887,12 @@ server yet. The helper builds one xv6 user program from
 that payload embedded. The host boots as the elfloader rootserver, uses seL4
 APIs to create a child TCB/CNode/VSpace/fault endpoint, and services the
 child's positive xv6 syscalls via `UnknownSyscall` fault IPC.
+For `exec()` after boot, paths are resolved and read from the attached xv6
+`fs.img` by the fs and disk servers. The host-side embedded exec catalog has
+been removed. Path syscalls after M6.16 are resolved by the fs server from an
+explicit cwd inode, so normal relative paths no longer depend on the host
+expanding a canonical absolute path. After M6.17, `xv6-host` no longer carries
+an in-memory filesystem mirror at all.
 
 The host crate remains `edition = "2024"` and enforces the Rust 2024 unsafe
 rules at compile time with `deny(unsafe_attr_outside_unsafe)` and
@@ -570,22 +971,21 @@ xv6-host: exit(0) pid=1
 
 Implemented host-side compatibility now has an explicit handler for every xv6
 syscall number 1..21. The currently functional subset is process exit,
-TCB/VSpace-backed `fork`, catalog-backed `exec`, zombie/blocking `wait`,
-scripted console input, console/file read-write where meaningful,
-per-process `open`/`close`/`dup`/`fstat`, shared open-file offsets across
-`dup`/`fork`, `sbrk`, `getpid`, `uptime`, `pause`, `chdir`,
-`mknod("console")`, `link`/`unlink`/`mkdir`, mutable in-memory files, and a
-fixed-size in-memory `pipe` ring buffer with blocking reads/writes shared
-across forked processes. Process termination now uses one path for normal
-`exit`, fault kill, and `kill(pid)`, including wait reply, child reparenting,
-and blocked reply-cap cleanup.
-Remaining Unix gaps are routing xv6 file syscalls to the fs server, adding
-fs-server file read/write and directory mutation over the attached xv6
-`fs.img`, persistence, permissions/devices beyond
+TCB/VSpace-backed `fork`, fs.img-backed `exec`,
+zombie/blocking `wait`, scripted console input, console/file read-write where
+meaningful, per-process `open`/`close`/`dup`/`fstat`, shared open-file offsets
+across `dup`/`fork`, `sbrk`, `getpid`, `uptime`, `pause`, `chdir`,
+`mknod("console")`, `link`/`unlink`/`mkdir`, mutable files/directories through
+the fs server, and a fixed-size in-memory `pipe` ring buffer with blocking
+reads/writes shared across forked processes. Process termination now uses one
+path for normal `exit`, fault kill, and `kill(pid)`, including wait reply,
+child reparenting, and blocked reply-cap cleanup.
+Remaining Unix gaps are xv6 log/transaction semantics, permissions/devices beyond
 console, dynamic host keyboard input, full untyped-memory reclamation beyond
 cap-slot reuse, and resource scaling beyond the current fixed tables. With no
-scripted input, `init` now reaches `exec("sh")` and the shell blocks on console
-read instead of exiting and forcing `init` into a restart loop.
+scripted input, `init` now reaches
+`exec("sh")` and the shell blocks on console read instead of exiting and
+forcing `init` into a restart loop.
 
 
 ## Repository layout
@@ -754,7 +1154,7 @@ plus semantics that are implemented only as far as sel4test currently needs:
 5. **Zombie/finalisation fidelity.** CNode/TCB finalisation is good
    enough for the enabled tests, but should be brought closer to the C
    kernel's Zombie reduction model before expanding coverage further.
-6. **xv6 service split.** Next xv6 work is to extend the fs<->disk protocol to
-   write/multi-block operations, parse xv6's on-disk inode/directory structures
-   in the fs server, and replace the in-host in-memory FS with IPC calls over
-   the attached xv6 `fs.img`.
+6. **xv6 service split.** The in-host filesystem mirror is gone. Next xv6 work
+   is xv6 log/transaction fidelity in the fs server, reducing the tracing noise,
+   and splitting the large fs-server implementation into smaller modules before
+   expanding device and resource semantics.

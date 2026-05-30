@@ -3,11 +3,11 @@ use core::ptr;
 
 use crate::allocator::Allocator;
 use crate::consts::*;
-use crate::sel4::{
-    call_checked, cap_rights, cnode_cap_data, msg_info, msg_label, read_ipc_mr, sel4_call,
-};
 use crate::types::{Child, Mapping};
 use crate::util::*;
+use sel4_user::{
+    call_checked, cap_rights, cnode_cap_data, msg_info, msg_label, read_ipc_mr, sel4_call,
+};
 
 static mut MAPPINGS: [Mapping; MAX_MAPPINGS] = [Mapping {
     proc_slot: 0,
@@ -104,7 +104,7 @@ pub(crate) fn create_child_from_untyped(
         heap_mapped_end: 0,
         sparse_reserved: 0,
         fds: [crate::types::FdEntry::closed(); MAX_FD],
-        cwd: FS_ROOT_NODE,
+        cwd_inum: ROOT_INO,
         wait_status_ptr: 0,
         wait_reply_slot: 0,
         wait_reply_mrs: [0; 11],
@@ -135,8 +135,42 @@ pub(crate) fn load_payload(alloc: &mut Allocator, child: &mut Child) {
     load_elf(alloc, child, PAYLOAD_ELF);
 }
 
-pub(crate) fn load_elf(alloc: &mut Allocator, child: &mut Child, elf: &[u8]) {
+pub(crate) fn elf_image_valid(elf: &[u8]) -> bool {
     if elf.len() < 64 || &elf[0..4] != b"\x7fELF" || elf[4] != 2 || elf[5] != 1 {
+        return false;
+    }
+    let phoff = read_u64(elf, 32) as usize;
+    let phentsize = read_u16(elf, 54) as usize;
+    let phnum = read_u16(elf, 56) as usize;
+    if phentsize < 56 {
+        return false;
+    }
+
+    let mut i = 0usize;
+    while i < phnum {
+        let Some(off) = phoff.checked_add(i.saturating_mul(phentsize)) else {
+            return false;
+        };
+        if off.checked_add(56).is_none_or(|end| end > elf.len()) {
+            return false;
+        }
+        if read_u32(elf, off) == 1 {
+            let p_offset = read_u64(elf, off + 8) as usize;
+            let p_filesz = read_u64(elf, off + 32) as usize;
+            if p_offset
+                .checked_add(p_filesz)
+                .is_none_or(|end| end > elf.len())
+            {
+                return false;
+            }
+        }
+        i += 1;
+    }
+    true
+}
+
+pub(crate) fn load_elf(alloc: &mut Allocator, child: &mut Child, elf: &[u8]) {
+    if !elf_image_valid(elf) {
         log("xv6-host: bad payload ELF\n");
         halt_loop();
     }

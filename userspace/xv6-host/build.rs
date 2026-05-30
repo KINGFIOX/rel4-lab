@@ -16,7 +16,6 @@ fn main() {
     println!("cargo:rerun-if-env-changed=XV6_PAYLOAD_ELF");
     println!("cargo:rerun-if-env-changed=XV6_FS_SERVER_ELF");
     println!("cargo:rerun-if-env-changed=XV6_DISK_SERVER_ELF");
-    println!("cargo:rerun-if-env-changed=XV6_EXEC_CATALOG_RS");
     println!("cargo:rerun-if-env-changed=XV6_CONSOLE_INPUT");
     println!("cargo:rerun-if-env-changed=XV6_PAYLOAD_PROGRAM");
     println!("cargo:rerun-if-env-changed=XV6_ROOT_IS_INIT");
@@ -46,15 +45,6 @@ fn main() {
     });
     println!("cargo:rerun-if-changed={disk_server}");
     println!("cargo:rustc-env=XV6_DISK_SERVER_ELF={disk_server}");
-
-    let catalog = env::var("XV6_EXEC_CATALOG_RS").unwrap_or_else(|_| {
-        panic!(
-            "XV6_EXEC_CATALOG_RS must point to the generated xv6 exec catalog; \
-             use tools/build-xv6-user-rootserver.sh PROGRAM [ARG...]"
-        )
-    });
-    println!("cargo:rerun-if-changed={catalog}");
-    println!("cargo:rustc-env=XV6_EXEC_CATALOG_RS={catalog}");
 
     if let Ok(program) = env::var("XV6_PAYLOAD_PROGRAM") {
         println!("cargo:rustc-env=XV6_PAYLOAD_PROGRAM={program}");
