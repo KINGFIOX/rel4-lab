@@ -59,6 +59,7 @@ const IPCBUF_RECV_INDEX: usize = 126;
 const IPCBUF_RECV_DEPTH: usize = 127;
 const FAULT_UNKNOWN_SYSCALL: u64 = 2;
 const FAULT_USER_EXCEPTION: u64 = 3;
+const FAULT_VM_FAULT: u64 = 5;
 
 /// Copy MRs from `sender` into `receiver`, set the receiver's badge +
 /// reply MessageInfo. `length` is the truncated MR count to deliver.
@@ -630,6 +631,7 @@ pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb) {
                 }
             } else if (*caller).fault_label == FAULT_UNKNOWN_SYSCALL
                 || (*caller).fault_label == FAULT_USER_EXCEPTION
+                || (*caller).fault_label == FAULT_VM_FAULT
             {
                 wake_caller = false;
             }

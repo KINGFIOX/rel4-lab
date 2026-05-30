@@ -16,14 +16,16 @@ mod xv6;
 
 use allocator::Allocator;
 use child::{create_child, load_payload, map_stack, start_child};
-use consts::{FAULT_UNKNOWN_SYSCALL, LABEL_IRQ_ISSUE_IRQ_HANDLER, LABEL_IRQ_SET_NOTIFICATION};
+use consts::{
+    FAULT_UNKNOWN_SYSCALL, FAULT_VM_FAULT, LABEL_IRQ_ISSUE_IRQ_HANDLER, LABEL_IRQ_SET_NOTIFICATION,
+};
 use consts::{INIT_TCB, IRQ_CONTROL, KERNEL_TIMER_IRQ, MAX_PROCS, OBJ_ENDPOINT, OBJ_NOTIFICATION};
 use consts::{LABEL_TCB_BIND_NOTIFICATION, ROOT_CNODE_DEPTH};
 use consts::{PROC_UNUSED, ROOT_CNODE};
 use sel4::{call_checked, init_ipc_buffer, msg_info, msg_label, sel4_recv, sel4_reply_recv};
 use types::{BootInfo, Child};
 use util::{halt_loop, log, print_u64};
-use xv6::{SyscallResult, handle_xv6_syscall};
+use xv6::{SyscallResult, handle_xv6_fault, handle_xv6_syscall};
 
 static mut SAW_FAULT_IPC: bool = false;
 
@@ -79,20 +81,6 @@ fn run(bi_ptr: *const BootInfo) -> ! {
             xv6::tick();
             continue;
         }
-        if label != FAULT_UNKNOWN_SYSCALL {
-            log("xv6-host: non-syscall fault label=");
-            print_u64(label);
-            log("\n");
-            halt_loop();
-        }
-
-        unsafe {
-            if !SAW_FAULT_IPC {
-                SAW_FAULT_IPC = true;
-                log("xv6-host: UnknownSyscall fault IPC\n");
-            }
-        }
-
         let Some(proc_idx) = find_proc_by_pid(&procs, msg.badge) else {
             log("xv6-host: fault from unknown pid=");
             print_u64(msg.badge);
@@ -100,7 +88,24 @@ fn run(bi_ptr: *const BootInfo) -> ! {
             halt_loop();
         };
 
-        match handle_xv6_syscall(&mut alloc, &mut procs, proc_idx, &msg.mrs) {
+        let result = if label == FAULT_UNKNOWN_SYSCALL {
+            unsafe {
+                if !SAW_FAULT_IPC {
+                    SAW_FAULT_IPC = true;
+                    log("xv6-host: UnknownSyscall fault IPC\n");
+                }
+            }
+            handle_xv6_syscall(&mut alloc, &mut procs, proc_idx, &msg.mrs)
+        } else {
+            if label != FAULT_VM_FAULT {
+                log("xv6-host: non-syscall fault label=");
+                print_u64(label);
+                log("\n");
+            }
+            handle_xv6_fault(&mut alloc, &mut procs, proc_idx, label, &msg.mrs)
+        };
+
+        match result {
             SyscallResult::Reply(ret) => {
                 reply_info = msg_info(0, 0, 0, 11);
                 reply_mrs = msg.mrs[..11].try_into().unwrap_or([0; 11]);

@@ -3,9 +3,9 @@ use core::cmp::min;
 use crate::allocator::Allocator;
 use crate::child::{
     clear_process_mappings, clone_address_space, copy_cstr_from_child, copy_from_child,
-    copy_to_child, create_child, destroy_child_objects, load_elf, map_fresh_child_page, map_stack,
-    mapping_slots_available, read_user_context, reset_process_mappings, unmap_child_range,
-    write_user_context,
+    copy_to_child, create_child, destroy_child_objects, is_child_page_mapped, load_elf,
+    map_fresh_child_page, map_stack, mapping_slots_available, read_user_context,
+    reset_process_mappings, unmap_child_range, write_user_context,
 };
 use crate::consts::*;
 use crate::sel4::{call_checked, msg_info, sel4_send, sel4_yield};
@@ -112,7 +112,7 @@ pub(crate) fn handle_xv6_syscall(
         SYS_CLOSE => sys_close(&mut procs[proc_idx], a0 as usize),
         SYS_DUP => sys_dup(&mut procs[proc_idx], a0 as usize),
         SYS_FSTAT => sys_fstat(&procs[proc_idx], a0 as usize, a1),
-        SYS_SBRK => sys_sbrk(alloc, &mut procs[proc_idx], a0 as i64),
+        SYS_SBRK => sys_sbrk(alloc, &mut procs[proc_idx], a0 as i64, a1),
         SYS_GETPID => procs[proc_idx].pid as i64,
         SYS_UPTIME => unsafe { TICKS as i64 },
         SYS_PAUSE => {
@@ -130,6 +130,23 @@ pub(crate) fn handle_xv6_syscall(
         _ => -1,
     };
     SyscallResult::Reply(ret)
+}
+
+pub(crate) fn handle_xv6_fault(
+    alloc: &mut Allocator,
+    procs: &mut [Child; MAX_PROCS],
+    proc_idx: usize,
+    label: u64,
+    mrs: &[u64; 64],
+) -> SyscallResult {
+    if label == FAULT_VM_FAULT {
+        let fault_addr = mrs[1];
+        let fsr = mrs[3];
+        if handle_lazy_page_fault(alloc, &mut procs[proc_idx], fault_addr, fsr) {
+            return SyscallResult::ReplyFrame([0; 11]);
+        }
+    }
+    fault_kill(alloc, procs, proc_idx, label)
 }
 
 fn sys_write(
@@ -433,7 +450,7 @@ fn sys_fstat(child: &Child, fd: usize, dst: u64) -> i64 {
     0
 }
 
-fn sys_sbrk(alloc: &mut Allocator, child: &mut Child, increment: i64) -> i64 {
+fn sys_sbrk(alloc: &mut Allocator, child: &mut Child, increment: i64, mode: u64) -> i64 {
     let old = child.brk;
     let new_brk = if increment >= 0 {
         old.saturating_add(increment as u64)
@@ -443,30 +460,86 @@ fn sys_sbrk(alloc: &mut Allocator, child: &mut Child, increment: i64) -> i64 {
     if new_brk > CHILD_HEAP_LIMIT {
         return -1;
     }
+    if mode == SBRK_EAGER && new_brk > CHILD_EAGER_HEAP_LIMIT {
+        return -1;
+    }
+    if mode != SBRK_EAGER && mode != SBRK_LAZY {
+        return -1;
+    }
     if new_brk < old {
         let new_mapped_end = align_up(new_brk);
-        if new_mapped_end < child.heap_mapped_end {
-            unmap_child_range(alloc, child.pid, new_mapped_end, child.heap_mapped_end);
-            child.heap_mapped_end = new_mapped_end;
-        }
+        unmap_child_range(alloc, child.pid, new_mapped_end, align_up(old));
+        child.heap_mapped_end = child.heap_mapped_end.min(new_mapped_end);
     }
     if new_brk > child.heap_mapped_end {
         let target_end = align_up(new_brk);
         let first_page = align_up(child.heap_mapped_end);
         let needed = ((target_end.saturating_sub(first_page)) / PAGE_SIZE) as usize;
-        let available = mapping_slots_available();
-        if needed > available.saturating_sub(SBRK_MAPPING_HEADROOM) {
-            return -1;
+        if needed <= SBRK_EAGER_MAP_LIMIT {
+            let available = mapping_slots_available();
+            if needed > available.saturating_sub(SBRK_MAPPING_HEADROOM) {
+                return -1;
+            }
+            let mut page = align_up(child.heap_mapped_end);
+            while page < target_end {
+                map_fresh_child_page(alloc, child, page, true, false);
+                page += PAGE_SIZE;
+            }
+            child.heap_mapped_end = target_end;
         }
-        let mut page = align_up(child.heap_mapped_end);
-        while page < target_end {
-            map_fresh_child_page(alloc, child, page, true, false);
-            page += PAGE_SIZE;
-        }
-        child.heap_mapped_end = target_end;
     }
     child.brk = new_brk;
     old as i64
+}
+
+fn handle_lazy_page_fault(
+    alloc: &mut Allocator,
+    child: &mut Child,
+    fault_addr: u64,
+    fsr: u64,
+) -> bool {
+    if fault_addr >= child.brk || fault_addr >= CHILD_HEAP_LIMIT {
+        return false;
+    }
+    if is_child_page_mapped(child, fault_addr) {
+        return false;
+    }
+    if fsr != 5 && fsr != 7 {
+        return false;
+    }
+    if mapping_slots_available() <= SBRK_MAPPING_HEADROOM {
+        return false;
+    }
+    map_fresh_child_page(alloc, child, fault_addr, true, false);
+    true
+}
+
+fn fault_kill(
+    alloc: &mut Allocator,
+    procs: &mut [Child; MAX_PROCS],
+    proc_idx: usize,
+    label: u64,
+) -> SyscallResult {
+    let pid = procs[proc_idx].pid;
+    log("xv6-host: fault kill pid=");
+    print_u64(pid);
+    log(" label=");
+    print_u64(label);
+    log("\n");
+    if procs[proc_idx].parent_pid == 0 {
+        halt_loop();
+    }
+    call_checked(procs[proc_idx].tcb, LABEL_TCB_SUSPEND, &[], &[]);
+    close_all_fds(&mut procs[proc_idx]);
+    reparent_children(alloc, procs, pid);
+    procs[proc_idx].state = PROC_ZOMBIE;
+    procs[proc_idx].exit_status = -1;
+    if procs[proc_idx].reparented_to_init && !ROOT_IS_INIT {
+        reap_process(alloc, &mut procs[proc_idx]);
+        return SyscallResult::Stop;
+    }
+    reply_waiting_parent(alloc, procs, proc_idx);
+    SyscallResult::Stop
 }
 
 fn sys_fork(

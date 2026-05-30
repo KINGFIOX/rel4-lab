@@ -131,10 +131,13 @@ pub(crate) fn load_elf(alloc: &mut Allocator, child: &mut Child, elf: &[u8]) {
         if p_type != 1 {
             continue;
         }
+        let p_flags = read_u32(elf, off + 4);
         let p_offset = read_u64(elf, off + 8) as usize;
         let p_vaddr = read_u64(elf, off + 16);
         let p_filesz = read_u64(elf, off + 32) as usize;
         let p_memsz = read_u64(elf, off + 40);
+        let writable = (p_flags & 0x2) != 0;
+        let executable = (p_flags & 0x1) != 0;
         if p_offset.saturating_add(p_filesz) > elf.len() {
             log("xv6-host: segment outside payload\n");
             halt_loop();
@@ -144,10 +147,10 @@ pub(crate) fn load_elf(alloc: &mut Allocator, child: &mut Child, elf: &[u8]) {
         let end = align_up(p_vaddr.saturating_add(p_memsz));
         let mut page = start;
         while page < end {
-            map_fresh_child_page(alloc, child, page, true, true);
+            map_fresh_child_page(alloc, child, page, writable, executable);
             page += PAGE_SIZE;
         }
-        if p_filesz > 0 && !copy_to_child(child, p_vaddr, &elf[p_offset..p_offset + p_filesz]) {
+        if p_filesz > 0 && !copy_to_child_raw(child, p_vaddr, &elf[p_offset..p_offset + p_filesz]) {
             log("xv6-host: failed to copy payload\n");
             halt_loop();
         }
@@ -364,13 +367,21 @@ fn page_unmap(frame_slot: u64) {
 }
 
 fn lookup_alias(pid: u64, child_page: u64) -> Option<u64> {
+    lookup_mapping(pid, child_page).map(|m| m.alias_page)
+}
+
+pub(crate) fn is_child_page_mapped(child: &Child, va: u64) -> bool {
+    lookup_mapping(child.pid, va).is_some()
+}
+
+fn lookup_mapping(pid: u64, child_page: u64) -> Option<Mapping> {
     unsafe {
         let page = align_down(child_page);
         let mut i = 0;
         while i < MAPPING_COUNT {
             let m = MAPPINGS[i];
             if m.pid == pid && m.child_page == page {
-                return Some(m.alias_page);
+                return Some(m);
             }
             i += 1;
         }
@@ -417,10 +428,14 @@ fn clear_process_frame_pool(alloc: &mut Allocator, proc_slot: usize) {
     }
 }
 
-fn child_ptr(child: &Child, va: u64) -> Option<*mut u8> {
+fn child_ptr(child: &Child, va: u64, write: bool) -> Option<*mut u8> {
     let page = align_down(va);
     let off = va - page;
-    lookup_alias(child.pid, page).map(|alias| (alias + off) as *mut u8)
+    let mapping = lookup_mapping(child.pid, page)?;
+    if write && !mapping.writable {
+        return None;
+    }
+    Some((mapping.alias_page + off) as *mut u8)
 }
 
 pub(crate) fn copy_from_child(child: &Child, va: u64, out: &mut [u8]) -> bool {
@@ -429,7 +444,7 @@ pub(crate) fn copy_from_child(child: &Child, va: u64, out: &mut [u8]) -> bool {
         let cur = va + done as u64;
         let page_left = (PAGE_SIZE - (cur & (PAGE_SIZE - 1))) as usize;
         let n = min(page_left, out.len() - done);
-        let Some(src) = child_ptr(child, cur) else {
+        let Some(src) = child_ptr(child, cur, false) else {
             return false;
         };
         unsafe { ptr::copy_nonoverlapping(src as *const u8, out[done..].as_mut_ptr(), n) };
@@ -444,7 +459,22 @@ pub(crate) fn copy_to_child(child: &Child, va: u64, src: &[u8]) -> bool {
         let cur = va + done as u64;
         let page_left = (PAGE_SIZE - (cur & (PAGE_SIZE - 1))) as usize;
         let n = min(page_left, src.len() - done);
-        let Some(dst) = child_ptr(child, cur) else {
+        let Some(dst) = child_ptr(child, cur, true) else {
+            return false;
+        };
+        unsafe { ptr::copy_nonoverlapping(src[done..].as_ptr(), dst, n) };
+        done += n;
+    }
+    true
+}
+
+pub(crate) fn copy_to_child_raw(child: &Child, va: u64, src: &[u8]) -> bool {
+    let mut done = 0usize;
+    while done < src.len() {
+        let cur = va + done as u64;
+        let page_left = (PAGE_SIZE - (cur & (PAGE_SIZE - 1))) as usize;
+        let n = min(page_left, src.len() - done);
+        let Some(dst) = child_ptr(child, cur, false) else {
             return false;
         };
         unsafe { ptr::copy_nonoverlapping(src[done..].as_ptr(), dst, n) };

@@ -54,11 +54,13 @@ pub(crate) const CHILD_CNODE_BITS: u64 = 8;
 pub(crate) const CHILD_FAULT_EP: u64 = 1;
 pub(crate) const CHILD_IPC_BUFFER: u64 = 0x7000_0000;
 pub(crate) const CHILD_STACK_TOP: u64 = 0x7001_0000;
-pub(crate) const CHILD_STACK_PAGES: usize = 16;
+pub(crate) const CHILD_STACK_PAGES: usize = 1;
 pub(crate) const CHILD_HEAP_LIMIT: u64 = 0x6800_0000;
+pub(crate) const CHILD_EAGER_HEAP_LIMIT: u64 = 128 * 1024 * 1024;
 pub(crate) const HOST_ALIAS_BASE: u64 = 0x4000_0000;
 pub(crate) const MAX_MAPPINGS: usize = 1024;
 pub(crate) const SBRK_MAPPING_HEADROOM: usize = 128;
+pub(crate) const SBRK_EAGER_MAP_LIMIT: usize = 64;
 pub(crate) const MAX_RECYCLED_SLOTS: usize = MAX_MAPPINGS * 2;
 pub(crate) const MAX_PROCS: usize = 16;
 pub(crate) const PROCESS_UNTYPED_BITS: u64 = 25;
@@ -104,6 +106,7 @@ pub(crate) const FS_README_NODE: usize = 1;
 pub(crate) const FS_CONSOLE_NODE: usize = 2;
 
 pub(crate) const FAULT_UNKNOWN_SYSCALL: u64 = 2;
+pub(crate) const FAULT_VM_FAULT: u64 = 5;
 
 pub(crate) const SYS_FORK: u64 = 1;
 pub(crate) const SYS_EXIT: u64 = 2;
@@ -126,6 +129,9 @@ pub(crate) const SYS_UNLINK: u64 = 18;
 pub(crate) const SYS_LINK: u64 = 19;
 pub(crate) const SYS_MKDIR: u64 = 20;
 pub(crate) const SYS_CLOSE: u64 = 21;
+
+pub(crate) const SBRK_EAGER: u64 = 1;
+pub(crate) const SBRK_LAZY: u64 = 2;
 
 pub(crate) const O_WRONLY: u32 = 0x001;
 pub(crate) const O_RDWR: u32 = 0x002;

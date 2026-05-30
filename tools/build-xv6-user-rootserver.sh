@@ -13,7 +13,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 XV6_DIR="${XV6_DIR:-${ROOT_DIR}/third_party/xv6-riscv}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/target/xv6compat}"
-XV6_USER_BASE="${XV6_USER_BASE:-0x10000000}"
+XV6_USER_BASE="${XV6_USER_BASE:-0x10000}"
 XV6_EXEC_PROGRAMS="${XV6_EXEC_PROGRAMS:-init sh cat echo grep ls wc rm mkdir ln}"
 XV6_USER_MARCH="${XV6_USER_MARCH:-rv64imac}"
 XV6_USER_MABI="${XV6_USER_MABI:-lp64}"
