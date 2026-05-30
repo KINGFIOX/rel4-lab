@@ -36,8 +36,9 @@ Latest verified checkpoints:
   `concreate`, `linkunlink`, `subdir`, `bigwrite`, `bigfile`, `forktest`,
   `sbrkmuch`, `sbrkfail`, the lazy allocation group, and the slow tests
   `bigdir`, `manywrites`, `badwrite`, `execout`, `diskfull`, and
-  `outofinodes`. The full xv6 `usertests` suite now reaches
-  `ALL TESTS PASSED` with
+  `outofinodes`. `diskfull` now also exercises directory-block exhaustion
+  without the former unexpected-`mkdir` diagnostic. The full xv6 `usertests`
+  suite now reaches `ALL TESTS PASSED` with
   `env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests`.
 
 M4.4b unlocked the first timer-gated disabled group on the current RV64,
@@ -160,10 +161,15 @@ host directory-entry table is now large enough for `bigdir`'s 500 hard links
 on top of the embedded exec catalog, while `unlink` continues to recycle
 directory slots. Full-suite validation now passes through `manywrites`,
 `badwrite`, `execout`, `diskfull`, and `outofinodes` and ends in
-`ALL TESTS PASSED`. One known fidelity gap remains visible in the log:
-`diskfull` prints that `mkdir(diskfulldir)` unexpectedly succeeded because the
-current in-memory FS does not model xv6 directory-block allocation pressure;
-the upstream test treats that as diagnostic output and still exits success.
+`ALL TESTS PASSED`.
+
+M5.10 tightens the in-memory FS space model for xv6 directory content.
+Directory entries now consume the same 1KiB data-block pool as regular file
+contents, one block per 64 xv6 `dirent` records, and `mkdir` allocates the new
+directory's own first content block before publishing it in the parent. Failed
+directory extension rolls back the new node and any allocated blocks, so
+`usertests diskfull` no longer prints the former
+`mkdir(diskfulldir) unexpectedly succeeded` diagnostic.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -211,6 +217,7 @@ the upstream test treats that as diagnostic output and still exits success.
 | M5.7 | xv6-host mapping cleanup: `sbrk` shrink, exec reset, and process reap unmap child/alias frames, delete cap slots, and recycle them. Targeted `usertests fourfiles`, `createdelete`, `unlinkread`, `linktest`, `concreate`, `linkunlink`, `subdir`, `bigwrite`, and `bigfile` pass. | ✅ Done |
 | M5.8 | xv6 quick-suite memory semantics: dynamic low user stack with guard page, xv6 `TRAPFRAME` heap limit, sparse large `sbrk` backed by lazy VM faults, reservation-based OOM behavior for `sbrkfail`, and fork resource preflight. `usertests -q` passes. | ✅ Done |
 | M5.9 | xv6 full `usertests` slow section: larger reusable directory table for `bigdir`, enough FS behavior for `manywrites`, `badwrite`, `execout`, `diskfull`, and `outofinodes`; full `usertests` reaches `ALL TESTS PASSED`. | ✅ Done |
+| M5.10 | xv6 directory-block pressure: directories allocate from the same 1KiB data-block pool as files, `mkdir` consumes a child directory block, and `diskfull` no longer reports unexpected `mkdir` success after exhausting blocks. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)

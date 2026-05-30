@@ -1335,7 +1335,7 @@ fn fs_node_size(node: usize) -> usize {
         match FS_NODES[node].kind {
             FS_README => README_BYTES.len(),
             FS_EXEC => EXEC_IMAGES[FS_NODES[node].exec_index].elf.len(),
-            FS_DIR => dir_entry_count(node) * 16,
+            FS_DIR => dir_entry_count(node) * DIRENT_SIZE,
             _ => FS_NODES[node].size,
         }
     }
@@ -1471,11 +1471,11 @@ fn fs_read_dir(alloc: &mut Allocator, child: &mut Child, fd: usize, dst: u64, le
         };
         let off = base_offset + done;
         let mut ent = [0u8; 16];
-        if !dirent_at(node, off / 16, &mut ent) {
+        if !dirent_at(node, off / DIRENT_SIZE, &mut ent) {
             break;
         }
-        let start = off % 16;
-        let n = min(16 - start, len - done);
+        let start = off % DIRENT_SIZE;
+        let n = min(DIRENT_SIZE - start, len - done);
         if !copy_to_child(alloc, child, dst + done as u64, &ent[start..start + n]) {
             return -1;
         }
@@ -1629,9 +1629,17 @@ fn create_fs_node(parent: usize, name: &[u8], kind: u8) -> Option<usize> {
                     exec_index: 0,
                     blocks: [NO_FILE_BLOCK; MAX_FILE_BLOCK_REFS],
                 };
+                if kind == FS_DIR && ensure_dir_block(node, 0).is_none() {
+                    FS_NODES[node] = FsNode::empty();
+                    return None;
+                }
                 NEXT_INO = NEXT_INO.wrapping_add(1);
-                add_dir_entry(parent, name, node)?;
-                return Some(node);
+                if add_dir_entry(parent, name, node).is_some() {
+                    return Some(node);
+                }
+                release_node_blocks(node);
+                FS_NODES[node] = FsNode::empty();
+                return None;
             }
             node += 1;
         }
@@ -1644,9 +1652,14 @@ fn add_dir_entry(parent: usize, name: &[u8], node: usize) -> Option<usize> {
         return None;
     }
     unsafe {
+        if parent >= MAX_FS_NODES || !FS_NODES[parent].used || FS_NODES[parent].kind != FS_DIR {
+            return None;
+        }
         let mut i = 0;
         while i < MAX_DIR_ENTRIES {
             if !DIR_ENTRIES[i].used {
+                let entry_index = dir_entry_count(parent);
+                ensure_dir_block(parent, entry_index / DIRENTS_PER_BLOCK)?;
                 let mut stored = [0u8; DIRSIZ];
                 let name_len = dir_name_len(name);
                 stored[..name_len].copy_from_slice(&name[..name_len]);
@@ -1663,6 +1676,25 @@ fn add_dir_entry(parent: usize, name: &[u8], node: usize) -> Option<usize> {
         }
     }
     None
+}
+
+unsafe fn ensure_dir_block(node: usize, block_ref: usize) -> Option<usize> {
+    unsafe {
+        if node >= MAX_FS_NODES
+            || !FS_NODES[node].used
+            || FS_NODES[node].kind != FS_DIR
+            || block_ref >= MAX_FILE_BLOCK_REFS
+        {
+            return None;
+        }
+        let existing = FS_NODES[node].blocks[block_ref] as usize;
+        if existing < MAX_FILE_BLOCKS {
+            return Some(existing);
+        }
+        let block = alloc_file_block()?;
+        FS_NODES[node].blocks[block_ref] = block as u16;
+        Some(block)
+    }
 }
 
 fn find_dir_entry(parent: usize, name: &[u8]) -> Option<usize> {
@@ -1788,10 +1820,23 @@ fn maybe_free_node(node: usize) {
 
 unsafe fn truncate_file(node: usize) {
     unsafe {
-        if node >= MAX_FS_NODES || FS_NODES[node].kind != FS_FILE {
+        if node >= MAX_FS_NODES || !FS_NODES[node].used {
+            return;
+        }
+        if FS_NODES[node].kind != FS_FILE && FS_NODES[node].kind != FS_DIR {
             if node < MAX_FS_NODES {
                 FS_NODES[node].size = 0;
             }
+            return;
+        }
+        release_node_blocks(node);
+        FS_NODES[node].size = 0;
+    }
+}
+
+unsafe fn release_node_blocks(node: usize) {
+    unsafe {
+        if node >= MAX_FS_NODES {
             return;
         }
         let mut i = 0usize;
@@ -1804,7 +1849,6 @@ unsafe fn truncate_file(node: usize) {
             }
             i += 1;
         }
-        FS_NODES[node].size = 0;
     }
 }
 
