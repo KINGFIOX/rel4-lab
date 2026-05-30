@@ -1,50 +1,6 @@
 use crate::consts::{FD_CLOSED, PROC_UNUSED};
 
-#[repr(C)]
-pub(crate) struct SlotRegion {
-    pub(crate) start: u64,
-    pub(crate) end: u64,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub(crate) struct UntypedDesc {
-    pub(crate) paddr: u64,
-    pub(crate) size_bits: u8,
-    pub(crate) is_device: u8,
-    pub(crate) _padding: [u8; 6],
-}
-
-#[repr(C)]
-pub(crate) struct BootInfo {
-    pub(crate) extra_len: u64,
-    pub(crate) node_id: u64,
-    pub(crate) num_nodes: u64,
-    pub(crate) num_io_pt_levels: u64,
-    pub(crate) ipc_buffer: u64,
-    pub(crate) empty: SlotRegion,
-    pub(crate) shared_frames: SlotRegion,
-    pub(crate) user_image_frames: SlotRegion,
-    pub(crate) user_image_paging: SlotRegion,
-    pub(crate) io_space_caps: SlotRegion,
-    pub(crate) extra_bi_pages: SlotRegion,
-    pub(crate) init_thread_cnode_size_bits: u64,
-    pub(crate) init_thread_domain: u8,
-    pub(crate) _pad_domain: [u8; 7],
-    pub(crate) untyped: SlotRegion,
-    pub(crate) untyped_list: [UntypedDesc; 230],
-}
-
-#[repr(C)]
-pub(crate) struct IpcBuffer {
-    pub(crate) tag: u64,
-    pub(crate) msg: [u64; 120],
-    pub(crate) user_data: u64,
-    pub(crate) caps_or_badges: [u64; 3],
-    pub(crate) receive_cnode: u64,
-    pub(crate) receive_index: u64,
-    pub(crate) receive_depth: u64,
-}
+pub(crate) use sel4_user::BootInfo;
 
 #[derive(Copy, Clone)]
 pub(crate) struct Mapping {
@@ -192,10 +148,4 @@ impl Child {
             pipe_done: 0,
         }
     }
-}
-
-pub(crate) struct IpcMessage {
-    pub(crate) badge: u64,
-    pub(crate) info: u64,
-    pub(crate) mrs: [u64; 64],
 }

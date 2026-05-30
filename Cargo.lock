@@ -7,5 +7,33 @@ name = "kernel"
 version = "0.1.0"
 
 [[package]]
+name = "sel4-user"
+version = "0.1.0"
+
+[[package]]
+name = "virtio-disk-server"
+version = "0.1.0"
+dependencies = [
+ "sel4-user",
+ "xv6-abi",
+]
+
+[[package]]
+name = "xv6-abi"
+version = "0.1.0"
+
+[[package]]
+name = "xv6-fs-server"
+version = "0.1.0"
+dependencies = [
+ "sel4-user",
+ "xv6-abi",
+]
+
+[[package]]
 name = "xv6-host"
 version = "0.1.0"
+dependencies = [
+ "sel4-user",
+ "xv6-abi",
+]

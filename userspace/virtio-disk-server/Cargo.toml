@@ -1,11 +1,11 @@
 [package]
-name = "xv6-host"
+name = "virtio-disk-server"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
 [[bin]]
-name = "xv6-host"
+name = "virtio-disk-server"
 path = "src/main.rs"
 
 [dependencies]

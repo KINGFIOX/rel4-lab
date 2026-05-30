@@ -44,6 +44,14 @@ Latest verified checkpoints:
   without the former unexpected-`mkdir` diagnostic. The full xv6 `usertests`
   suite now reaches `ALL TESTS PASSED` with
   `env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests`.
+- M6.1 has started the microkernel-style xv6 service split. Shared user-space
+  seL4 ABI code now lives in `userspace/sel4-user`, xv6 syscall/fs/disk
+  protocol constants live in `userspace/xv6-abi`, and `xv6-host` consumes those
+  shared crates instead of carrying private copies. `userspace/xv6-fs-server`
+  and `userspace/virtio-disk-server` are now independent no_std Rust 2024
+  server crates that compile against the shared ABI/protocol. The current
+  booted xv6 path still uses the in-host in-memory filesystem; fs.img-backed
+  virtio block I/O is the next migration step, not completed in M6.1.
 
 M4.4b unlocked the first timer-gated disabled group on the current RV64,
 non-MCS, single-core, QEMU configuration: `TIMER0001`, `TIMER0002`,
@@ -198,6 +206,17 @@ payload path. `tools/run-xv6-user.sh` now also rechecks the final QEMU log after
 cleanup so a successful root exit is not reported as a false failure. Verified:
 direct `stressfs`, shell `exec stressfs`, and full `usertests`.
 
+M6.1 begins the xv6 server decomposition required for an xv6 `fs.img` backed by
+virtio block I/O. The seL4 user ABI surface formerly local to `xv6-host`
+(`sel4.rs`, shared constants, BootInfo/IPCBuf layouts, syscall stubs, debug
+helpers, and small endian/alignment utilities) is now the reusable
+`userspace/sel4-user` crate. xv6-facing constants and the first host<->fs /
+fs<->disk IPC operation numbers live in `userspace/xv6-abi`. New
+`xv6-fs-server` and `virtio-disk-server` crates build as no_std user servers and
+log their protocol versions at boot. They are not yet spawned or connected by
+the rootserver; `xv6-host` still owns the current in-memory FS state so existing
+`usertests` remain green while the split is staged.
+
 | Milestone | Description | Status |
 |-----------|-------------|--------|
 | M0 | Build skeleton, no_std ELF cross-compiles | ✅ Done |
@@ -248,6 +267,7 @@ direct `stressfs`, shell `exec stressfs`, and full `usertests`.
 | M5.11 | Blocking pipe reads/writes: empty readers and full writers save reply caps and resume when peer activity changes pipe state; `usertests pipe1` and `usertests preempt` pass. | ✅ Done |
 | M5.12 | Unified xv6 process termination: `exit`, fault kill, and `kill(pid)` share fd cleanup, blocked reply-cap cleanup, pipe waiter wakeups, reparenting, zombie status, and waiting-parent reply behavior. `usertests killstatus`, `preempt`, `reparent`, and full `usertests` pass. | ✅ Done |
 | M5.13 | Full xv6 `UPROGS` exec catalog: the default catalog now embeds `cat`, `echo`, `forktest`, `grep`, `init`, `kill`, `ln`, `ls`, `mkdir`, `rm`, `sh`, `stressfs`, `usertests`, `grind`, `wc`, `zombie`, `logstress`, `forphan`, and `dorphan`; direct `stressfs`, shell `exec stressfs`, and full `usertests` pass. | ✅ Done |
+| M6.1 | Split groundwork for xv6 service servers: extracted `sel4-user`, added `xv6-abi`, migrated `xv6-host` to shared crates, and added compiling no_std `xv6-fs-server` / `virtio-disk-server` skeletons. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
@@ -346,7 +366,7 @@ Test suite passed. 124 tests passed. 43 tests disabled.
 All is well in the universe
 ```
 
-### xv6 Compatibility Checkpoint (M5.3-M5.12)
+### xv6 Compatibility Checkpoint (M5.3-M6.1)
 
 The current xv6 path is a user-space compatibility server, not a full Unix
 server yet. The helper builds one xv6 user program from
@@ -359,8 +379,10 @@ child's positive xv6 syscalls via `UnknownSyscall` fault IPC.
 The host crate remains `edition = "2024"` and enforces the Rust 2024 unsafe
 rules at compile time with `deny(unsafe_attr_outside_unsafe)` and
 `deny(unsafe_op_in_unsafe_fn)`. Its implementation is split by responsibility
-under `userspace/xv6-host/src`: seL4 ABI stubs, boot allocation, child
-TCB/VSpace setup, payload mapping, utility code, and xv6 syscall handling.
+under `userspace/xv6-host/src`: boot allocation, child TCB/VSpace setup,
+payload mapping, utility code, and xv6 syscall handling. Common seL4 user ABI
+definitions have moved to `userspace/sel4-user`; common xv6 syscall/fs/disk
+protocol definitions have moved to `userspace/xv6-abi`.
 
 With the current SMP upstream build, use two harts (the helper defaults to
 `SMP=2`):
@@ -442,8 +464,9 @@ across forked processes. Process termination now uses one path for normal
 and blocked reply-cap cleanup.
 Remaining Unix gaps are a real xv6 filesystem image, persistence,
 permissions/devices beyond console, dynamic host keyboard input, full
-untyped-memory reclamation beyond cap-slot reuse, and resource scaling beyond
-the current fixed tables. With no
+untyped-memory reclamation beyond cap-slot reuse, resource scaling beyond
+the current fixed tables, and wiring the new `xv6-fs-server` /
+`virtio-disk-server` crates into the boot-time server graph. With no
 scripted input, `init` now reaches `exec("sh")` and the shell blocks on console
 read instead of exiting and forcing `init` into a restart loop.
 
@@ -503,7 +526,11 @@ microkernel/
 │       │   └── invocation.rs  # Untyped_Retype, Page_Map, PageTable_Map, CNode
 │       │                      #   ops, isCapRevocable, finalize_cap(Frame/CNode)
 ├── userspace/
-│   └── xv6-host/              # no_std seL4 rootserver that hosts xv6 user ELFs
+│   ├── sel4-user/             # shared no_std seL4 user ABI wrappers
+│   ├── xv6-abi/               # shared xv6 syscall/fs/disk protocol constants
+│   ├── xv6-host/              # no_std seL4 rootserver that hosts xv6 user ELFs
+│   ├── xv6-fs-server/         # staged xv6 fs server crate
+│   └── virtio-disk-server/    # staged virtio block server crate
 ├── third_party/
 │   └── xv6-riscv/             # upstream xv6 tree used for user programs
 └── tools/
@@ -609,3 +636,7 @@ plus semantics that are implemented only as far as sel4test currently needs:
 5. **Zombie/finalisation fidelity.** CNode/TCB finalisation is good
    enough for the enabled tests, but should be brought closer to the C
    kernel's Zombie reduction model before expanding coverage further.
+6. **xv6 service split.** Next xv6 work is to spawn `xv6-fs-server` and
+   `virtio-disk-server` as separate user servers, pass endpoint/device caps
+   through a small supervisor/rootserver setup, attach xv6 `fs.img` to QEMU as
+   a virtio block device, and replace the in-host in-memory FS with IPC calls.
