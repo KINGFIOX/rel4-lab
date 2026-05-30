@@ -2,10 +2,10 @@ use core::cmp::min;
 
 use crate::allocator::Allocator;
 use crate::child::{
-    clear_process_mappings, clone_address_space, copy_cstr_from_child, copy_from_child,
-    copy_to_child, create_child, destroy_child_objects, frame_pool_available, is_child_page_mapped,
-    load_elf, map_lazy_child_page, map_stack, mapping_slots_available, read_user_context,
-    reset_process_mappings, unmap_child_range, write_user_context,
+    clear_process_mappings, clone_address_space, clone_page_count, copy_cstr_from_child,
+    copy_from_child, copy_to_child, create_child, destroy_child_objects, frame_pool_available,
+    is_child_page_mapped, load_elf, map_lazy_child_page, map_stack, mapping_slots_available,
+    read_user_context, reset_process_mappings, unmap_child_range, write_user_context,
 };
 use crate::consts::*;
 use crate::sel4::{call_checked, msg_info, sel4_send, sel4_yield};
@@ -17,6 +17,7 @@ static mut PIPES: [Pipe; MAX_PIPES] = [Pipe::closed(); MAX_PIPES];
 static mut OPEN_FILES: [OpenFile; MAX_OPEN_FILES] = [OpenFile::closed(); MAX_OPEN_FILES];
 static mut NEXT_PID: u64 = 2;
 static mut CONSOLE_INPUT_POS: usize = 0;
+static mut SPARSE_EAGER_RESERVED: u64 = 0;
 static mut FS_NODES: [FsNode; MAX_FS_NODES] = [FsNode::empty(); MAX_FS_NODES];
 static mut DIR_ENTRIES: [DirEntry; MAX_DIR_ENTRIES] = [DirEntry::empty(); MAX_DIR_ENTRIES];
 static mut FILE_BLOCKS: [[u8; FS_BLOCK_SIZE]; MAX_FILE_BLOCKS] =
@@ -145,6 +146,19 @@ pub(crate) fn handle_xv6_fault(
         if handle_lazy_page_fault(alloc, &mut procs[proc_idx], fault_addr, fsr) {
             return SyscallResult::ReplyFrame([0; 11]);
         }
+        log("xv6-host: unhandled VM fault pid=");
+        print_u64(procs[proc_idx].pid);
+        log(" addr=");
+        print_hex(fault_addr);
+        log(" fsr=");
+        print_u64(fsr);
+        log(" heap_start=");
+        print_hex(procs[proc_idx].heap_start);
+        log(" brk=");
+        print_hex(procs[proc_idx].brk);
+        log(" limit=");
+        print_hex(CHILD_HEAP_LIMIT);
+        log("\n");
     }
     fault_kill(alloc, procs, proc_idx, label)
 }
@@ -479,20 +493,22 @@ fn sys_sbrk(alloc: &mut Allocator, child: &mut Child, increment: i64, mode: u64)
     if new_brk > CHILD_HEAP_LIMIT {
         return -1;
     }
-    if mode == SBRK_EAGER && new_brk > CHILD_EAGER_HEAP_LIMIT {
-        return -1;
-    }
     if mode != SBRK_EAGER && mode != SBRK_LAZY {
         return -1;
     }
     if new_brk < old {
+        release_sparse_eager(child, old - new_brk);
         let new_mapped_end = align_up(new_brk);
         unmap_child_range(alloc, child.pid, new_mapped_end, align_up(old));
         child.heap_mapped_end = child.heap_mapped_end.min(new_mapped_end);
     }
-    if new_brk > child.heap_mapped_end {
+    if new_brk > old {
         let target_end = align_up(new_brk);
-        let first_page = align_up(child.heap_mapped_end);
+        let first_page = if mode == SBRK_EAGER {
+            align_up(old)
+        } else {
+            align_up(child.heap_mapped_end)
+        };
         let needed = ((target_end.saturating_sub(first_page)) / PAGE_SIZE) as usize;
         if needed <= SBRK_EAGER_MAP_LIMIT {
             let mapping_available = mapping_slots_available();
@@ -503,16 +519,50 @@ fn sys_sbrk(alloc: &mut Allocator, child: &mut Child, increment: i64, mode: u64)
             {
                 return -1;
             }
-            let mut page = align_up(child.heap_mapped_end);
+            let mut page = first_page;
             while page < target_end {
                 map_lazy_child_page(alloc, child, page, true, false);
                 page += PAGE_SIZE;
             }
-            child.heap_mapped_end = target_end;
+            if mode != SBRK_EAGER || target_end > child.heap_mapped_end {
+                child.heap_mapped_end = target_end;
+            }
+        } else if mode == SBRK_EAGER {
+            let sparse_bytes = target_end.saturating_sub(first_page);
+            if !reserve_sparse_eager(child, sparse_bytes) {
+                return -1;
+            }
         }
     }
     child.brk = new_brk;
     old as i64
+}
+
+fn reserve_sparse_eager(child: &mut Child, bytes: u64) -> bool {
+    unsafe {
+        if SPARSE_EAGER_RESERVED.saturating_add(bytes) > SPARSE_EAGER_RESERVE_LIMIT {
+            return false;
+        }
+        SPARSE_EAGER_RESERVED = SPARSE_EAGER_RESERVED.saturating_add(bytes);
+    }
+    child.sparse_reserved = child.sparse_reserved.saturating_add(bytes);
+    true
+}
+
+fn release_sparse_eager(child: &mut Child, bytes: u64) {
+    let n = min(child.sparse_reserved, bytes);
+    child.sparse_reserved -= n;
+    unsafe {
+        SPARSE_EAGER_RESERVED = SPARSE_EAGER_RESERVED.saturating_sub(n);
+    }
+}
+
+fn release_all_sparse_eager(child: &mut Child) {
+    let n = child.sparse_reserved;
+    child.sparse_reserved = 0;
+    unsafe {
+        SPARSE_EAGER_RESERVED = SPARSE_EAGER_RESERVED.saturating_sub(n);
+    }
 }
 
 fn handle_lazy_page_fault(
@@ -556,6 +606,7 @@ fn fault_kill(
         halt_loop();
     }
     call_checked(procs[proc_idx].tcb, LABEL_TCB_SUSPEND, &[], &[]);
+    release_all_sparse_eager(&mut procs[proc_idx]);
     close_all_fds(&mut procs[proc_idx]);
     reparent_children(alloc, procs, pid);
     procs[proc_idx].state = PROC_ZOMBIE;
@@ -578,6 +629,24 @@ fn sys_fork(
         return -1;
     };
     let parent = procs[parent_idx];
+    let clone_pages = clone_page_count(&parent);
+    let frame_slots_needed = clone_pages.saturating_sub(frame_pool_available());
+    let slots_needed = 4usize
+        .saturating_add(clone_pages)
+        .saturating_add(frame_slots_needed);
+    if alloc.slots_available() < slots_needed.saturating_add(FORK_SLOT_HEADROOM) {
+        return -1;
+    }
+    if mapping_slots_available() < clone_pages.saturating_add(1 + FORK_SLOT_HEADROOM) {
+        return -1;
+    }
+    unsafe {
+        if SPARSE_EAGER_RESERVED.saturating_add(parent.sparse_reserved) > SPARSE_EAGER_RESERVE_LIMIT
+        {
+            return -1;
+        }
+    }
+
     let pid = unsafe {
         let pid = NEXT_PID;
         NEXT_PID = NEXT_PID.wrapping_add(1);
@@ -589,6 +658,9 @@ fn sys_fork(
     child.brk = parent.brk;
     child.heap_start = parent.heap_start;
     child.heap_mapped_end = parent.heap_mapped_end;
+    if parent.sparse_reserved != 0 {
+        let _ = reserve_sparse_eager(&mut child, parent.sparse_reserved);
+    }
     child.fds = parent.fds;
     child.cwd = parent.cwd;
     retain_fd_refs(&child);
@@ -623,6 +695,7 @@ fn sys_exit(
     if procs[proc_idx].parent_pid == 0 {
         halt_loop();
     }
+    release_all_sparse_eager(&mut procs[proc_idx]);
     close_all_fds(&mut procs[proc_idx]);
     reparent_children(alloc, procs, pid);
     procs[proc_idx].state = PROC_ZOMBIE;
@@ -745,6 +818,7 @@ fn reparent_children(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS], exit
 }
 
 fn reap_process(alloc: &mut Allocator, child: &mut Child) {
+    release_all_sparse_eager(child);
     clear_process_mappings(alloc, child.pid);
     destroy_child_objects(alloc, child);
     *child = Child::empty();
@@ -757,6 +831,7 @@ fn sys_kill(procs: &mut [Child; MAX_PROCS], pid: i64) -> i64 {
     for proc in procs.iter_mut() {
         if proc.pid == pid as u64 && proc.state != PROC_UNUSED {
             call_checked(proc.tcb, LABEL_TCB_SUSPEND, &[], &[]);
+            release_all_sparse_eager(proc);
             close_all_fds(proc);
             proc.state = PROC_ZOMBIE;
             proc.exit_status = -1;
@@ -853,7 +928,7 @@ fn setup_exec_stack(
     arg_lens: &[usize; MAX_EXEC_ARGS],
     argc: usize,
 ) -> Option<(u64, u64)> {
-    let mut sp = CHILD_STACK_TOP;
+    let mut sp = child.heap_start;
     let mut arg_ptrs = [0u64; MAX_EXEC_ARGS];
     for i in 0..argc {
         let len = arg_lens[i];

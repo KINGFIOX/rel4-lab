@@ -91,6 +91,7 @@ pub(crate) fn create_child(
         brk: 0,
         heap_start: 0,
         heap_mapped_end: 0,
+        sparse_reserved: 0,
         fds: [crate::types::FdEntry::closed(); MAX_FD],
         cwd: FS_ROOT_NODE,
         wait_status_ptr: 0,
@@ -240,17 +241,22 @@ pub(crate) fn frame_pool_available() -> usize {
     unsafe { FRAME_POOL_LEN }
 }
 
-pub(crate) fn map_stack(alloc: &mut Allocator, child: &Child) {
+pub(crate) fn map_stack(alloc: &mut Allocator, child: &mut Child) {
+    let guard_base = align_up(child.brk);
+    let stack_top = guard_base + ((CHILD_STACK_PAGES as u64 + 1) * PAGE_SIZE);
     for i in 0..CHILD_STACK_PAGES {
-        let va = CHILD_STACK_TOP - ((i as u64 + 1) * PAGE_SIZE);
+        let va = stack_top - ((i as u64 + 1) * PAGE_SIZE);
         map_fresh_child_page(alloc, child, va, true, false);
     }
+    child.brk = stack_top;
+    child.heap_start = stack_top;
+    child.heap_mapped_end = stack_top;
 }
 
 pub(crate) fn start_child(child: &Child) {
     let mut ctx = [0u64; USER_CONTEXT_WORDS];
     ctx[0] = child.entry;
-    ctx[2] = CHILD_STACK_TOP;
+    ctx[2] = child.heap_start;
     ctx[16] = 0;
     ctx[17] = 0;
     write_user_context(child.tcb, &ctx, true);
@@ -627,6 +633,23 @@ pub(crate) fn clone_address_space(alloc: &mut Allocator, parent: &Child, child: 
             }
             i += 1;
         }
+    }
+}
+
+pub(crate) fn clone_page_count(parent: &Child) -> usize {
+    unsafe {
+        let mut count = 0usize;
+        let mut i = 0;
+        let live_heap_end = align_up(parent.brk);
+        while i < MAPPING_COUNT {
+            let m = MAPPINGS[i];
+            let freed_heap_page = m.child_page >= live_heap_end && m.child_page < CHILD_HEAP_LIMIT;
+            if m.pid == parent.pid && m.child_page != CHILD_IPC_BUFFER && !freed_heap_page {
+                count += 1;
+            }
+            i += 1;
+        }
+        count
     }
 }
 

@@ -33,7 +33,12 @@ Latest verified checkpoints:
   scripted console input and run `fork/exec/wait` command lines, including a
   simple `echo ... | wc` pipeline. Targeted `usertests` coverage now includes
   `sharedfd`, `fourfiles`, `createdelete`, `unlinkread`, `linktest`,
-  `concreate`, `linkunlink`, `subdir`, `bigwrite`, and `bigfile`.
+  `concreate`, `linkunlink`, `subdir`, `bigwrite`, `bigfile`, `forktest`,
+  `sbrkmuch`, `sbrkfail`, the lazy allocation group, and the slow tests
+  `bigdir`, `manywrites`, `badwrite`, `execout`, `diskfull`, and
+  `outofinodes`. The full xv6 `usertests` suite now reaches
+  `ALL TESTS PASSED` with
+  `env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests`.
 
 M4.4b unlocked the first timer-gated disabled group on the current RV64,
 non-MCS, single-core, QEMU configuration: `TIMER0001`, `TIMER0002`,
@@ -138,6 +143,28 @@ by `countfree()` and lets the next targeted `usertests` group pass:
 reports success for root-process `exit(0)` with a numeric `pid=1` boundary, so
 child exits like `pid=19` and root `exit(1)` are not false positives.
 
+M5.8 aligns xv6 process memory more closely with xv6's own layout and resource
+failure behavior. `xv6-host` now places the user stack immediately above the
+loaded ELF with a guard page, then starts `sbrk` above that stack instead of
+using a fixed high stack inside the heap range. `CHILD_HEAP_LIMIT` is now xv6's
+`TRAPFRAME`, large eager `sbrk` requests become sparse mappings serviced by VM
+fault IPC, and a host-side sparse reservation limit makes oversized or
+concurrent eager allocations fail gracefully instead of exhausting seL4 CSpace.
+`fork` now estimates clone slots/mapping slots and returns `-1` on pressure, so
+`forktest` follows the xv6 graceful-failure path. Verified targeted cases:
+`lazy_alloc`, `lazy_unmap`, `lazy_copy`, `lazy_sbrk`, `forktest`, `sbrkmuch`,
+and `sbrkfail`; verified suite: `usertests -q`.
+
+M5.9 gets the full xv6 `usertests` binary through its slow-test section. The
+host directory-entry table is now large enough for `bigdir`'s 500 hard links
+on top of the embedded exec catalog, while `unlink` continues to recycle
+directory slots. Full-suite validation now passes through `manywrites`,
+`badwrite`, `execout`, `diskfull`, and `outofinodes` and ends in
+`ALL TESTS PASSED`. One known fidelity gap remains visible in the log:
+`diskfull` prints that `mkdir(diskfulldir)` unexpectedly succeeded because the
+current in-memory FS does not model xv6 directory-block allocation pressure;
+the upstream test treats that as diagnostic output and still exits success.
+
 | Milestone | Description | Status |
 |-----------|-------------|--------|
 | M0 | Build skeleton, no_std ELF cross-compiles | ✅ Done |
@@ -182,6 +209,8 @@ child exits like `pid=19` and root `exit(1)` are not false positives.
 | M5.5 | Scripted shell path: `XV6_CONSOLE_INPUT`/`--stdin`, blocking empty console reads, per-process fd tables, fd refcounting across `fork`, close-on-exit, and basic cross-process pipes. `sh` can run `echo`, `ls`, `cat README`, and `echo pipe data \| wc`. | ✅ Done |
 | M5.6 | Shared open-file table and mutable in-memory FS: `fork` inherits cwd, `dup`/`fork` share file offsets, file capacity is large enough for xv6 `sharedfd`, `sbrk` preserves mapping headroom, and targeted `usertests sharedfd` passes. | ✅ Done |
 | M5.7 | xv6-host mapping cleanup: `sbrk` shrink, exec reset, and process reap unmap child/alias frames, delete cap slots, and recycle them. Targeted `usertests fourfiles`, `createdelete`, `unlinkread`, `linktest`, `concreate`, `linkunlink`, `subdir`, `bigwrite`, and `bigfile` pass. | ✅ Done |
+| M5.8 | xv6 quick-suite memory semantics: dynamic low user stack with guard page, xv6 `TRAPFRAME` heap limit, sparse large `sbrk` backed by lazy VM faults, reservation-based OOM behavior for `sbrkfail`, and fork resource preflight. `usertests -q` passes. | ✅ Done |
+| M5.9 | xv6 full `usertests` slow section: larger reusable directory table for `bigdir`, enough FS behavior for `manywrites`, `badwrite`, `execout`, `diskfull`, and `outofinodes`; full `usertests` reaches `ALL TESTS PASSED`. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)

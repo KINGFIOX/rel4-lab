@@ -61,7 +61,7 @@ fn run(bi_ptr: *const BootInfo) -> ! {
     xv6::init_fds(&mut procs[0]);
     setup_timer_notification(&mut alloc);
     load_payload(&mut alloc, &mut procs[0]);
-    map_stack(&mut alloc, &procs[0]);
+    map_stack(&mut alloc, &mut procs[0]);
     start_child(&procs[0]);
 
     log("xv6-host: waiting for fault IPC\n");
