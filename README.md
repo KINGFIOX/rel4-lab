@@ -743,9 +743,26 @@ nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m621-usertests-full.l
 The full run log `target/xv6-m621-usertests-full.log` ended with
 `ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`.
 
-Remaining fs-server work is further decomposition of directory/path resolution,
-file operation handlers, and syscall dispatch so each server module has a clear
-ownership boundary.
+M6.22 moves directory and path resolution into `dir.rs`: dirent read/write,
+root lookup, path and parent lookup, empty-directory checks, directory entry
+insertion/removal, node creation, and path-byte logging now live outside the
+IPC handler file. `main.rs` is down to 587 lines and is mostly request
+dispatch plus per-op argument validation.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m622-echo.log ./tools/run-xv6-user.sh echo dir split
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m622-usertests-full-rerun.log ./tools/run-xv6-user.sh usertests
+```
+
+The full rerun log `target/xv6-m622-usertests-full-rerun.log` ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`.
+
+Remaining fs-server work is further decomposition of file operation handlers
+and syscall dispatch so each server module has a clear ownership boundary.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -818,6 +835,7 @@ ownership boundary.
 | M6.19 | Quieter default xv6 server logs: successful virtio block read/write traces are behind `XV6_TRACE_BLOCK_IO=1`, preserving error and startup logs while making smoke/full-suite logs inspectable. Full `usertests` still passes, and the default full-suite log drops from 621082 to 17157 lines. | ✅ Done |
 | M6.20 | First xv6-fs-server module split: disk/runtime FS types and statics moved to `types.rs`; transaction, redo-log, disk IPC, and shared-block helpers moved to `block.rs`. Full `usertests` still passes. | ✅ Done |
 | M6.21 | Inode-layer split: raw dinode IO, open-reference tracking, inode allocation/free, truncation, data writes, bitmap allocation, and direct/indirect block mapping moved to `inode.rs`. Full `usertests` still passes. | ✅ Done |
+| M6.22 | Directory/path split: dirent read/write, root/path/parent lookup, empty-directory checks, directory entry insertion/removal, node creation, and path-byte logging moved to `dir.rs`. Full `usertests` still passes. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
