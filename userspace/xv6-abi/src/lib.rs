@@ -92,6 +92,126 @@ pub const DISK_OP_FLUSH: u64 = 4;
 pub const VIRTIO_BLK_SECTOR_SIZE: usize = 512;
 pub const XV6_FS_SECTORS_PER_BLOCK: usize = FS_BLOCK_SIZE / VIRTIO_BLK_SECTOR_SIZE;
 
+pub const XV6_FS_MAGIC: u32 = 0x1020_3040;
+pub const XV6_FS_SIZE_BLOCKS: u32 = 2000;
+pub const XV6_FS_ROOT_INUM: u32 = 1;
+pub const XV6_FS_NDIRECT: usize = 12;
+pub const XV6_FS_NINDIRECT: usize = FS_BLOCK_SIZE / core::mem::size_of::<u32>();
+pub const XV6_FS_MAXFILE_BLOCKS: usize = XV6_FS_NDIRECT + XV6_FS_NINDIRECT;
+
+pub const VIRTIO_MMIO_BASE: u64 = 0x1000_1000;
+pub const VIRTIO_MMIO_SIZE: u64 = 0x1000;
+pub const VIRTIO0_IRQ: u64 = 1;
+
+pub const VIRTIO_MMIO_MAGIC_VALUE: u64 = 0x000;
+pub const VIRTIO_MMIO_VERSION: u64 = 0x004;
+pub const VIRTIO_MMIO_DEVICE_ID: u64 = 0x008;
+pub const VIRTIO_MMIO_VENDOR_ID: u64 = 0x00c;
+pub const VIRTIO_MMIO_DEVICE_FEATURES: u64 = 0x010;
+pub const VIRTIO_MMIO_DRIVER_FEATURES: u64 = 0x020;
+pub const VIRTIO_MMIO_QUEUE_SEL: u64 = 0x030;
+pub const VIRTIO_MMIO_QUEUE_NUM_MAX: u64 = 0x034;
+pub const VIRTIO_MMIO_QUEUE_NUM: u64 = 0x038;
+pub const VIRTIO_MMIO_QUEUE_READY: u64 = 0x044;
+pub const VIRTIO_MMIO_QUEUE_NOTIFY: u64 = 0x050;
+pub const VIRTIO_MMIO_INTERRUPT_STATUS: u64 = 0x060;
+pub const VIRTIO_MMIO_INTERRUPT_ACK: u64 = 0x064;
+pub const VIRTIO_MMIO_STATUS: u64 = 0x070;
+pub const VIRTIO_MMIO_QUEUE_DESC_LOW: u64 = 0x080;
+pub const VIRTIO_MMIO_QUEUE_DESC_HIGH: u64 = 0x084;
+pub const VIRTIO_MMIO_DRIVER_DESC_LOW: u64 = 0x090;
+pub const VIRTIO_MMIO_DRIVER_DESC_HIGH: u64 = 0x094;
+pub const VIRTIO_MMIO_DEVICE_DESC_LOW: u64 = 0x0a0;
+pub const VIRTIO_MMIO_DEVICE_DESC_HIGH: u64 = 0x0a4;
+
+pub const VIRTIO_CONFIG_S_ACKNOWLEDGE: u32 = 1;
+pub const VIRTIO_CONFIG_S_DRIVER: u32 = 2;
+pub const VIRTIO_CONFIG_S_DRIVER_OK: u32 = 4;
+pub const VIRTIO_CONFIG_S_FEATURES_OK: u32 = 8;
+
+pub const VIRTIO_BLK_DEVICE_ID: u32 = 2;
+pub const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
+pub const VIRTIO_MMIO_VERSION_MODERN: u32 = 2;
+pub const VIRTIO_MMIO_VENDOR_QEMU: u32 = 0x554d_4551;
+
+pub const VIRTIO_BLK_T_IN: u32 = 0;
+pub const VIRTIO_BLK_T_OUT: u32 = 1;
+pub const VIRTQ_DESC_F_NEXT: u16 = 1;
+pub const VIRTQ_DESC_F_WRITE: u16 = 2;
+pub const VIRTIO_QUEUE_NUM: usize = 8;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Xv6Superblock {
+    pub magic: u32,
+    pub size: u32,
+    pub nblocks: u32,
+    pub ninodes: u32,
+    pub nlog: u32,
+    pub logstart: u32,
+    pub inodestart: u32,
+    pub bmapstart: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Xv6Dinode {
+    pub typ: i16,
+    pub major: i16,
+    pub minor: i16,
+    pub nlink: i16,
+    pub size: u32,
+    pub addrs: [u32; XV6_FS_NDIRECT + 1],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Xv6Dirent {
+    pub inum: u16,
+    pub name: [u8; DIRSIZ],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VirtqDesc {
+    pub addr: u64,
+    pub len: u32,
+    pub flags: u16,
+    pub next: u16,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VirtqAvail {
+    pub flags: u16,
+    pub idx: u16,
+    pub ring: [u16; VIRTIO_QUEUE_NUM],
+    pub unused: u16,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VirtqUsedElem {
+    pub id: u32,
+    pub len: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VirtqUsed {
+    pub flags: u16,
+    pub idx: u16,
+    pub ring: [VirtqUsedElem; VIRTIO_QUEUE_NUM],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VirtioBlkReq {
+    pub typ: u32,
+    pub reserved: u32,
+    pub sector: u64,
+}
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct Xv6Stat {

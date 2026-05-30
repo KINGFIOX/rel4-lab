@@ -8,6 +8,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TIMEOUT="${TIMEOUT:-30}"
 SMP="${SMP:-2}"
+XV6_ATTACH_FS_IMG="${XV6_ATTACH_FS_IMG:-1}"
+XV6_BUILD_FS_IMG="${XV6_BUILD_FS_IMG:-1}"
+XV6_FS_IMG="${XV6_FS_IMG:-${ROOT_DIR}/target/xv6compat/fs.img}"
 VERBOSE=0
 
 log() { printf '[run-xv6-user] %s\n' "$*" >&2; }
@@ -23,6 +26,11 @@ Examples:
 ' sh
   tools/run-xv6-user.sh --stdin-file script.sh sh
   TIMEOUT=60 tools/run-xv6-user.sh sh
+
+Environment:
+  XV6_ATTACH_FS_IMG=0  boot without attaching xv6 fs.img as virtio-blk
+  XV6_BUILD_FS_IMG=0   attach existing XV6_FS_IMG without rebuilding it
+  XV6_FS_IMG=PATH      fs image path, default target/xv6compat/fs.img
 EOF
 }
 
@@ -70,6 +78,13 @@ ROOTSERVER_ELF="$("${ROOT_DIR}/tools/build-xv6-user-rootserver.sh" "$@")"
 PACKED_IMAGE="${ROOT_DIR}/images/xv6-${PROGRAM}-image-riscv-qemu-riscv-virt"
 LOG_FILE="${LOG_FILE:-${ROOT_DIR}/target/xv6-${PROGRAM}-last-run.log}"
 
+if [[ "${XV6_ATTACH_FS_IMG}" == "1" && "${XV6_BUILD_FS_IMG}" == "1" ]]; then
+    XV6_FS_IMG="$(XV6_FS_IMG="${XV6_FS_IMG}" "${ROOT_DIR}/tools/build-xv6-fs-img.sh")"
+fi
+if [[ "${XV6_ATTACH_FS_IMG}" == "1" && ! -f "${XV6_FS_IMG}" ]]; then
+    die "XV6_FS_IMG not found: ${XV6_FS_IMG}"
+fi
+
 log "packing image"
 ROOTSERVER_ELF="${ROOTSERVER_ELF}" OUT_IMAGE="${PACKED_IMAGE}" "${ROOT_DIR}/tools/pack-image.sh"
 
@@ -86,6 +101,13 @@ qemu_cmd=(
     -bios none
     -kernel "${PACKED_IMAGE}"
 )
+if [[ "${XV6_ATTACH_FS_IMG}" == "1" ]]; then
+    qemu_cmd+=(
+        -global virtio-mmio.force-legacy=false
+        -drive "file=${XV6_FS_IMG},if=none,format=raw,id=xv6fs"
+        -device "virtio-blk-device,drive=xv6fs,bus=virtio-mmio-bus.0"
+    )
+fi
 
 log "booting ${PROGRAM}; log: ${LOG_FILE}"
 if [[ "${VERBOSE}" -eq 1 ]]; then
