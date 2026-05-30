@@ -455,7 +455,12 @@ fn sys_sbrk(alloc: &mut Allocator, child: &mut Child, increment: i64, mode: u64)
     let new_brk = if increment >= 0 {
         old.saturating_add(increment as u64)
     } else {
-        old.saturating_sub((-increment) as u64)
+        let decrement = (-increment) as u64;
+        if decrement > old {
+            old
+        } else {
+            old - decrement
+        }
     };
     if new_brk > CHILD_HEAP_LIMIT {
         return -1;
@@ -498,7 +503,7 @@ fn handle_lazy_page_fault(
     fault_addr: u64,
     fsr: u64,
 ) -> bool {
-    if fault_addr >= child.brk || fault_addr >= CHILD_HEAP_LIMIT {
+    if fault_addr < child.heap_start || fault_addr >= child.brk || fault_addr >= CHILD_HEAP_LIMIT {
         return false;
     }
     if is_child_page_mapped(child, fault_addr) {
@@ -561,6 +566,7 @@ fn sys_fork(
     let mut child = create_child(alloc, slot, pid, parent.pid, parent.fault_ep);
     child.entry = parent.entry;
     child.brk = parent.brk;
+    child.heap_start = parent.heap_start;
     child.heap_mapped_end = parent.heap_mapped_end;
     child.fds = parent.fds;
     child.cwd = parent.cwd;

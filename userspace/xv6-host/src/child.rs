@@ -77,6 +77,7 @@ pub(crate) fn create_child(
         fault_ep,
         entry: 0,
         brk: 0,
+        heap_start: 0,
         heap_mapped_end: 0,
         fds: [crate::types::FdEntry::closed(); MAX_FD],
         cwd: FS_ROOT_NODE,
@@ -159,6 +160,7 @@ pub(crate) fn load_elf(alloc: &mut Allocator, child: &mut Child, elf: &[u8]) {
 
     child.entry = entry;
     child.brk = align_up(image_end);
+    child.heap_start = child.brk;
     child.heap_mapped_end = child.brk;
     log("xv6-host: payload entry=");
     print_hex(entry);
