@@ -55,7 +55,7 @@ fn run(bi_ptr: *const BootInfo) -> ! {
     let mut alloc = Allocator::new(bi);
     let fault_ep = alloc.retype_one(OBJ_ENDPOINT, 0);
     let mut procs = [Child::empty(); MAX_PROCS];
-    procs[0] = create_child(&mut alloc, 1, 0, fault_ep);
+    procs[0] = create_child(&mut alloc, 0, 1, 0, fault_ep);
     xv6::init_fds(&mut procs[0]);
     setup_timer_notification(&mut alloc);
     load_payload(&mut alloc, &mut procs[0]);

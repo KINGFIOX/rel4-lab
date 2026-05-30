@@ -51,6 +51,8 @@ pub(crate) struct Mapping {
     pub(crate) pid: u64,
     pub(crate) child_page: u64,
     pub(crate) alias_page: u64,
+    pub(crate) frame_slot: u64,
+    pub(crate) alias_slot: u64,
     pub(crate) writable: bool,
     pub(crate) executable: bool,
 }
@@ -85,7 +87,8 @@ pub(crate) struct FsNode {
     pub(crate) nlink: u16,
     pub(crate) open_refs: u16,
     pub(crate) size: usize,
-    pub(crate) data: [u8; crate::consts::MAX_FILE_BYTES],
+    pub(crate) exec_index: usize,
+    pub(crate) blocks: [u16; crate::consts::MAX_FILE_BLOCK_REFS],
 }
 
 impl FsNode {
@@ -98,7 +101,8 @@ impl FsNode {
             nlink: 0,
             open_refs: 0,
             size: 0,
-            data: [0; crate::consts::MAX_FILE_BYTES],
+            exec_index: 0,
+            blocks: [crate::consts::NO_FILE_BLOCK; crate::consts::MAX_FILE_BLOCK_REFS],
         }
     }
 }
@@ -131,7 +135,9 @@ pub(crate) struct Child {
     pub(crate) state: u8,
     pub(crate) exit_status: i32,
     pub(crate) tcb: u64,
+    pub(crate) cnode: u64,
     pub(crate) vspace: u64,
+    pub(crate) untyped: u64,
     pub(crate) fault_ep: u64,
     pub(crate) entry: u64,
     pub(crate) brk: u64,
@@ -141,6 +147,12 @@ pub(crate) struct Child {
     pub(crate) wait_status_ptr: u64,
     pub(crate) wait_reply_slot: u64,
     pub(crate) wait_reply_mrs: [u64; 11],
+    pub(crate) pipe_reply_slot: u64,
+    pub(crate) pipe_reply_mrs: [u64; 11],
+    pub(crate) pipe_fd: usize,
+    pub(crate) pipe_buf: u64,
+    pub(crate) pipe_len: usize,
+    pub(crate) pipe_done: usize,
 }
 
 impl Child {
@@ -151,7 +163,9 @@ impl Child {
             state: PROC_UNUSED,
             exit_status: 0,
             tcb: 0,
+            cnode: 0,
             vspace: 0,
+            untyped: 0,
             fault_ep: 0,
             entry: 0,
             brk: 0,
@@ -161,6 +175,12 @@ impl Child {
             wait_status_ptr: 0,
             wait_reply_slot: 0,
             wait_reply_mrs: [0; 11],
+            pipe_reply_slot: 0,
+            pipe_reply_mrs: [0; 11],
+            pipe_fd: 0,
+            pipe_buf: 0,
+            pipe_len: 0,
+            pipe_done: 0,
         }
     }
 }

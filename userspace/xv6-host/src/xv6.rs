@@ -3,8 +3,9 @@ use core::cmp::min;
 use crate::allocator::Allocator;
 use crate::child::{
     clear_process_mappings, clone_address_space, copy_cstr_from_child, copy_from_child,
-    copy_to_child, create_child, load_elf, map_fresh_child_page, map_stack,
-    mapping_slots_available, read_user_context, reset_process_mappings, write_user_context,
+    copy_to_child, create_child, destroy_child_objects, load_elf, map_fresh_child_page, map_stack,
+    mapping_slots_available, read_user_context, reset_process_mappings, unmap_child_range,
+    write_user_context,
 };
 use crate::consts::*;
 use crate::sel4::{call_checked, msg_info, sel4_send, sel4_yield};
@@ -18,6 +19,9 @@ static mut NEXT_PID: u64 = 2;
 static mut CONSOLE_INPUT_POS: usize = 0;
 static mut FS_NODES: [FsNode; MAX_FS_NODES] = [FsNode::empty(); MAX_FS_NODES];
 static mut DIR_ENTRIES: [DirEntry; MAX_DIR_ENTRIES] = [DirEntry::empty(); MAX_DIR_ENTRIES];
+static mut FILE_BLOCKS: [[u8; FS_BLOCK_SIZE]; MAX_FILE_BLOCKS] =
+    [[0; FS_BLOCK_SIZE]; MAX_FILE_BLOCKS];
+static mut FILE_BLOCK_USED: [bool; MAX_FILE_BLOCKS] = [false; MAX_FILE_BLOCKS];
 static mut NEXT_INO: u32 = 4;
 
 pub(crate) enum SyscallResult {
@@ -86,11 +90,24 @@ pub(crate) fn handle_xv6_syscall(
     let ret = match sysno {
         SYS_FORK => return SyscallResult::Reply(sys_fork(alloc, procs, proc_idx, mrs)),
         SYS_EXIT => {
-            return sys_exit(procs, proc_idx, a0 as i32);
+            return sys_exit(alloc, procs, proc_idx, a0 as i32);
         }
         SYS_WAIT => return sys_wait(alloc, procs, proc_idx, a0, mrs),
-        SYS_WRITE => sys_write(&mut procs[proc_idx], a0 as usize, a1, a2 as usize),
-        SYS_READ => return sys_read(&mut procs[proc_idx], a0 as usize, a1, a2 as usize),
+        SYS_WRITE => {
+            return sys_write(
+                alloc,
+                &mut procs[proc_idx],
+                a0 as usize,
+                a1,
+                a2 as usize,
+                mrs,
+            );
+        }
+        SYS_READ => {
+            let result = sys_read(&mut procs[proc_idx], a0 as usize, a1, a2 as usize);
+            resume_pipe_writers(procs);
+            return result;
+        }
         SYS_OPEN => sys_open(&mut procs[proc_idx], a0, a1 as u32),
         SYS_CLOSE => sys_close(&mut procs[proc_idx], a0 as usize),
         SYS_DUP => sys_dup(&mut procs[proc_idx], a0 as usize),
@@ -115,20 +132,27 @@ pub(crate) fn handle_xv6_syscall(
     SyscallResult::Reply(ret)
 }
 
-fn sys_write(child: &mut Child, fd: usize, buf: u64, len: usize) -> i64 {
+fn sys_write(
+    alloc: &mut Allocator,
+    child: &mut Child,
+    fd: usize,
+    buf: u64,
+    len: usize,
+    mrs: &[u64; 64],
+) -> SyscallResult {
     if len == 0 {
-        return 0;
+        return SyscallResult::Reply(0);
     }
     let mut scratch = [0u8; 128];
     let mut done = 0usize;
     while done < len {
         let n = min(scratch.len(), len - done);
         if !copy_from_child(child, buf + done as u64, &mut scratch[..n]) {
-            return -1;
+            return SyscallResult::Reply(-1);
         }
         let wrote = {
             if fd >= MAX_FD {
-                return -1;
+                return SyscallResult::Reply(-1);
             }
             match child.fds[fd].kind {
                 FD_CONSOLE if child.fds[fd].writable => {
@@ -140,14 +164,28 @@ fn sys_write(child: &mut Child, fd: usize, buf: u64, len: usize) -> i64 {
                 FD_PIPE_WRITE => unsafe { pipe_write(child.fds[fd].aux, &scratch[..n]) },
                 FD_FS_FILE if child.fds[fd].writable => {
                     let Some(offset) = fd_offset(child.fds[fd]) else {
-                        return -1;
+                        return SyscallResult::Reply(-1);
                     };
-                    fs_write(child.fds[fd].aux, offset, &scratch[..n])
+                    match fs_write(child.fds[fd].aux, offset, &scratch[..n]) {
+                        Some(written) => written,
+                        None if done == 0 => return SyscallResult::Reply(-1),
+                        None => 0,
+                    }
                 }
-                _ => return -1,
+                _ => return SyscallResult::Reply(-1),
             }
         };
         if wrote == 0 {
+            if fd < MAX_FD
+                && child.fds[fd].kind == FD_PIPE_WRITE
+                && unsafe { pipe_has_readers(child.fds[fd].aux) }
+            {
+                block_pipe_writer(alloc, child, fd, buf, len, done, mrs);
+                return SyscallResult::Block;
+            }
+            if done == 0 {
+                return SyscallResult::Reply(-1);
+            }
             break;
         }
         if fd < MAX_FD && child.fds[fd].kind == FD_FS_FILE {
@@ -155,7 +193,87 @@ fn sys_write(child: &mut Child, fd: usize, buf: u64, len: usize) -> i64 {
         }
         done += wrote;
     }
-    done as i64
+    SyscallResult::Reply(done as i64)
+}
+
+fn block_pipe_writer(
+    alloc: &mut Allocator,
+    child: &mut Child,
+    fd: usize,
+    buf: u64,
+    len: usize,
+    done: usize,
+    mrs: &[u64; 64],
+) {
+    let reply_slot = alloc.alloc_slot();
+    call_checked(
+        ROOT_CNODE,
+        LABEL_CNODE_SAVE_CALLER,
+        &[],
+        &[reply_slot, ROOT_CNODE_DEPTH],
+    );
+    let mut reply_mrs = [0u64; 11];
+    reply_mrs.copy_from_slice(&mrs[..11]);
+    reply_mrs[0] = mrs[0].wrapping_add(4);
+
+    child.state = PROC_PIPE_WRITE;
+    child.pipe_reply_slot = reply_slot;
+    child.pipe_reply_mrs = reply_mrs;
+    child.pipe_fd = fd;
+    child.pipe_buf = buf;
+    child.pipe_len = len;
+    child.pipe_done = done;
+}
+
+fn resume_pipe_writers(procs: &mut [Child; MAX_PROCS]) {
+    for child in procs.iter_mut() {
+        if child.state != PROC_PIPE_WRITE {
+            continue;
+        }
+        let Some(ret) = resume_pipe_writer(child) else {
+            continue;
+        };
+        let mut reply_mrs = child.pipe_reply_mrs;
+        reply_mrs[3] = ret as u64;
+        unsafe {
+            sel4_send(child.pipe_reply_slot, msg_info(0, 0, 0, 11), &reply_mrs);
+        }
+        child.state = PROC_RUNNABLE;
+        child.pipe_reply_slot = 0;
+        child.pipe_reply_mrs = [0; 11];
+        child.pipe_fd = 0;
+        child.pipe_buf = 0;
+        child.pipe_len = 0;
+        child.pipe_done = 0;
+    }
+}
+
+fn resume_pipe_writer(child: &mut Child) -> Option<i64> {
+    let fd = child.pipe_fd;
+    if fd >= MAX_FD || child.fds[fd].kind != FD_PIPE_WRITE {
+        return Some(-1);
+    }
+    let pipe_idx = child.fds[fd].aux;
+    let mut scratch = [0u8; 128];
+    while child.pipe_done < child.pipe_len {
+        let n = min(scratch.len(), child.pipe_len - child.pipe_done);
+        if !copy_from_child(
+            child,
+            child.pipe_buf + child.pipe_done as u64,
+            &mut scratch[..n],
+        ) {
+            return Some(-1);
+        }
+        let wrote = unsafe { pipe_write(pipe_idx, &scratch[..n]) };
+        if wrote == 0 {
+            if unsafe { pipe_has_readers(pipe_idx) } {
+                return None;
+            }
+            return Some(-1);
+        }
+        child.pipe_done += wrote;
+    }
+    Some(child.pipe_done as i64)
 }
 
 fn sys_read(child: &mut Child, fd: usize, dst: u64, len: usize) -> SyscallResult {
@@ -224,12 +342,12 @@ fn sys_open(child: &mut Child, path_ptr: u64, flags: u32) -> i64 {
     if kind == FS_DIR && wants_write {
         return -1;
     }
-    if kind == FS_README && wants_write {
+    if (kind == FS_README || kind == FS_EXEC) && wants_write {
         return -1;
     }
     if kind == FS_FILE && flags & O_TRUNC != 0 && writable {
         unsafe {
-            FS_NODES[node].size = 0;
+            truncate_file(node);
         }
     }
 
@@ -325,6 +443,13 @@ fn sys_sbrk(alloc: &mut Allocator, child: &mut Child, increment: i64) -> i64 {
     if new_brk > CHILD_HEAP_LIMIT {
         return -1;
     }
+    if new_brk < old {
+        let new_mapped_end = align_up(new_brk);
+        if new_mapped_end < child.heap_mapped_end {
+            unmap_child_range(alloc, child.pid, new_mapped_end, child.heap_mapped_end);
+            child.heap_mapped_end = new_mapped_end;
+        }
+    }
     if new_brk > child.heap_mapped_end {
         let target_end = align_up(new_brk);
         let first_page = align_up(child.heap_mapped_end);
@@ -360,7 +485,7 @@ fn sys_fork(
         pid
     };
 
-    let mut child = create_child(alloc, pid, parent.pid, parent.fault_ep);
+    let mut child = create_child(alloc, slot, pid, parent.pid, parent.fault_ep);
     child.entry = parent.entry;
     child.brk = parent.brk;
     child.heap_mapped_end = parent.heap_mapped_end;
@@ -383,7 +508,12 @@ fn sys_fork(
     pid as i64
 }
 
-fn sys_exit(procs: &mut [Child; MAX_PROCS], proc_idx: usize, status: i32) -> SyscallResult {
+fn sys_exit(
+    alloc: &mut Allocator,
+    procs: &mut [Child; MAX_PROCS],
+    proc_idx: usize,
+    status: i32,
+) -> SyscallResult {
     let pid = procs[proc_idx].pid;
     log("xv6-host: exit(");
     print_i64(status as i64);
@@ -396,7 +526,7 @@ fn sys_exit(procs: &mut [Child; MAX_PROCS], proc_idx: usize, status: i32) -> Sys
     close_all_fds(&mut procs[proc_idx]);
     procs[proc_idx].state = PROC_ZOMBIE;
     procs[proc_idx].exit_status = status;
-    reply_waiting_parent(procs, proc_idx);
+    reply_waiting_parent(alloc, procs, proc_idx);
     SyscallResult::Stop
 }
 
@@ -426,8 +556,7 @@ fn sys_wait(
                 return SyscallResult::Reply(-1);
             }
         }
-        clear_process_mappings(procs[i].pid);
-        procs[i] = Child::empty();
+        reap_process(alloc, &mut procs[i]);
         return SyscallResult::Reply(pid as i64);
     }
     if !has_child {
@@ -451,7 +580,7 @@ fn sys_wait(
     SyscallResult::Block
 }
 
-fn reply_waiting_parent(procs: &mut [Child; MAX_PROCS], child_idx: usize) {
+fn reply_waiting_parent(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS], child_idx: usize) {
     let parent_pid = procs[child_idx].parent_pid;
     let child_pid = procs[child_idx].pid;
     let status = procs[child_idx].exit_status;
@@ -480,11 +609,16 @@ fn reply_waiting_parent(procs: &mut [Child; MAX_PROCS], child_idx: usize) {
         procs[i].wait_reply_slot = 0;
         procs[i].wait_reply_mrs = [0; 11];
         if ret >= 0 {
-            clear_process_mappings(procs[child_idx].pid);
-            procs[child_idx] = Child::empty();
+            reap_process(alloc, &mut procs[child_idx]);
         }
         return;
     }
+}
+
+fn reap_process(alloc: &mut Allocator, child: &mut Child) {
+    clear_process_mappings(alloc, child.pid);
+    destroy_child_objects(alloc, child);
+    *child = Child::empty();
 }
 
 fn sys_kill(procs: &mut [Child; MAX_PROCS], pid: i64) -> i64 {
@@ -493,6 +627,8 @@ fn sys_kill(procs: &mut [Child; MAX_PROCS], pid: i64) -> i64 {
     }
     for proc in procs.iter_mut() {
         if proc.pid == pid as u64 && proc.state != PROC_UNUSED {
+            call_checked(proc.tcb, LABEL_TCB_SUSPEND, &[], &[]);
+            close_all_fds(proc);
             proc.state = PROC_ZOMBIE;
             proc.exit_status = -1;
             return 0;
@@ -522,7 +658,7 @@ fn sys_exec(
         return SyscallResult::Reply(-1);
     };
 
-    reset_process_mappings(child.pid);
+    reset_process_mappings(alloc, child.pid);
     load_elf(alloc, child, image.elf);
     map_stack(alloc, child);
     let Some((sp, argv_va)) = setup_exec_stack(child, &args, &arg_lens, argc) else {
@@ -912,6 +1048,11 @@ fn init_fs() {
             DIR_ENTRIES[d] = DirEntry::empty();
             d += 1;
         }
+        let mut b = 0;
+        while b < MAX_FILE_BLOCKS {
+            FILE_BLOCK_USED[b] = false;
+            b += 1;
+        }
         NEXT_INO = 4;
 
         FS_NODES[FS_ROOT_NODE] = FsNode {
@@ -922,7 +1063,8 @@ fn init_fs() {
             nlink: 1,
             open_refs: 0,
             size: 0,
-            data: [0; MAX_FILE_BYTES],
+            exec_index: 0,
+            blocks: [NO_FILE_BLOCK; MAX_FILE_BLOCK_REFS],
         };
         FS_NODES[FS_README_NODE] = FsNode {
             used: true,
@@ -932,7 +1074,8 @@ fn init_fs() {
             nlink: 1,
             open_refs: 0,
             size: README_BYTES.len(),
-            data: [0; MAX_FILE_BYTES],
+            exec_index: 0,
+            blocks: [NO_FILE_BLOCK; MAX_FILE_BLOCK_REFS],
         };
         FS_NODES[FS_CONSOLE_NODE] = FsNode {
             used: true,
@@ -942,10 +1085,28 @@ fn init_fs() {
             nlink: 1,
             open_refs: 0,
             size: 0,
-            data: [0; MAX_FILE_BYTES],
+            exec_index: 0,
+            blocks: [NO_FILE_BLOCK; MAX_FILE_BLOCK_REFS],
         };
         let _ = add_dir_entry(FS_ROOT_NODE, b"README", FS_README_NODE);
         let _ = add_dir_entry(FS_ROOT_NODE, b"console", FS_CONSOLE_NODE);
+        init_exec_files();
+    }
+}
+
+fn init_exec_files() {
+    let mut i = 0usize;
+    while i < EXEC_IMAGES.len() {
+        let name = EXEC_IMAGES[i].name;
+        if name.len() <= DIRSIZ && find_dir_entry(FS_ROOT_NODE, name).is_none() {
+            if let Some(node) = create_fs_node(FS_ROOT_NODE, name, FS_EXEC) {
+                unsafe {
+                    FS_NODES[node].size = EXEC_IMAGES[i].elf.len();
+                    FS_NODES[node].exec_index = i;
+                }
+            }
+        }
+        i += 1;
     }
 }
 
@@ -967,6 +1128,7 @@ fn fs_node_size(node: usize) -> usize {
     unsafe {
         match FS_NODES[node].kind {
             FS_README => README_BYTES.len(),
+            FS_EXEC => EXEC_IMAGES[FS_NODES[node].exec_index].elf.len(),
             FS_DIR => dir_entry_count(node) * 16,
             _ => FS_NODES[node].size,
         }
@@ -989,7 +1151,11 @@ fn fs_read_file(child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
         let n = min(len, size - offset);
         let ok = match FS_NODES[node].kind {
             FS_README => copy_to_child(child, dst, &README_BYTES[offset..offset + n]),
-            FS_FILE => copy_to_child(child, dst, &FS_NODES[node].data[offset..offset + n]),
+            FS_EXEC => {
+                let image = &EXEC_IMAGES[FS_NODES[node].exec_index].elf[offset..offset + n];
+                copy_to_child(child, dst, image)
+            }
+            FS_FILE => fs_read_mutable_file(child, node, offset, dst, n),
             _ => false,
         };
         if !ok {
@@ -1000,18 +1166,91 @@ fn fs_read_file(child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
     }
 }
 
-fn fs_write(node: usize, offset: usize, src: &[u8]) -> usize {
+fn fs_write(node: usize, offset: usize, src: &[u8]) -> Option<usize> {
     unsafe {
         if node >= MAX_FS_NODES || !FS_NODES[node].used || FS_NODES[node].kind != FS_FILE {
-            return 0;
+            return None;
         }
-        if offset >= MAX_FILE_BYTES {
-            return 0;
+        if offset > FS_NODES[node].size || offset >= MAX_FILE_BYTES {
+            return None;
         }
-        let n = min(src.len(), MAX_FILE_BYTES - offset);
-        FS_NODES[node].data[offset..offset + n].copy_from_slice(&src[..n]);
-        FS_NODES[node].size = FS_NODES[node].size.max(offset + n);
-        n
+        let mut done = 0usize;
+        let target = min(src.len(), MAX_FILE_BYTES - offset);
+        while done < target {
+            let cur = offset + done;
+            let block_ref = cur / FS_BLOCK_SIZE;
+            let block_off = cur % FS_BLOCK_SIZE;
+            let n = min(target - done, FS_BLOCK_SIZE - block_off);
+            let block = ensure_file_block(node, block_ref)?;
+            FILE_BLOCKS[block][block_off..block_off + n].copy_from_slice(&src[done..done + n]);
+            done += n;
+        }
+        FS_NODES[node].size = FS_NODES[node].size.max(offset + done);
+        Some(done)
+    }
+}
+
+unsafe fn fs_read_mutable_file(
+    child: &Child,
+    node: usize,
+    offset: usize,
+    dst: u64,
+    len: usize,
+) -> bool {
+    unsafe {
+        let mut done = 0usize;
+        while done < len {
+            let cur = offset + done;
+            let block_ref = cur / FS_BLOCK_SIZE;
+            let block_off = cur % FS_BLOCK_SIZE;
+            let n = min(len - done, FS_BLOCK_SIZE - block_off);
+            if block_ref >= MAX_FILE_BLOCK_REFS {
+                return false;
+            }
+            let block = FS_NODES[node].blocks[block_ref] as usize;
+            if block >= MAX_FILE_BLOCKS {
+                return false;
+            }
+            if !copy_to_child(
+                child,
+                dst + done as u64,
+                &FILE_BLOCKS[block][block_off..block_off + n],
+            ) {
+                return false;
+            }
+            done += n;
+        }
+        true
+    }
+}
+
+unsafe fn ensure_file_block(node: usize, block_ref: usize) -> Option<usize> {
+    unsafe {
+        if block_ref >= MAX_FILE_BLOCK_REFS {
+            return None;
+        }
+        let existing = FS_NODES[node].blocks[block_ref] as usize;
+        if existing < MAX_FILE_BLOCKS {
+            return Some(existing);
+        }
+        let block = alloc_file_block()?;
+        FS_NODES[node].blocks[block_ref] = block as u16;
+        Some(block)
+    }
+}
+
+unsafe fn alloc_file_block() -> Option<usize> {
+    unsafe {
+        let mut i = 0usize;
+        while i < MAX_FILE_BLOCKS {
+            if !FILE_BLOCK_USED[i] {
+                FILE_BLOCK_USED[i] = true;
+                FILE_BLOCKS[i] = [0; FS_BLOCK_SIZE];
+                return Some(i);
+            }
+            i += 1;
+        }
+        None
     }
 }
 
@@ -1178,7 +1417,8 @@ fn create_fs_node(parent: usize, name: &[u8], kind: u8) -> Option<usize> {
                     nlink: 1,
                     open_refs: 0,
                     size: 0,
-                    data: [0; MAX_FILE_BYTES],
+                    exec_index: 0,
+                    blocks: [NO_FILE_BLOCK; MAX_FILE_BLOCK_REFS],
                 };
                 NEXT_INO = NEXT_INO.wrapping_add(1);
                 add_dir_entry(parent, name, node)?;
@@ -1325,8 +1565,31 @@ fn maybe_free_node(node: usize) {
             return;
         }
         if FS_NODES[node].nlink == 0 && FS_NODES[node].open_refs == 0 {
+            truncate_file(node);
             FS_NODES[node] = FsNode::empty();
         }
+    }
+}
+
+unsafe fn truncate_file(node: usize) {
+    unsafe {
+        if node >= MAX_FS_NODES || FS_NODES[node].kind != FS_FILE {
+            if node < MAX_FS_NODES {
+                FS_NODES[node].size = 0;
+            }
+            return;
+        }
+        let mut i = 0usize;
+        while i < MAX_FILE_BLOCK_REFS {
+            let block = FS_NODES[node].blocks[i] as usize;
+            if block < MAX_FILE_BLOCKS {
+                FILE_BLOCK_USED[block] = false;
+                FILE_BLOCKS[block] = [0; FS_BLOCK_SIZE];
+                FS_NODES[node].blocks[i] = NO_FILE_BLOCK;
+            }
+            i += 1;
+        }
+        FS_NODES[node].size = 0;
     }
 }
 
@@ -1345,6 +1608,10 @@ unsafe fn pipe_write(pipe_idx: usize, src: &[u8]) -> usize {
         }
         n
     }
+}
+
+unsafe fn pipe_has_readers(pipe_idx: usize) -> bool {
+    unsafe { pipe_idx < MAX_PIPES && PIPES[pipe_idx].readers > 0 }
 }
 
 unsafe fn pipe_read(child: &Child, pipe_idx: usize, dst: u64, len: usize) -> i64 {

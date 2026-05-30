@@ -31,7 +31,9 @@ Latest verified checkpoints:
   `echo`, `forktest`, `cat README`, `ls .`, `wc README`, and
   `grep xv6 README` end in `xv6-host: exit(0)`. The `sh` path can now consume
   scripted console input and run `fork/exec/wait` command lines, including a
-  simple `echo ... | wc` pipeline.
+  simple `echo ... | wc` pipeline. Targeted `usertests` coverage now includes
+  `sharedfd`, `fourfiles`, `createdelete`, `unlinkread`, `linktest`,
+  `concreate`, `linkunlink`, `subdir`, `bigwrite`, and `bigfile`.
 
 M4.4b unlocked the first timer-gated disabled group on the current RV64,
 non-MCS, single-core, QEMU configuration: `TIMER0001`, `TIMER0002`,
@@ -77,7 +79,8 @@ favor of keeping the Rust kernel free of floating-point save/restore machinery.
 
 M4.4h removes the remaining FPU compatibility surface from TCB handling:
 `Tcb` no longer stores a FPU-disabled flag, `TCBSetFlags` returns
-`IllegalOperation`, boot clears `sstatus.FS`, and the restore path masks
+`IllegalOperation`, the naked boot entry clears `sstatus.FS` on every hart
+before Rust code runs or secondary harts park, and the restore path masks
 `sstatus.FS` off before every `sret`.
 
 M5.1/M5.2 were the temporary in-kernel xv6 bridge: a generated wrapper linked
@@ -123,6 +126,17 @@ mutable files/directories plus `link`/`unlink`/`mkdir`, and `sbrk` keeps
 mapping-table headroom instead of halting the host during `usertests`
 `countfree()`. `usertests sharedfd` now reaches `OK` / `ALL TESTS PASSED`.
 
+M5.7 makes the `sbrk`/process memory path reclaim host-side mappings instead
+of only moving the xv6 break pointer. Each child mapping now records both the
+child frame cap and the host alias cap; shrink, exec reset, and process reap
+issue `RISCV_Page_Unmap`, delete the cap slots with `CNode_Delete`, and recycle
+those slots in the host allocator. This removes the mapping-table leak exposed
+by `countfree()` and lets the next targeted `usertests` group pass:
+`fourfiles`, `createdelete`, `unlinkread`, `linktest`, `concreate`,
+`linkunlink`, `subdir`, `bigwrite`, and `bigfile`. The xv6 run helper now only
+reports success for root-process `exit(0)` with a numeric `pid=1` boundary, so
+child exits like `pid=19` and root `exit(1)` are not false positives.
+
 | Milestone | Description | Status |
 |-----------|-------------|--------|
 | M0 | Build skeleton, no_std ELF cross-compiles | ✅ Done |
@@ -166,6 +180,7 @@ mapping-table headroom instead of halting the host during `usertests`
 | M5.4 | User-space xv6 process model v1: shared badged fault endpoint, host process table, real TCB/VSpace-backed `fork`, zombie `exit`, and `wait` reaping. `forktest` now creates real children up to the current process-table limit. | ✅ Done |
 | M5.5 | Scripted shell path: `XV6_CONSOLE_INPUT`/`--stdin`, blocking empty console reads, per-process fd tables, fd refcounting across `fork`, close-on-exit, and basic cross-process pipes. `sh` can run `echo`, `ls`, `cat README`, and `echo pipe data \| wc`. | ✅ Done |
 | M5.6 | Shared open-file table and mutable in-memory FS: `fork` inherits cwd, `dup`/`fork` share file offsets, file capacity is large enough for xv6 `sharedfd`, `sbrk` preserves mapping headroom, and targeted `usertests sharedfd` passes. | ✅ Done |
+| M5.7 | xv6-host mapping cleanup: `sbrk` shrink, exec reset, and process reap unmap child/alias frames, delete cap slots, and recycle them. Targeted `usertests fourfiles`, `createdelete`, `unlinkread`, `linktest`, `concreate`, `linkunlink`, `subdir`, `bigwrite`, and `bigfile` pass. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
@@ -264,7 +279,7 @@ Test suite passed. 124 tests passed. 43 tests disabled.
 All is well in the universe
 ```
 
-### xv6 Compatibility Checkpoint (M5.3-M5.6)
+### xv6 Compatibility Checkpoint (M5.3-M5.7)
 
 The current xv6 path is a user-space compatibility server, not a full Unix
 server yet. The helper builds one xv6 user program from
@@ -293,6 +308,9 @@ nix develop --command ./tools/run-xv6-user.sh grep xv6 README
 nix develop --command ./tools/run-xv6-user.sh --stdin $'echo scripted from sh\nls .\ncat README\n' sh
 nix develop --command ./tools/run-xv6-user.sh --stdin $'echo pipe data | wc\n' sh
 nix develop --command ./tools/run-xv6-user.sh usertests sharedfd
+nix develop --command ./tools/run-xv6-user.sh usertests fourfiles
+nix develop --command ./tools/run-xv6-user.sh usertests concreate
+nix develop --command ./tools/run-xv6-user.sh usertests bigfile
 ```
 
 Verified output includes:
@@ -330,6 +348,12 @@ xv6-host: exit(0) pid=2
 OK
 ALL TESTS PASSED
 xv6-host: exit(0) pid=1
+
+test fourfiles:
+...
+OK
+ALL TESTS PASSED
+xv6-host: exit(0) pid=1
 ```
 
 Implemented host-side compatibility now has an explicit handler for every xv6
@@ -342,11 +366,11 @@ per-process `open`/`close`/`dup`/`fstat`, shared open-file offsets across
 fixed-size in-memory `pipe` ring buffer shared across forked processes.
 Remaining Unix gaps are a real xv6 filesystem image, persistence,
 permissions/devices beyond console, dynamic host keyboard input, pipe read
-blocking/backpressure, broader exec catalog coverage, full `sbrk` unmap/free
-semantics, and scalable process/cap/resource cleanup beyond the current fixed
-tables. With no scripted input, `init` now reaches `exec("sh")` and the shell
-blocks on console read instead of exiting and forcing `init` into a restart
-loop.
+blocking/backpressure, broader exec catalog coverage, full untyped-memory
+reclamation beyond cap-slot reuse, and scalable process/cap/resource cleanup
+beyond the current fixed tables. With no scripted input, `init` now reaches
+`exec("sh")` and the shell blocks on console read instead of exiting and
+forcing `init` into a restart loop.
 
 
 ## Repository layout
