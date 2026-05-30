@@ -154,7 +154,15 @@ done
 printf '];\n' >>"${CATALOG_RS}"
 
 log "building xv6-host rootserver ${HOST_ELF}"
-XV6_PAYLOAD_ELF="${PAYLOAD_ELF}" XV6_EXEC_CATALOG_RS="${CATALOG_RS}" cargo build \
+root_is_init=0
+if [[ "${PROGRAM}" == "init" ]]; then
+    root_is_init=1
+fi
+XV6_PAYLOAD_ELF="${PAYLOAD_ELF}" \
+XV6_EXEC_CATALOG_RS="${CATALOG_RS}" \
+XV6_PAYLOAD_PROGRAM="${PROGRAM}" \
+XV6_ROOT_IS_INIT="${root_is_init}" \
+cargo build \
     --manifest-path "${ROOT_DIR}/Cargo.toml" \
     --release \
     --target "${RUST_TARGET}" \

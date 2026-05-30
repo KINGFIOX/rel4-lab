@@ -1,4 +1,5 @@
 pub(crate) const PAYLOAD_ELF: &[u8] = include_bytes!(env!("XV6_PAYLOAD_ELF"));
+pub(crate) const ROOT_IS_INIT: bool = option_env!("XV6_COMPILED_ROOT_IS_INIT").is_some();
 pub(crate) const README_BYTES: &[u8] = include_bytes!("../../../third_party/xv6-riscv/README");
 pub(crate) const CONSOLE_INPUT: &[u8] = match option_env!("XV6_CONSOLE_INPUT") {
     Some(input) => input.as_bytes(),
@@ -82,8 +83,8 @@ pub(crate) const PIPE_BUF: usize = 512;
 pub(crate) const MAX_OPEN_FILES: usize = 128;
 pub(crate) const MAX_EXEC_ARGS: usize = 16;
 pub(crate) const MAX_EXEC_ARG_LEN: usize = 128;
-pub(crate) const MAX_FS_NODES: usize = 64;
-pub(crate) const MAX_DIR_ENTRIES: usize = 96;
+pub(crate) const MAX_FS_NODES: usize = 256;
+pub(crate) const MAX_DIR_ENTRIES: usize = 512;
 pub(crate) const FS_BLOCK_SIZE: usize = 1024;
 pub(crate) const MAX_FILE_BLOCK_REFS: usize = 320;
 pub(crate) const MAX_FILE_BLOCKS: usize = 2048;

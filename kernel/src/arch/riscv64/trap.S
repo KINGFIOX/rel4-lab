@@ -73,6 +73,9 @@ trap_entry:
     sd      t0, 32*8(sp)
     csrr    t0, sstatus
     sd      t0, 33*8(sp)
+    // Keep S-mode itself with FS=Off while the Rust dispatcher runs.
+    li      t0, 0x6000
+    csrc    sstatus, t0
 
     // a0 = pointer to UserContext (== current sp).
     mv      a0, sp

@@ -10,6 +10,7 @@ use crate::types::{Child, Mapping};
 use crate::util::*;
 
 static mut MAPPINGS: [Mapping; MAX_MAPPINGS] = [Mapping {
+    proc_slot: 0,
     pid: 0,
     child_page: 0,
     alias_page: 0,
@@ -19,6 +20,8 @@ static mut MAPPINGS: [Mapping; MAX_MAPPINGS] = [Mapping {
     executable: false,
 }; MAX_MAPPINGS];
 static mut MAPPING_COUNT: usize = 0;
+static mut FRAME_POOL: [[u64; MAX_MAPPINGS]; MAX_PROCS] = [[0; MAX_MAPPINGS]; MAX_PROCS];
+static mut FRAME_POOL_LEN: [usize; MAX_PROCS] = [0; MAX_PROCS];
 
 pub(crate) fn create_child(
     alloc: &mut Allocator,
@@ -34,7 +37,16 @@ pub(crate) fn create_child(
     let ipc_frame = alloc.retype_one_from(untyped, OBJ_4K, 0);
 
     call_checked(INIT_ASID_POOL, LABEL_RISCV_ASID_POOL_ASSIGN, &[vspace], &[]);
-    map_existing_frame(alloc, pid, ipc_frame, vspace, CHILD_IPC_BUFFER, true, false);
+    map_existing_frame(
+        alloc,
+        proc_slot,
+        pid,
+        ipc_frame,
+        vspace,
+        CHILD_IPC_BUFFER,
+        true,
+        false,
+    );
 
     let mrs = [
         CHILD_FAULT_EP,
@@ -53,9 +65,11 @@ pub(crate) fn create_child(
 
     Child {
         pid,
+        proc_slot,
         parent_pid,
         state: PROC_RUNNABLE,
         exit_status: 0,
+        reparented_to_init: false,
         tcb,
         cnode,
         vspace,
@@ -82,6 +96,7 @@ pub(crate) fn destroy_child_objects(alloc: &mut Allocator, child: &Child) {
     if child.pid == 0 {
         return;
     }
+    clear_process_frame_pool(alloc, child.proc_slot);
     if child.tcb != 0 {
         call_checked(child.tcb, LABEL_TCB_SUSPEND, &[], &[]);
     }
@@ -229,9 +244,10 @@ pub(crate) fn map_fresh_child_page(
     if let Some(alias) = lookup_alias(child.pid, page) {
         return alias;
     }
-    let frame_slot = alloc.retype_one_from(child.untyped, OBJ_4K, 0);
+    let frame_slot = alloc_process_frame(alloc, child);
     map_existing_frame(
         alloc,
+        child.proc_slot,
         child.pid,
         frame_slot,
         child.vspace,
@@ -243,6 +259,7 @@ pub(crate) fn map_fresh_child_page(
 
 fn map_existing_frame(
     alloc: &mut Allocator,
+    proc_slot: usize,
     pid: u64,
     frame_slot: u64,
     vspace: u64,
@@ -251,7 +268,9 @@ fn map_existing_frame(
     executable: bool,
 ) -> u64 {
     let alias_slot = alloc.copy_cap(frame_slot, cap_rights(false, false, true, true));
-    let alias_va = register_mapping(pid, child_va, frame_slot, alias_slot, writable, executable);
+    let alias_va = register_mapping(
+        proc_slot, pid, child_va, frame_slot, alias_slot, writable, executable,
+    );
     page_map(alias_slot, INIT_VSPACE, alias_va, true, false);
     zero_page(alias_va);
     page_map(frame_slot, vspace, child_va, writable, executable);
@@ -270,6 +289,7 @@ fn page_map(frame_slot: u64, vspace: u64, va: u64, writable: bool, executable: b
 }
 
 fn register_mapping(
+    proc_slot: usize,
     pid: u64,
     child_page: u64,
     frame_slot: u64,
@@ -299,6 +319,7 @@ fn register_mapping(
             MAPPINGS[slot].alias_page
         };
         MAPPINGS[slot] = Mapping {
+            proc_slot,
             pid,
             child_page: align_down(child_page),
             alias_page: alias,
@@ -324,8 +345,9 @@ fn unmap_mapping_at(alloc: &mut Allocator, slot: usize) {
             page_unmap(m.frame_slot);
         }
         alloc.delete_cap_slot(m.alias_slot);
-        alloc.delete_cap_slot(m.frame_slot);
+        release_process_frame(alloc, m.proc_slot, m.frame_slot);
         MAPPINGS[slot] = Mapping {
+            proc_slot: 0,
             pid: 0,
             child_page: 0,
             alias_page: m.alias_page,
@@ -353,6 +375,45 @@ fn lookup_alias(pid: u64, child_page: u64) -> Option<u64> {
             i += 1;
         }
         None
+    }
+}
+
+fn alloc_process_frame(alloc: &mut Allocator, child: &Child) -> u64 {
+    unsafe {
+        let len = FRAME_POOL_LEN[child.proc_slot];
+        if len > 0 {
+            let next = len - 1;
+            FRAME_POOL_LEN[child.proc_slot] = next;
+            return FRAME_POOL[child.proc_slot][next];
+        }
+    }
+    alloc.retype_one_from(child.untyped, OBJ_4K, 0)
+}
+
+fn release_process_frame(alloc: &mut Allocator, proc_slot: usize, frame_slot: u64) {
+    if frame_slot == 0 {
+        return;
+    }
+    unsafe {
+        let len = FRAME_POOL_LEN[proc_slot];
+        if len >= MAX_MAPPINGS {
+            alloc.delete_cap_slot(frame_slot);
+            return;
+        }
+        FRAME_POOL[proc_slot][len] = frame_slot;
+        FRAME_POOL_LEN[proc_slot] = len + 1;
+    }
+}
+
+fn clear_process_frame_pool(alloc: &mut Allocator, proc_slot: usize) {
+    unsafe {
+        let len = FRAME_POOL_LEN[proc_slot];
+        let mut i = 0;
+        while i < len {
+            alloc.delete_cap_slot(FRAME_POOL[proc_slot][i]);
+            i += 1;
+        }
+        FRAME_POOL_LEN[proc_slot] = 0;
     }
 }
 

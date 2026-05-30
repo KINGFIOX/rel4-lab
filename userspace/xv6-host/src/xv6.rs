@@ -524,8 +524,13 @@ fn sys_exit(
         halt_loop();
     }
     close_all_fds(&mut procs[proc_idx]);
+    reparent_children(alloc, procs, pid);
     procs[proc_idx].state = PROC_ZOMBIE;
     procs[proc_idx].exit_status = status;
+    if procs[proc_idx].reparented_to_init && !ROOT_IS_INIT {
+        reap_process(alloc, &mut procs[proc_idx]);
+        return SyscallResult::Stop;
+    }
     reply_waiting_parent(alloc, procs, proc_idx);
     SyscallResult::Stop
 }
@@ -541,6 +546,9 @@ fn sys_wait(
     let mut has_child = false;
     for i in 0..MAX_PROCS {
         if procs[i].parent_pid != parent_pid || procs[i].state == PROC_UNUSED {
+            continue;
+        }
+        if parent_pid == 1 && procs[i].reparented_to_init && !ROOT_IS_INIT {
             continue;
         }
         has_child = true;
@@ -612,6 +620,26 @@ fn reply_waiting_parent(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS], c
             reap_process(alloc, &mut procs[child_idx]);
         }
         return;
+    }
+}
+
+fn reparent_children(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS], exiting_pid: u64) {
+    let mut i = 0;
+    while i < MAX_PROCS {
+        if procs[i].parent_pid == exiting_pid && procs[i].state != PROC_UNUSED {
+            procs[i].parent_pid = 1;
+            if !ROOT_IS_INIT {
+                procs[i].reparented_to_init = true;
+            }
+            if procs[i].state == PROC_ZOMBIE {
+                if ROOT_IS_INIT {
+                    reply_waiting_parent(alloc, procs, i);
+                } else {
+                    reap_process(alloc, &mut procs[i]);
+                }
+            }
+        }
+        i += 1;
     }
 }
 
@@ -1379,7 +1407,7 @@ fn lookup_parent(child: &Child, path: &[u8]) -> Option<(usize, [u8; DIRSIZ], usi
         slash -= 1;
     }
     let name = &path[slash..end];
-    if name.is_empty() || name == b"." || name == b".." || name.len() > DIRSIZ {
+    if name.is_empty() || name == b"." || name == b".." {
         return None;
     }
     let parent = if slash == 0 {
@@ -1397,8 +1425,9 @@ fn lookup_parent(child: &Child, path: &[u8]) -> Option<(usize, [u8; DIRSIZ], usi
         }
     }
     let mut out = [0u8; DIRSIZ];
-    out[..name.len()].copy_from_slice(name);
-    Some((parent, out, name.len()))
+    let name_len = dir_name_len(name);
+    out[..name_len].copy_from_slice(&name[..name_len]);
+    Some((parent, out, name_len))
 }
 
 fn create_fs_node(parent: usize, name: &[u8], kind: u8) -> Option<usize> {
@@ -1431,7 +1460,7 @@ fn create_fs_node(parent: usize, name: &[u8], kind: u8) -> Option<usize> {
 }
 
 fn add_dir_entry(parent: usize, name: &[u8], node: usize) -> Option<usize> {
-    if name.is_empty() || name.len() > DIRSIZ || find_dir_entry(parent, name).is_some() {
+    if name.is_empty() || find_dir_entry(parent, name).is_some() {
         return None;
     }
     unsafe {
@@ -1439,12 +1468,13 @@ fn add_dir_entry(parent: usize, name: &[u8], node: usize) -> Option<usize> {
         while i < MAX_DIR_ENTRIES {
             if !DIR_ENTRIES[i].used {
                 let mut stored = [0u8; DIRSIZ];
-                stored[..name.len()].copy_from_slice(name);
+                let name_len = dir_name_len(name);
+                stored[..name_len].copy_from_slice(&name[..name_len]);
                 DIR_ENTRIES[i] = DirEntry {
                     used: true,
                     parent,
                     node,
-                    name_len: name.len() as u8,
+                    name_len: name_len as u8,
                     name: stored,
                 };
                 return Some(i);
@@ -1456,17 +1486,18 @@ fn add_dir_entry(parent: usize, name: &[u8], node: usize) -> Option<usize> {
 }
 
 fn find_dir_entry(parent: usize, name: &[u8]) -> Option<usize> {
-    if name.len() > DIRSIZ {
+    if name.is_empty() {
         return None;
     }
+    let name_len = dir_name_len(name);
     unsafe {
         let mut i = 0;
         while i < MAX_DIR_ENTRIES {
             let ent = DIR_ENTRIES[i];
             if ent.used
                 && ent.parent == parent
-                && ent.name_len as usize == name.len()
-                && &ent.name[..name.len()] == name
+                && ent.name_len as usize == name_len
+                && &ent.name[..name_len] == &name[..name_len]
             {
                 return Some(i);
             }
@@ -1474,6 +1505,10 @@ fn find_dir_entry(parent: usize, name: &[u8]) -> Option<usize> {
         }
     }
     None
+}
+
+fn dir_name_len(name: &[u8]) -> usize {
+    min(DIRSIZ, name.len())
 }
 
 fn sys_unlink(child: &Child, path_ptr: u64) -> i64 {

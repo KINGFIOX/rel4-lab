@@ -80,8 +80,9 @@ favor of keeping the Rust kernel free of floating-point save/restore machinery.
 M4.4h removes the remaining FPU compatibility surface from TCB handling:
 `Tcb` no longer stores a FPU-disabled flag, `TCBSetFlags` returns
 `IllegalOperation`, the naked boot entry clears `sstatus.FS` on every hart
-before Rust code runs or secondary harts park, and the restore path masks
-`sstatus.FS` off before every `sret`.
+before Rust code runs or secondary harts park, trap entry clears `sstatus.FS`
+again before entering the Rust dispatcher, and the restore path masks it off
+before every `sret`.
 
 M5.1/M5.2 were the temporary in-kernel xv6 bridge: a generated wrapper linked
 one xv6 user program at `0x10000000`, and the Rust kernel directly dispatched
@@ -173,7 +174,7 @@ child exits like `pid=19` and root `exit(1)` are not false positives.
 | M4.4e | RISC-V `CACHEFLUSH0004`: enable the non-ARM cache/retype test and validate that retyped frames are zeroed after `Untyped_Revoke`. Full suite now reports **124 passed / 43 disabled**. | ✅ Done |
 | M4.4f | SMP-compatible RV64 build/run: secondary harts park before shared init; SMP invocation-label shift and `TCBSetAffinity` are handled; QEMU wrappers accept `SMP=2`; `MULTICORE0001..0005` pass in the full SMP run. The current SMP regression now stops on the expected FPU failures after M4.4g. | ✅ Done |
 | M4.4g | Remove kernel floating-point context handling: no FPR/FCSR fields in `UserContext`, no `fsd`/`fld`/FCSR instructions in trap entry/exit, and the kernel/rootserver Rust target is `riscv64imac-unknown-none-elf` rather than `rv64gc`. | ✅ Done |
-| M4.4h | Remove the residual TCB FPU flag surface: no FPU flag is stored in `Tcb`, `TCBSetFlags` is rejected as unsupported, and `sstatus.FS` is cleared at boot plus masked off on every return to user mode. | ✅ Done |
+| M4.4h | Remove the residual TCB FPU flag surface: no FPU flag is stored in `Tcb`, `TCBSetFlags` is rejected as unsupported, and `sstatus.FS` is cleared at boot, trap entry, and every return to user mode. | ✅ Done |
 | M5.1 | xv6 user-program smoke path: build an xv6 user ELF as rootserver and route xv6 positive syscalls through a temporary kernel compatibility module. | ✅ Superseded |
 | M5.2 | Temporary kernel-side xv6 read-only pseudo-fs: expose `README`, `.`, `/`, and `console`; implement fd offsets and `fstat`. | ✅ Superseded |
 | M5.3 | seL4-style xv6 host: embed the xv6 user ELF into a no_std Rust 2024 Cargo rootserver, spawn it as a child TCB/VSpace with a fault endpoint, and handle xv6 syscalls via `UnknownSyscall` fault IPC. Smoke set passes: `echo`, `forktest`, `cat README`, `ls .`, `wc README`, `grep xv6 README`. | ✅ Done |

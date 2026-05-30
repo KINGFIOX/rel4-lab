@@ -16,6 +16,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=XV6_PAYLOAD_ELF");
     println!("cargo:rerun-if-env-changed=XV6_EXEC_CATALOG_RS");
     println!("cargo:rerun-if-env-changed=XV6_CONSOLE_INPUT");
+    println!("cargo:rerun-if-env-changed=XV6_PAYLOAD_PROGRAM");
+    println!("cargo:rerun-if-env-changed=XV6_ROOT_IS_INIT");
     let payload = env::var("XV6_PAYLOAD_ELF").unwrap_or_else(|_| {
         panic!(
             "XV6_PAYLOAD_ELF must point to a linked xv6 user payload; \
@@ -33,4 +35,11 @@ fn main() {
     });
     println!("cargo:rerun-if-changed={catalog}");
     println!("cargo:rustc-env=XV6_EXEC_CATALOG_RS={catalog}");
+
+    if let Ok(program) = env::var("XV6_PAYLOAD_PROGRAM") {
+        println!("cargo:rustc-env=XV6_PAYLOAD_PROGRAM={program}");
+    }
+    if env::var("XV6_ROOT_IS_INIT").as_deref() == Ok("1") {
+        println!("cargo:rustc-env=XV6_COMPILED_ROOT_IS_INIT=1");
+    }
 }

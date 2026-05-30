@@ -48,6 +48,7 @@ pub(crate) struct IpcBuffer {
 
 #[derive(Copy, Clone)]
 pub(crate) struct Mapping {
+    pub(crate) proc_slot: usize,
     pub(crate) pid: u64,
     pub(crate) child_page: u64,
     pub(crate) alias_page: u64,
@@ -131,9 +132,11 @@ impl DirEntry {
 #[derive(Copy, Clone)]
 pub(crate) struct Child {
     pub(crate) pid: u64,
+    pub(crate) proc_slot: usize,
     pub(crate) parent_pid: u64,
     pub(crate) state: u8,
     pub(crate) exit_status: i32,
+    pub(crate) reparented_to_init: bool,
     pub(crate) tcb: u64,
     pub(crate) cnode: u64,
     pub(crate) vspace: u64,
@@ -159,9 +162,11 @@ impl Child {
     pub(crate) const fn empty() -> Self {
         Self {
             pid: 0,
+            proc_slot: 0,
             parent_pid: 0,
             state: PROC_UNUSED,
             exit_status: 0,
+            reparented_to_init: false,
             tcb: 0,
             cnode: 0,
             vspace: 0,
