@@ -77,6 +77,7 @@ pub(crate) const PROC_RUNNABLE: u8 = 1;
 pub(crate) const PROC_ZOMBIE: u8 = 2;
 pub(crate) const PROC_WAITING: u8 = 3;
 pub(crate) const PROC_PIPE_WRITE: u8 = 4;
+pub(crate) const PROC_PIPE_READ: u8 = 5;
 
 pub(crate) const FD_CLOSED: u8 = 0;
 pub(crate) const FD_CONSOLE: u8 = 1;

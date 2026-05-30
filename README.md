@@ -15,6 +15,10 @@ are implemented far enough for the full suite to run to completion.
 
 Latest verified checkpoints:
 
+- Context handoff note: floating-point/FPU/FS-bit work is not the active task.
+  The current FPU issue has already been handled; do not reopen FPU fixes after
+  context compaction unless explicitly requested. The active line of work is the
+  user-space xv6 compatibility server.
 - Historical RV64 non-MCS single-core checkpoint: `./tools/run-tests.sh` passed
   with **124 enabled tests passing, 43 upstream-disabled tests remaining**
   before the upstream build tree was switched to the current SMP configuration
@@ -171,6 +175,29 @@ directory extension rolls back the new node and any allocated blocks, so
 `usertests diskfull` no longer prints the former
 `mkdir(diskfulldir) unexpectedly succeeded` diagnostic.
 
+M5.11 makes the in-memory pipe model blocking in both directions. Empty pipe
+reads now save the fault reply cap and keep the reader blocked while writers
+remain open; writes, reads, `close`, `exit`, and `kill` pump pipe waiters so
+readers resume with data or EOF and full-pipe writers resume when space opens.
+Targeted validation: `usertests pipe1` and `usertests preempt`.
+
+M5.12 unifies xv6 process termination semantics across `exit`, VM/syscall fault
+kill, and `kill(pid)`. All three paths now close file descriptors, drop any
+saved `wait` or pipe reply caps for a killed blocked process, wake pipe
+waiters, reparent children, mark the target as a zombie with the correct exit
+status, and reply to a waiting parent when applicable. Targeted validation:
+`usertests killstatus`, `usertests preempt`, and `usertests reparent`; full
+validation: `usertests` ends in `ALL TESTS PASSED`.
+
+M5.13 broadens the xv6 exec catalog from the small shell-smoke set to the full
+user program list from xv6's `UPROGS`: `cat`, `echo`, `forktest`, `grep`,
+`init`, `kill`, `ln`, `ls`, `mkdir`, `rm`, `sh`, `stressfs`, `usertests`,
+`grind`, `wc`, `zombie`, `logstress`, `forphan`, and `dorphan`. This makes
+those programs visible to `exec()` and the shell, while preserving the direct
+payload path. `tools/run-xv6-user.sh` now also rechecks the final QEMU log after
+cleanup so a successful root exit is not reported as a false failure. Verified:
+direct `stressfs`, shell `exec stressfs`, and full `usertests`.
+
 | Milestone | Description | Status |
 |-----------|-------------|--------|
 | M0 | Build skeleton, no_std ELF cross-compiles | ✅ Done |
@@ -218,6 +245,9 @@ directory extension rolls back the new node and any allocated blocks, so
 | M5.8 | xv6 quick-suite memory semantics: dynamic low user stack with guard page, xv6 `TRAPFRAME` heap limit, sparse large `sbrk` backed by lazy VM faults, reservation-based OOM behavior for `sbrkfail`, and fork resource preflight. `usertests -q` passes. | ✅ Done |
 | M5.9 | xv6 full `usertests` slow section: larger reusable directory table for `bigdir`, enough FS behavior for `manywrites`, `badwrite`, `execout`, `diskfull`, and `outofinodes`; full `usertests` reaches `ALL TESTS PASSED`. | ✅ Done |
 | M5.10 | xv6 directory-block pressure: directories allocate from the same 1KiB data-block pool as files, `mkdir` consumes a child directory block, and `diskfull` no longer reports unexpected `mkdir` success after exhausting blocks. | ✅ Done |
+| M5.11 | Blocking pipe reads/writes: empty readers and full writers save reply caps and resume when peer activity changes pipe state; `usertests pipe1` and `usertests preempt` pass. | ✅ Done |
+| M5.12 | Unified xv6 process termination: `exit`, fault kill, and `kill(pid)` share fd cleanup, blocked reply-cap cleanup, pipe waiter wakeups, reparenting, zombie status, and waiting-parent reply behavior. `usertests killstatus`, `preempt`, `reparent`, and full `usertests` pass. | ✅ Done |
+| M5.13 | Full xv6 `UPROGS` exec catalog: the default catalog now embeds `cat`, `echo`, `forktest`, `grep`, `init`, `kill`, `ln`, `ls`, `mkdir`, `rm`, `sh`, `stressfs`, `usertests`, `grind`, `wc`, `zombie`, `logstress`, `forphan`, and `dorphan`; direct `stressfs`, shell `exec stressfs`, and full `usertests` pass. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
@@ -316,7 +346,7 @@ Test suite passed. 124 tests passed. 43 tests disabled.
 All is well in the universe
 ```
 
-### xv6 Compatibility Checkpoint (M5.3-M5.7)
+### xv6 Compatibility Checkpoint (M5.3-M5.12)
 
 The current xv6 path is a user-space compatibility server, not a full Unix
 server yet. The helper builds one xv6 user program from
@@ -348,6 +378,12 @@ nix develop --command ./tools/run-xv6-user.sh usertests sharedfd
 nix develop --command ./tools/run-xv6-user.sh usertests fourfiles
 nix develop --command ./tools/run-xv6-user.sh usertests concreate
 nix develop --command ./tools/run-xv6-user.sh usertests bigfile
+nix develop --command ./tools/run-xv6-user.sh usertests killstatus
+nix develop --command ./tools/run-xv6-user.sh usertests preempt
+nix develop --command ./tools/run-xv6-user.sh usertests reparent
+nix develop --command ./tools/run-xv6-user.sh stressfs
+nix develop --command ./tools/run-xv6-user.sh --stdin $'stressfs\n' sh
+nix develop --command env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests
 ```
 
 Verified output includes:
@@ -400,14 +436,16 @@ scripted console input, console/file read-write where meaningful,
 per-process `open`/`close`/`dup`/`fstat`, shared open-file offsets across
 `dup`/`fork`, `sbrk`, `getpid`, `uptime`, `pause`, `chdir`,
 `mknod("console")`, `link`/`unlink`/`mkdir`, mutable in-memory files, and a
-fixed-size in-memory `pipe` ring buffer shared across forked processes.
+fixed-size in-memory `pipe` ring buffer with blocking reads/writes shared
+across forked processes. Process termination now uses one path for normal
+`exit`, fault kill, and `kill(pid)`, including wait reply, child reparenting,
+and blocked reply-cap cleanup.
 Remaining Unix gaps are a real xv6 filesystem image, persistence,
-permissions/devices beyond console, dynamic host keyboard input, pipe read
-blocking/backpressure, broader exec catalog coverage, full untyped-memory
-reclamation beyond cap-slot reuse, and scalable process/cap/resource cleanup
-beyond the current fixed tables. With no scripted input, `init` now reaches
-`exec("sh")` and the shell blocks on console read instead of exiting and
-forcing `init` into a restart loop.
+permissions/devices beyond console, dynamic host keyboard input, full
+untyped-memory reclamation beyond cap-slot reuse, and resource scaling beyond
+the current fixed tables. With no
+scripted input, `init` now reaches `exec("sh")` and the shell blocks on console
+read instead of exiting and forcing `init` into a restart loop.
 
 
 ## Repository layout

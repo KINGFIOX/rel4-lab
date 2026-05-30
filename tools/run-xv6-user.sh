@@ -136,6 +136,12 @@ done
 cleanup
 trap - EXIT INT TERM
 
+# QEMU can terminate or be killed by cleanup before the monitor loop observes
+# the final root exit line. Treat the fully flushed log as authoritative.
+if grep -qE "${root_exit_ok_re}" "${LOG_FILE}" 2>/dev/null; then
+    status=0
+fi
+
 case "${status}" in
     0)
         exit_line="$(grep -E "${root_exit_ok_re}" "${LOG_FILE}" | tail -1)"

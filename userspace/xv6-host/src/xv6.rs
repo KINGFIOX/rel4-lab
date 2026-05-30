@@ -95,7 +95,7 @@ pub(crate) fn handle_xv6_syscall(
         }
         SYS_WAIT => return sys_wait(alloc, procs, proc_idx, a0, mrs),
         SYS_WRITE => {
-            return sys_write(
+            let result = sys_write(
                 alloc,
                 &mut procs[proc_idx],
                 a0 as usize,
@@ -103,14 +103,27 @@ pub(crate) fn handle_xv6_syscall(
                 a2 as usize,
                 mrs,
             );
+            pump_pipe_waiters(alloc, procs);
+            return result;
         }
         SYS_READ => {
-            let result = sys_read(alloc, &mut procs[proc_idx], a0 as usize, a1, a2 as usize);
-            resume_pipe_writers(alloc, procs);
+            let result = sys_read(
+                alloc,
+                &mut procs[proc_idx],
+                a0 as usize,
+                a1,
+                a2 as usize,
+                mrs,
+            );
+            pump_pipe_waiters(alloc, procs);
             return result;
         }
         SYS_OPEN => sys_open(alloc, &mut procs[proc_idx], a0, a1 as u32),
-        SYS_CLOSE => sys_close(&mut procs[proc_idx], a0 as usize),
+        SYS_CLOSE => {
+            let ret = sys_close(&mut procs[proc_idx], a0 as usize);
+            pump_pipe_waiters(alloc, procs);
+            ret
+        }
         SYS_DUP => sys_dup(&mut procs[proc_idx], a0 as usize),
         SYS_FSTAT => sys_fstat(alloc, &procs[proc_idx], a0 as usize, a1),
         SYS_SBRK => sys_sbrk(alloc, &mut procs[proc_idx], a0 as i64, a1),
@@ -120,7 +133,7 @@ pub(crate) fn handle_xv6_syscall(
             unsafe { sel4_yield() };
             0
         }
-        SYS_KILL => sys_kill(procs, a0 as i64),
+        SYS_KILL => sys_kill(alloc, procs, a0 as i64),
         SYS_CHDIR => sys_chdir(alloc, &mut procs[proc_idx], a0),
         SYS_PIPE => sys_pipe(alloc, &mut procs[proc_idx], a0),
         SYS_MKNOD => sys_mknod(alloc, &procs[proc_idx], a0),
@@ -256,6 +269,99 @@ fn block_pipe_writer(
     child.pipe_done = done;
 }
 
+fn block_pipe_reader(
+    alloc: &mut Allocator,
+    child: &mut Child,
+    fd: usize,
+    buf: u64,
+    len: usize,
+    mrs: &[u64; 64],
+) {
+    let reply_slot = alloc.alloc_slot();
+    call_checked(
+        ROOT_CNODE,
+        LABEL_CNODE_SAVE_CALLER,
+        &[],
+        &[reply_slot, ROOT_CNODE_DEPTH],
+    );
+    let mut reply_mrs = [0u64; 11];
+    reply_mrs.copy_from_slice(&mrs[..11]);
+    reply_mrs[0] = mrs[0].wrapping_add(4);
+
+    child.state = PROC_PIPE_READ;
+    child.pipe_reply_slot = reply_slot;
+    child.pipe_reply_mrs = reply_mrs;
+    child.pipe_fd = fd;
+    child.pipe_buf = buf;
+    child.pipe_len = len;
+    child.pipe_done = 0;
+}
+
+fn pump_pipe_waiters(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS]) {
+    resume_pipe_readers(alloc, procs);
+    resume_pipe_writers(alloc, procs);
+    resume_pipe_readers(alloc, procs);
+}
+
+fn clear_pipe_block(child: &mut Child) {
+    child.pipe_reply_slot = 0;
+    child.pipe_reply_mrs = [0; 11];
+    child.pipe_fd = 0;
+    child.pipe_buf = 0;
+    child.pipe_len = 0;
+    child.pipe_done = 0;
+}
+
+fn clear_wait_block(child: &mut Child) {
+    child.wait_status_ptr = 0;
+    child.wait_reply_slot = 0;
+    child.wait_reply_mrs = [0; 11];
+}
+
+fn drop_blocked_reply_caps(alloc: &mut Allocator, child: &mut Child) {
+    if child.wait_reply_slot != 0 {
+        alloc.delete_cap_slot(child.wait_reply_slot);
+        clear_wait_block(child);
+    }
+    if child.pipe_reply_slot != 0 {
+        alloc.delete_cap_slot(child.pipe_reply_slot);
+        clear_pipe_block(child);
+    }
+}
+
+fn resume_pipe_readers(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS]) {
+    for child in procs.iter_mut() {
+        if child.state != PROC_PIPE_READ {
+            continue;
+        }
+        let Some(ret) = resume_pipe_reader(alloc, child) else {
+            continue;
+        };
+        let mut reply_mrs = child.pipe_reply_mrs;
+        reply_mrs[3] = ret as u64;
+        unsafe {
+            sel4_send(child.pipe_reply_slot, msg_info(0, 0, 0, 11), &reply_mrs);
+        }
+        alloc.delete_cap_slot(child.pipe_reply_slot);
+        child.state = PROC_RUNNABLE;
+        clear_pipe_block(child);
+    }
+}
+
+fn resume_pipe_reader(alloc: &mut Allocator, child: &mut Child) -> Option<i64> {
+    let fd = child.pipe_fd;
+    if fd >= MAX_FD || child.fds[fd].kind != FD_PIPE_READ {
+        return Some(-1);
+    }
+    let pipe_idx = child.fds[fd].aux;
+    let ret = unsafe { pipe_read(alloc, child, pipe_idx, child.pipe_buf, child.pipe_len) };
+    if ret == 0 && unsafe { pipe_has_writers(pipe_idx) } {
+        None
+    } else {
+        Some(ret)
+    }
+}
+
 fn resume_pipe_writers(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS]) {
     for child in procs.iter_mut() {
         if child.state != PROC_PIPE_WRITE {
@@ -271,12 +377,7 @@ fn resume_pipe_writers(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS]) {
         }
         alloc.delete_cap_slot(child.pipe_reply_slot);
         child.state = PROC_RUNNABLE;
-        child.pipe_reply_slot = 0;
-        child.pipe_reply_mrs = [0; 11];
-        child.pipe_fd = 0;
-        child.pipe_buf = 0;
-        child.pipe_len = 0;
-        child.pipe_done = 0;
+        clear_pipe_block(child);
     }
 }
 
@@ -315,6 +416,7 @@ fn sys_read(
     fd: usize,
     dst: u64,
     len: usize,
+    mrs: &[u64; 64],
 ) -> SyscallResult {
     if fd >= MAX_FD || len == 0 {
         return SyscallResult::Reply(if fd < MAX_FD { 0 } else { -1 });
@@ -329,7 +431,13 @@ fn sys_read(
             SyscallResult::Reply(fs_read_dir(alloc, child, fd, dst, len))
         }
         FD_PIPE_READ => {
-            SyscallResult::Reply(unsafe { pipe_read(alloc, child, entry.aux, dst, len) })
+            let ret = unsafe { pipe_read(alloc, child, entry.aux, dst, len) };
+            if ret == 0 && unsafe { pipe_has_writers(entry.aux) } {
+                block_pipe_reader(alloc, child, fd, dst, len, mrs);
+                SyscallResult::Block
+            } else {
+                SyscallResult::Reply(ret)
+            }
         }
         _ => SyscallResult::Reply(-1),
     }
@@ -606,16 +714,7 @@ fn fault_kill(
         halt_loop();
     }
     call_checked(procs[proc_idx].tcb, LABEL_TCB_SUSPEND, &[], &[]);
-    release_all_sparse_eager(&mut procs[proc_idx]);
-    close_all_fds(&mut procs[proc_idx]);
-    reparent_children(alloc, procs, pid);
-    procs[proc_idx].state = PROC_ZOMBIE;
-    procs[proc_idx].exit_status = -1;
-    if procs[proc_idx].reparented_to_init && !ROOT_IS_INIT {
-        reap_process(alloc, &mut procs[proc_idx]);
-        return SyscallResult::Stop;
-    }
-    reply_waiting_parent(alloc, procs, proc_idx);
+    make_zombie_process(alloc, procs, proc_idx, -1);
     SyscallResult::Stop
 }
 
@@ -695,17 +794,29 @@ fn sys_exit(
     if procs[proc_idx].parent_pid == 0 {
         halt_loop();
     }
+    make_zombie_process(alloc, procs, proc_idx, status);
+    SyscallResult::Stop
+}
+
+fn make_zombie_process(
+    alloc: &mut Allocator,
+    procs: &mut [Child; MAX_PROCS],
+    proc_idx: usize,
+    status: i32,
+) {
+    let pid = procs[proc_idx].pid;
     release_all_sparse_eager(&mut procs[proc_idx]);
     close_all_fds(&mut procs[proc_idx]);
-    reparent_children(alloc, procs, pid);
+    drop_blocked_reply_caps(alloc, &mut procs[proc_idx]);
     procs[proc_idx].state = PROC_ZOMBIE;
     procs[proc_idx].exit_status = status;
+    pump_pipe_waiters(alloc, procs);
+    reparent_children(alloc, procs, pid);
     if procs[proc_idx].reparented_to_init && !ROOT_IS_INIT {
         reap_process(alloc, &mut procs[proc_idx]);
-        return SyscallResult::Stop;
+        return;
     }
     reply_waiting_parent(alloc, procs, proc_idx);
-    SyscallResult::Stop
 }
 
 fn sys_wait(
@@ -824,17 +935,14 @@ fn reap_process(alloc: &mut Allocator, child: &mut Child) {
     *child = Child::empty();
 }
 
-fn sys_kill(procs: &mut [Child; MAX_PROCS], pid: i64) -> i64 {
+fn sys_kill(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS], pid: i64) -> i64 {
     if pid <= 0 {
         return -1;
     }
-    for proc in procs.iter_mut() {
-        if proc.pid == pid as u64 && proc.state != PROC_UNUSED {
-            call_checked(proc.tcb, LABEL_TCB_SUSPEND, &[], &[]);
-            release_all_sparse_eager(proc);
-            close_all_fds(proc);
-            proc.state = PROC_ZOMBIE;
-            proc.exit_status = -1;
+    for i in 0..MAX_PROCS {
+        if procs[i].pid == pid as u64 && procs[i].state != PROC_UNUSED {
+            call_checked(procs[i].tcb, LABEL_TCB_SUSPEND, &[], &[]);
+            make_zombie_process(alloc, procs, i, -1);
             return 0;
         }
     }
@@ -1871,6 +1979,10 @@ unsafe fn pipe_write(pipe_idx: usize, src: &[u8]) -> usize {
 
 unsafe fn pipe_has_readers(pipe_idx: usize) -> bool {
     unsafe { pipe_idx < MAX_PIPES && PIPES[pipe_idx].readers > 0 }
+}
+
+unsafe fn pipe_has_writers(pipe_idx: usize) -> bool {
+    unsafe { pipe_idx < MAX_PIPES && PIPES[pipe_idx].writers > 0 }
 }
 
 unsafe fn pipe_read(
