@@ -3,8 +3,8 @@ use core::cmp::min;
 use crate::allocator::Allocator;
 use crate::child::{
     clear_process_mappings, clone_address_space, copy_cstr_from_child, copy_from_child,
-    copy_to_child, create_child, destroy_child_objects, is_child_page_mapped, load_elf,
-    map_fresh_child_page, map_stack, mapping_slots_available, read_user_context,
+    copy_to_child, create_child, destroy_child_objects, frame_pool_available, is_child_page_mapped,
+    load_elf, map_lazy_child_page, map_stack, mapping_slots_available, read_user_context,
     reset_process_mappings, unmap_child_range, write_user_context,
 };
 use crate::consts::*;
@@ -104,14 +104,14 @@ pub(crate) fn handle_xv6_syscall(
             );
         }
         SYS_READ => {
-            let result = sys_read(&mut procs[proc_idx], a0 as usize, a1, a2 as usize);
-            resume_pipe_writers(procs);
+            let result = sys_read(alloc, &mut procs[proc_idx], a0 as usize, a1, a2 as usize);
+            resume_pipe_writers(alloc, procs);
             return result;
         }
-        SYS_OPEN => sys_open(&mut procs[proc_idx], a0, a1 as u32),
+        SYS_OPEN => sys_open(alloc, &mut procs[proc_idx], a0, a1 as u32),
         SYS_CLOSE => sys_close(&mut procs[proc_idx], a0 as usize),
         SYS_DUP => sys_dup(&mut procs[proc_idx], a0 as usize),
-        SYS_FSTAT => sys_fstat(&procs[proc_idx], a0 as usize, a1),
+        SYS_FSTAT => sys_fstat(alloc, &procs[proc_idx], a0 as usize, a1),
         SYS_SBRK => sys_sbrk(alloc, &mut procs[proc_idx], a0 as i64, a1),
         SYS_GETPID => procs[proc_idx].pid as i64,
         SYS_UPTIME => unsafe { TICKS as i64 },
@@ -120,13 +120,13 @@ pub(crate) fn handle_xv6_syscall(
             0
         }
         SYS_KILL => sys_kill(procs, a0 as i64),
-        SYS_CHDIR => sys_chdir(&mut procs[proc_idx], a0),
-        SYS_PIPE => sys_pipe(&mut procs[proc_idx], a0),
-        SYS_MKNOD => sys_mknod(&procs[proc_idx], a0),
+        SYS_CHDIR => sys_chdir(alloc, &mut procs[proc_idx], a0),
+        SYS_PIPE => sys_pipe(alloc, &mut procs[proc_idx], a0),
+        SYS_MKNOD => sys_mknod(alloc, &procs[proc_idx], a0),
         SYS_EXEC => return sys_exec(alloc, &mut procs[proc_idx], a0, a1),
-        SYS_UNLINK => sys_unlink(&procs[proc_idx], a0),
-        SYS_LINK => sys_link(&procs[proc_idx], a0, a1),
-        SYS_MKDIR => sys_mkdir(&procs[proc_idx], a0),
+        SYS_UNLINK => sys_unlink(alloc, &procs[proc_idx], a0),
+        SYS_LINK => sys_link(alloc, &procs[proc_idx], a0, a1),
+        SYS_MKDIR => sys_mkdir(alloc, &procs[proc_idx], a0),
         _ => -1,
     };
     SyscallResult::Reply(ret)
@@ -164,7 +164,7 @@ fn sys_write(
     let mut done = 0usize;
     while done < len {
         let n = min(scratch.len(), len - done);
-        if !copy_from_child(child, buf + done as u64, &mut scratch[..n]) {
+        if !copy_from_child(alloc, child, buf + done as u64, &mut scratch[..n]) {
             return SyscallResult::Reply(-1);
         }
         let wrote = {
@@ -242,12 +242,12 @@ fn block_pipe_writer(
     child.pipe_done = done;
 }
 
-fn resume_pipe_writers(procs: &mut [Child; MAX_PROCS]) {
+fn resume_pipe_writers(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS]) {
     for child in procs.iter_mut() {
         if child.state != PROC_PIPE_WRITE {
             continue;
         }
-        let Some(ret) = resume_pipe_writer(child) else {
+        let Some(ret) = resume_pipe_writer(alloc, child) else {
             continue;
         };
         let mut reply_mrs = child.pipe_reply_mrs;
@@ -255,6 +255,7 @@ fn resume_pipe_writers(procs: &mut [Child; MAX_PROCS]) {
         unsafe {
             sel4_send(child.pipe_reply_slot, msg_info(0, 0, 0, 11), &reply_mrs);
         }
+        alloc.delete_cap_slot(child.pipe_reply_slot);
         child.state = PROC_RUNNABLE;
         child.pipe_reply_slot = 0;
         child.pipe_reply_mrs = [0; 11];
@@ -265,7 +266,7 @@ fn resume_pipe_writers(procs: &mut [Child; MAX_PROCS]) {
     }
 }
 
-fn resume_pipe_writer(child: &mut Child) -> Option<i64> {
+fn resume_pipe_writer(alloc: &mut Allocator, child: &mut Child) -> Option<i64> {
     let fd = child.pipe_fd;
     if fd >= MAX_FD || child.fds[fd].kind != FD_PIPE_WRITE {
         return Some(-1);
@@ -275,6 +276,7 @@ fn resume_pipe_writer(child: &mut Child) -> Option<i64> {
     while child.pipe_done < child.pipe_len {
         let n = min(scratch.len(), child.pipe_len - child.pipe_done);
         if !copy_from_child(
+            alloc,
             child,
             child.pipe_buf + child.pipe_done as u64,
             &mut scratch[..n],
@@ -293,21 +295,33 @@ fn resume_pipe_writer(child: &mut Child) -> Option<i64> {
     Some(child.pipe_done as i64)
 }
 
-fn sys_read(child: &mut Child, fd: usize, dst: u64, len: usize) -> SyscallResult {
+fn sys_read(
+    alloc: &mut Allocator,
+    child: &mut Child,
+    fd: usize,
+    dst: u64,
+    len: usize,
+) -> SyscallResult {
     if fd >= MAX_FD || len == 0 {
         return SyscallResult::Reply(if fd < MAX_FD { 0 } else { -1 });
     }
     let entry = child.fds[fd];
     match entry.kind {
-        FD_CONSOLE => sys_read_console(child, dst, len),
-        FD_FS_FILE if entry.readable => SyscallResult::Reply(fs_read_file(child, fd, dst, len)),
-        FD_FS_DIR if entry.readable => SyscallResult::Reply(fs_read_dir(child, fd, dst, len)),
-        FD_PIPE_READ => SyscallResult::Reply(unsafe { pipe_read(child, entry.aux, dst, len) }),
+        FD_CONSOLE => sys_read_console(alloc, child, dst, len),
+        FD_FS_FILE if entry.readable => {
+            SyscallResult::Reply(fs_read_file(alloc, child, fd, dst, len))
+        }
+        FD_FS_DIR if entry.readable => {
+            SyscallResult::Reply(fs_read_dir(alloc, child, fd, dst, len))
+        }
+        FD_PIPE_READ => {
+            SyscallResult::Reply(unsafe { pipe_read(alloc, child, entry.aux, dst, len) })
+        }
         _ => SyscallResult::Reply(-1),
     }
 }
 
-fn sys_read_console(child: &Child, dst: u64, len: usize) -> SyscallResult {
+fn sys_read_console(alloc: &mut Allocator, child: &Child, dst: u64, len: usize) -> SyscallResult {
     if CONSOLE_INPUT.is_empty() {
         return SyscallResult::Block;
     }
@@ -317,7 +331,7 @@ fn sys_read_console(child: &Child, dst: u64, len: usize) -> SyscallResult {
         }
         let n = min(len, CONSOLE_INPUT.len() - CONSOLE_INPUT_POS);
         let chunk = &CONSOLE_INPUT[CONSOLE_INPUT_POS..CONSOLE_INPUT_POS + n];
-        if !copy_to_child(child, dst, chunk) {
+        if !copy_to_child(alloc, child, dst, chunk) {
             return SyscallResult::Reply(-1);
         }
         for b in chunk {
@@ -328,9 +342,9 @@ fn sys_read_console(child: &Child, dst: u64, len: usize) -> SyscallResult {
     }
 }
 
-fn sys_open(child: &mut Child, path_ptr: u64, flags: u32) -> i64 {
+fn sys_open(alloc: &mut Allocator, child: &mut Child, path_ptr: u64, flags: u32) -> i64 {
     let mut path = [0u8; 128];
-    let Some(len) = copy_cstr_from_child(child, path_ptr, &mut path) else {
+    let Some(len) = copy_cstr_from_child(alloc, child, path_ptr, &mut path) else {
         return -1;
     };
     let path = &path[..len];
@@ -427,7 +441,7 @@ fn sys_dup(child: &mut Child, fd: usize) -> i64 {
     -1
 }
 
-fn sys_fstat(child: &Child, fd: usize, dst: u64) -> i64 {
+fn sys_fstat(alloc: &mut Allocator, child: &Child, fd: usize, dst: u64) -> i64 {
     if fd >= MAX_FD {
         return -1;
     }
@@ -444,7 +458,7 @@ fn sys_fstat(child: &Child, fd: usize, dst: u64) -> i64 {
     write_u16(&mut st, 8, typ);
     write_u16(&mut st, 10, 1);
     write_u64_bytes(&mut st, 16, size);
-    if !copy_to_child(child, dst, &st) {
+    if !copy_to_child(alloc, child, dst, &st) {
         return -1;
     }
     0
@@ -481,13 +495,17 @@ fn sys_sbrk(alloc: &mut Allocator, child: &mut Child, increment: i64, mode: u64)
         let first_page = align_up(child.heap_mapped_end);
         let needed = ((target_end.saturating_sub(first_page)) / PAGE_SIZE) as usize;
         if needed <= SBRK_EAGER_MAP_LIMIT {
-            let available = mapping_slots_available();
-            if needed > available.saturating_sub(SBRK_MAPPING_HEADROOM) {
+            let mapping_available = mapping_slots_available();
+            let pooled_frames = frame_pool_available();
+            let slot_available = alloc.slots_available().saturating_add(pooled_frames);
+            if needed > mapping_available.saturating_sub(SBRK_MAPPING_HEADROOM)
+                || needed > slot_available.saturating_sub(SBRK_MAPPING_HEADROOM)
+            {
                 return -1;
             }
             let mut page = align_up(child.heap_mapped_end);
             while page < target_end {
-                map_fresh_child_page(alloc, child, page, true, false);
+                map_lazy_child_page(alloc, child, page, true, false);
                 page += PAGE_SIZE;
             }
             child.heap_mapped_end = target_end;
@@ -515,7 +533,10 @@ fn handle_lazy_page_fault(
     if mapping_slots_available() <= SBRK_MAPPING_HEADROOM {
         return false;
     }
-    map_fresh_child_page(alloc, child, fault_addr, true, false);
+    if frame_pool_available() == 0 && alloc.slots_available() <= SBRK_MAPPING_HEADROOM {
+        return false;
+    }
+    map_lazy_child_page(alloc, child, fault_addr, true, false);
     true
 }
 
@@ -639,7 +660,7 @@ fn sys_wait(
         if status_ptr != 0 {
             let mut out = [0u8; 4];
             write_i32(&mut out, 0, status);
-            if !copy_to_child(&procs[proc_idx], status_ptr, &out) {
+            if !copy_to_child(alloc, &procs[proc_idx], status_ptr, &out) {
                 return SyscallResult::Reply(-1);
             }
         }
@@ -681,7 +702,7 @@ fn reply_waiting_parent(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS], c
         if parent.wait_status_ptr != 0 {
             let mut out = [0u8; 4];
             write_i32(&mut out, 0, status);
-            if !copy_to_child(&parent, parent.wait_status_ptr, &out) {
+            if !copy_to_child(alloc, &parent, parent.wait_status_ptr, &out) {
                 ret = -1;
             }
         }
@@ -691,6 +712,7 @@ fn reply_waiting_parent(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS], c
         unsafe {
             sel4_send(parent.wait_reply_slot, msg_info(0, 0, 0, 11), &reply_mrs);
         }
+        alloc.delete_cap_slot(parent.wait_reply_slot);
         procs[i].state = PROC_RUNNABLE;
         procs[i].wait_status_ptr = 0;
         procs[i].wait_reply_slot = 0;
@@ -751,7 +773,7 @@ fn sys_exec(
     argv_ptr: u64,
 ) -> SyscallResult {
     let mut path = [0u8; 128];
-    let Some(path_len) = copy_cstr_from_child(child, path_ptr, &mut path) else {
+    let Some(path_len) = copy_cstr_from_child(alloc, child, path_ptr, &mut path) else {
         return SyscallResult::Reply(-1);
     };
     let name = basename(&path[..path_len]);
@@ -761,14 +783,14 @@ fn sys_exec(
 
     let mut args = [[0u8; MAX_EXEC_ARG_LEN]; MAX_EXEC_ARGS];
     let mut arg_lens = [0usize; MAX_EXEC_ARGS];
-    let Some(argc) = collect_exec_args(child, argv_ptr, &mut args, &mut arg_lens) else {
+    let Some(argc) = collect_exec_args(alloc, child, argv_ptr, &mut args, &mut arg_lens) else {
         return SyscallResult::Reply(-1);
     };
 
     reset_process_mappings(alloc, child.pid);
     load_elf(alloc, child, image.elf);
     map_stack(alloc, child);
-    let Some((sp, argv_va)) = setup_exec_stack(child, &args, &arg_lens, argc) else {
+    let Some((sp, argv_va)) = setup_exec_stack(alloc, child, &args, &arg_lens, argc) else {
         return SyscallResult::Reply(-1);
     };
 
@@ -803,6 +825,7 @@ fn find_exec_image(name: &[u8]) -> Option<&'static ExecImage> {
 }
 
 fn collect_exec_args(
+    alloc: &mut Allocator,
     child: &Child,
     argv_ptr: u64,
     args: &mut [[u8; MAX_EXEC_ARG_LEN]; MAX_EXEC_ARGS],
@@ -813,17 +836,18 @@ fn collect_exec_args(
         if argc >= MAX_EXEC_ARGS {
             return None;
         }
-        let ptr = read_child_u64(child, argv_ptr + (argc as u64 * 8))?;
+        let ptr = read_child_u64(alloc, child, argv_ptr + (argc as u64 * 8))?;
         if ptr == 0 {
             return Some(argc);
         }
-        let len = copy_cstr_from_child(child, ptr, &mut args[argc])?;
+        let len = copy_cstr_from_child(alloc, child, ptr, &mut args[argc])?;
         arg_lens[argc] = len;
         argc += 1;
     }
 }
 
 fn setup_exec_stack(
+    alloc: &mut Allocator,
     child: &Child,
     args: &[[u8; MAX_EXEC_ARG_LEN]; MAX_EXEC_ARGS],
     arg_lens: &[usize; MAX_EXEC_ARGS],
@@ -834,10 +858,10 @@ fn setup_exec_stack(
     for i in 0..argc {
         let len = arg_lens[i];
         sp = sp.checked_sub((len + 1) as u64)?;
-        if !copy_to_child(child, sp, &args[i][..len]) {
+        if !copy_to_child(alloc, child, sp, &args[i][..len]) {
             return None;
         }
-        if !copy_to_child(child, sp + len as u64, &[0]) {
+        if !copy_to_child(alloc, child, sp + len as u64, &[0]) {
             return None;
         }
         arg_ptrs[i] = sp;
@@ -845,12 +869,12 @@ fn setup_exec_stack(
 
     sp &= !0xf;
     sp = sp.checked_sub(8)?;
-    if !write_child_u64(child, sp, 0) {
+    if !write_child_u64(alloc, child, sp, 0) {
         return None;
     }
     for i in (0..argc).rev() {
         sp = sp.checked_sub(8)?;
-        if !write_child_u64(child, sp, arg_ptrs[i]) {
+        if !write_child_u64(alloc, child, sp, arg_ptrs[i]) {
             return None;
         }
     }
@@ -859,23 +883,23 @@ fn setup_exec_stack(
     Some((sp, argv_va))
 }
 
-fn read_child_u64(child: &Child, va: u64) -> Option<u64> {
+fn read_child_u64(alloc: &mut Allocator, child: &Child, va: u64) -> Option<u64> {
     let mut bytes = [0u8; 8];
-    if !copy_from_child(child, va, &mut bytes) {
+    if !copy_from_child(alloc, child, va, &mut bytes) {
         return None;
     }
     Some(read_u64(&bytes, 0))
 }
 
-fn write_child_u64(child: &Child, va: u64, value: u64) -> bool {
+fn write_child_u64(alloc: &mut Allocator, child: &Child, va: u64, value: u64) -> bool {
     let mut bytes = [0u8; 8];
     write_u64_bytes(&mut bytes, 0, value);
-    copy_to_child(child, va, &bytes)
+    copy_to_child(alloc, child, va, &bytes)
 }
 
-fn sys_chdir(child: &mut Child, path_ptr: u64) -> i64 {
+fn sys_chdir(alloc: &mut Allocator, child: &mut Child, path_ptr: u64) -> i64 {
     let mut path = [0u8; 128];
-    let Some(len) = copy_cstr_from_child(child, path_ptr, &mut path) else {
+    let Some(len) = copy_cstr_from_child(alloc, child, path_ptr, &mut path) else {
         return -1;
     };
     let Some(node) = lookup_path(child, &path[..len]) else {
@@ -890,7 +914,7 @@ fn sys_chdir(child: &mut Child, path_ptr: u64) -> i64 {
     0
 }
 
-fn sys_pipe(child: &mut Child, fds_ptr: u64) -> i64 {
+fn sys_pipe(alloc: &mut Allocator, child: &mut Child, fds_ptr: u64) -> i64 {
     unsafe {
         let mut pipe_idx = MAX_PIPES;
         for i in 0..MAX_PIPES {
@@ -941,7 +965,7 @@ fn sys_pipe(child: &mut Child, fds_ptr: u64) -> i64 {
         let mut out = [0u8; 8];
         write_i32(&mut out, 0, read_fd as i32);
         write_i32(&mut out, 4, write_fd as i32);
-        if !copy_to_child(child, fds_ptr, &out) {
+        if !copy_to_child(alloc, child, fds_ptr, &out) {
             close_fd(child, read_fd);
             close_fd(child, write_fd);
             return -1;
@@ -950,9 +974,9 @@ fn sys_pipe(child: &mut Child, fds_ptr: u64) -> i64 {
     }
 }
 
-fn sys_mknod(child: &Child, path_ptr: u64) -> i64 {
+fn sys_mknod(alloc: &mut Allocator, child: &Child, path_ptr: u64) -> i64 {
     let mut path = [0u8; 128];
-    let Some(len) = copy_cstr_from_child(child, path_ptr, &mut path) else {
+    let Some(len) = copy_cstr_from_child(alloc, child, path_ptr, &mut path) else {
         return -1;
     };
     if basename(&path[..len]) == b"console" {
@@ -1242,7 +1266,7 @@ fn fs_node_size(node: usize) -> usize {
     }
 }
 
-fn fs_read_file(child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
+fn fs_read_file(alloc: &mut Allocator, child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
     let node = child.fds[fd].aux;
     unsafe {
         if node >= MAX_FS_NODES || !FS_NODES[node].used {
@@ -1257,12 +1281,12 @@ fn fs_read_file(child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
         }
         let n = min(len, size - offset);
         let ok = match FS_NODES[node].kind {
-            FS_README => copy_to_child(child, dst, &README_BYTES[offset..offset + n]),
+            FS_README => copy_to_child(alloc, child, dst, &README_BYTES[offset..offset + n]),
             FS_EXEC => {
                 let image = &EXEC_IMAGES[FS_NODES[node].exec_index].elf[offset..offset + n];
-                copy_to_child(child, dst, image)
+                copy_to_child(alloc, child, dst, image)
             }
-            FS_FILE => fs_read_mutable_file(child, node, offset, dst, n),
+            FS_FILE => fs_read_mutable_file(alloc, child, node, offset, dst, n),
             _ => false,
         };
         if !ok {
@@ -1298,6 +1322,7 @@ fn fs_write(node: usize, offset: usize, src: &[u8]) -> Option<usize> {
 }
 
 unsafe fn fs_read_mutable_file(
+    alloc: &mut Allocator,
     child: &Child,
     node: usize,
     offset: usize,
@@ -1319,6 +1344,7 @@ unsafe fn fs_read_mutable_file(
                 return false;
             }
             if !copy_to_child(
+                alloc,
                 child,
                 dst + done as u64,
                 &FILE_BLOCKS[block][block_off..block_off + n],
@@ -1361,7 +1387,7 @@ unsafe fn alloc_file_block() -> Option<usize> {
     }
 }
 
-fn fs_read_dir(child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
+fn fs_read_dir(alloc: &mut Allocator, child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
     let node = child.fds[fd].aux;
     let mut done = 0usize;
     while done < len {
@@ -1375,7 +1401,7 @@ fn fs_read_dir(child: &mut Child, fd: usize, dst: u64, len: usize) -> i64 {
         }
         let start = off % 16;
         let n = min(16 - start, len - done);
-        if !copy_to_child(child, dst + done as u64, &ent[start..start + n]) {
+        if !copy_to_child(alloc, child, dst + done as u64, &ent[start..start + n]) {
             return -1;
         }
         done += n;
@@ -1590,9 +1616,9 @@ fn dir_name_len(name: &[u8]) -> usize {
     min(DIRSIZ, name.len())
 }
 
-fn sys_unlink(child: &Child, path_ptr: u64) -> i64 {
+fn sys_unlink(alloc: &mut Allocator, child: &Child, path_ptr: u64) -> i64 {
     let mut path = [0u8; 128];
-    let Some(len) = copy_cstr_from_child(child, path_ptr, &mut path) else {
+    let Some(len) = copy_cstr_from_child(alloc, child, path_ptr, &mut path) else {
         return -1;
     };
     let Some((parent, name, name_len)) = lookup_parent(child, &path[..len]) else {
@@ -1618,13 +1644,13 @@ fn sys_unlink(child: &Child, path_ptr: u64) -> i64 {
     0
 }
 
-fn sys_link(child: &Child, old_ptr: u64, new_ptr: u64) -> i64 {
+fn sys_link(alloc: &mut Allocator, child: &Child, old_ptr: u64, new_ptr: u64) -> i64 {
     let mut old_path = [0u8; 128];
     let mut new_path = [0u8; 128];
-    let Some(old_len) = copy_cstr_from_child(child, old_ptr, &mut old_path) else {
+    let Some(old_len) = copy_cstr_from_child(alloc, child, old_ptr, &mut old_path) else {
         return -1;
     };
-    let Some(new_len) = copy_cstr_from_child(child, new_ptr, &mut new_path) else {
+    let Some(new_len) = copy_cstr_from_child(alloc, child, new_ptr, &mut new_path) else {
         return -1;
     };
     let Some(node) = lookup_path(child, &old_path[..old_len]) else {
@@ -1645,9 +1671,9 @@ fn sys_link(child: &Child, old_ptr: u64, new_ptr: u64) -> i64 {
     0
 }
 
-fn sys_mkdir(child: &Child, path_ptr: u64) -> i64 {
+fn sys_mkdir(alloc: &mut Allocator, child: &Child, path_ptr: u64) -> i64 {
     let mut path = [0u8; 128];
-    let Some(len) = copy_cstr_from_child(child, path_ptr, &mut path) else {
+    let Some(len) = copy_cstr_from_child(alloc, child, path_ptr, &mut path) else {
         return -1;
     };
     let Some((parent, name, name_len)) = lookup_parent(child, &path[..len]) else {
@@ -1728,7 +1754,13 @@ unsafe fn pipe_has_readers(pipe_idx: usize) -> bool {
     unsafe { pipe_idx < MAX_PIPES && PIPES[pipe_idx].readers > 0 }
 }
 
-unsafe fn pipe_read(child: &Child, pipe_idx: usize, dst: u64, len: usize) -> i64 {
+unsafe fn pipe_read(
+    alloc: &mut Allocator,
+    child: &Child,
+    pipe_idx: usize,
+    dst: u64,
+    len: usize,
+) -> i64 {
     unsafe {
         if pipe_idx >= MAX_PIPES {
             return -1;
@@ -1749,7 +1781,7 @@ unsafe fn pipe_read(child: &Child, pipe_idx: usize, dst: u64, len: usize) -> i64
                 pipe.len -= 1;
                 i += 1;
             }
-            if !copy_to_child(child, dst + total as u64, &scratch[..n]) {
+            if !copy_to_child(alloc, child, dst + total as u64, &scratch[..n]) {
                 return -1;
             }
             total += n;

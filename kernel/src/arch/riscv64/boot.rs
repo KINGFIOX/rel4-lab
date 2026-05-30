@@ -31,9 +31,9 @@ pub unsafe extern "C" fn _start() -> ! {
     naked_asm!(
         "fence.i",
 
-        // Disable the RISC-V floating-point state before any hart enters
-        // Rust or parks. The kernel is built for IMAC/soft-float and does
-        // not own F/D context.
+        // Clear sstatus.FS before any hart enters Rust or parks. This is
+        // CSR hygiene only: the kernel is built for IMAC and does not save,
+        // restore, or execute floating-point state.
         "li     t0, 0x6000",
         "csrc   sstatus, t0",
 

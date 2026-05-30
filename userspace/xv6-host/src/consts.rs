@@ -59,6 +59,7 @@ pub(crate) const CHILD_HEAP_LIMIT: u64 = 0x6800_0000;
 pub(crate) const CHILD_EAGER_HEAP_LIMIT: u64 = 128 * 1024 * 1024;
 pub(crate) const HOST_ALIAS_BASE: u64 = 0x4000_0000;
 pub(crate) const MAX_MAPPINGS: usize = 8192;
+pub(crate) const FRAME_POOL_CAP: usize = MAX_MAPPINGS;
 pub(crate) const SBRK_MAPPING_HEADROOM: usize = 256;
 pub(crate) const SBRK_EAGER_MAP_LIMIT: usize = 64;
 pub(crate) const MAX_RECYCLED_SLOTS: usize = MAX_MAPPINGS * 2;

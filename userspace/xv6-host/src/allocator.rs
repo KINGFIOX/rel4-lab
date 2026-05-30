@@ -12,9 +12,10 @@ pub(crate) struct Allocator {
     empty_end: u64,
     untyped_slot: u64,
     process_untyped_slots: [u64; MAX_PROCS],
-    recycled_slots: [u64; MAX_RECYCLED_SLOTS],
     recycled_len: usize,
 }
+
+static mut RECYCLED_SLOTS: [u64; MAX_RECYCLED_SLOTS] = [0; MAX_RECYCLED_SLOTS];
 
 impl Allocator {
     pub(crate) fn new(bi: &BootInfo) -> Self {
@@ -52,7 +53,6 @@ impl Allocator {
             empty_end: bi.empty.end,
             untyped_slot: selected,
             process_untyped_slots: [0; MAX_PROCS],
-            recycled_slots: [0; MAX_RECYCLED_SLOTS],
             recycled_len: 0,
         };
         let mut i = 0;
@@ -67,7 +67,7 @@ impl Allocator {
     pub(crate) fn alloc_slot(&mut self) -> u64 {
         if self.recycled_len != 0 {
             self.recycled_len -= 1;
-            return self.recycled_slots[self.recycled_len];
+            return unsafe { RECYCLED_SLOTS[self.recycled_len] };
         }
         if self.next_slot >= self.empty_end {
             log("xv6-host: out of CSpace slots\n");
@@ -76,6 +76,10 @@ impl Allocator {
         let slot = self.next_slot;
         self.next_slot += 1;
         slot
+    }
+
+    pub(crate) fn slots_available(&self) -> usize {
+        self.empty_end.saturating_sub(self.next_slot) as usize + self.recycled_len
     }
 
     pub(crate) fn retype_one(&mut self, ty: u64, user_size: u64) -> u64 {
@@ -115,7 +119,9 @@ impl Allocator {
             &[slot, ROOT_CNODE_DEPTH],
         );
         if self.recycled_len < MAX_RECYCLED_SLOTS {
-            self.recycled_slots[self.recycled_len] = slot;
+            unsafe {
+                RECYCLED_SLOTS[self.recycled_len] = slot;
+            }
             self.recycled_len += 1;
         }
     }

@@ -20,8 +20,18 @@ static mut MAPPINGS: [Mapping; MAX_MAPPINGS] = [Mapping {
     executable: false,
 }; MAX_MAPPINGS];
 static mut MAPPING_COUNT: usize = 0;
-static mut FRAME_POOL: [[u64; MAX_MAPPINGS]; MAX_PROCS] = [[0; MAX_MAPPINGS]; MAX_PROCS];
-static mut FRAME_POOL_LEN: [usize; MAX_PROCS] = [0; MAX_PROCS];
+
+#[derive(Copy, Clone)]
+struct FramePoolEntry {
+    proc_slot: usize,
+    frame_slot: u64,
+}
+
+static mut FRAME_POOL: [FramePoolEntry; FRAME_POOL_CAP] = [FramePoolEntry {
+    proc_slot: 0,
+    frame_slot: 0,
+}; FRAME_POOL_CAP];
+static mut FRAME_POOL_LEN: usize = 0;
 
 pub(crate) fn create_child(
     alloc: &mut Allocator,
@@ -45,6 +55,8 @@ pub(crate) fn create_child(
         vspace,
         CHILD_IPC_BUFFER,
         true,
+        false,
+        false,
         false,
     );
 
@@ -151,7 +163,9 @@ pub(crate) fn load_elf(alloc: &mut Allocator, child: &mut Child, elf: &[u8]) {
             map_fresh_child_page(alloc, child, page, writable, executable);
             page += PAGE_SIZE;
         }
-        if p_filesz > 0 && !copy_to_child_raw(child, p_vaddr, &elf[p_offset..p_offset + p_filesz]) {
+        if p_filesz > 0
+            && !copy_to_child_raw(alloc, child, p_vaddr, &elf[p_offset..p_offset + p_filesz])
+        {
             log("xv6-host: failed to copy payload\n");
             halt_loop();
         }
@@ -222,6 +236,10 @@ pub(crate) fn mapping_slots_available() -> usize {
     }
 }
 
+pub(crate) fn frame_pool_available() -> usize {
+    unsafe { FRAME_POOL_LEN }
+}
+
 pub(crate) fn map_stack(alloc: &mut Allocator, child: &Child) {
     for i in 0..CHILD_STACK_PAGES {
         let va = CHILD_STACK_TOP - ((i as u64 + 1) * PAGE_SIZE);
@@ -246,19 +264,48 @@ pub(crate) fn map_fresh_child_page(
     executable: bool,
 ) -> u64 {
     let page = align_down(child_va);
-    if let Some(alias) = lookup_alias(child.pid, page) {
+    if let Some(idx) = lookup_mapping_index(child.pid, page) {
+        let alias = ensure_alias_for_index(alloc, idx);
         return alias;
     }
-    let frame_slot = alloc_process_frame(alloc, child);
+    let (frame_slot, owner_proc_slot, needs_zero) = alloc_process_frame(alloc, child);
     map_existing_frame(
         alloc,
-        child.proc_slot,
+        owner_proc_slot,
         child.pid,
         frame_slot,
         child.vspace,
         page,
         writable,
         executable,
+        true,
+        needs_zero,
+    )
+}
+
+pub(crate) fn map_lazy_child_page(
+    alloc: &mut Allocator,
+    child: &Child,
+    child_va: u64,
+    writable: bool,
+    executable: bool,
+) -> u64 {
+    let page = align_down(child_va);
+    if let Some(idx) = lookup_mapping_index(child.pid, page) {
+        return unsafe { MAPPINGS[idx].alias_page };
+    }
+    let (frame_slot, owner_proc_slot, needs_zero) = alloc_process_frame(alloc, child);
+    map_existing_frame(
+        alloc,
+        owner_proc_slot,
+        child.pid,
+        frame_slot,
+        child.vspace,
+        page,
+        writable,
+        executable,
+        false,
+        needs_zero,
     )
 }
 
@@ -271,13 +318,19 @@ fn map_existing_frame(
     child_va: u64,
     writable: bool,
     executable: bool,
+    with_alias: bool,
+    zero_frame: bool,
 ) -> u64 {
-    let alias_slot = alloc.copy_cap(frame_slot, cap_rights(false, false, true, true));
-    let alias_va = register_mapping(
-        proc_slot, pid, child_va, frame_slot, alias_slot, writable, executable,
-    );
-    page_map(alias_slot, INIT_VSPACE, alias_va, true, false);
-    zero_page(alias_va);
+    let (mapping_slot, alias_va) =
+        register_mapping(proc_slot, pid, child_va, frame_slot, writable, executable);
+    if with_alias {
+        ensure_alias_for_index(alloc, mapping_slot);
+        if zero_frame {
+            zero_page(alias_va);
+        }
+    } else if zero_frame {
+        zero_frame_with_temporary_alias(alloc, frame_slot, alias_va);
+    }
     page_map(frame_slot, vspace, child_va, writable, executable);
     alias_va
 }
@@ -298,10 +351,9 @@ fn register_mapping(
     pid: u64,
     child_page: u64,
     frame_slot: u64,
-    alias_slot: u64,
     writable: bool,
     executable: bool,
-) -> u64 {
+) -> (usize, u64) {
     unsafe {
         let mut slot = MAPPING_COUNT;
         let mut i = 0;
@@ -329,11 +381,11 @@ fn register_mapping(
             child_page: align_down(child_page),
             alias_page: alias,
             frame_slot,
-            alias_slot,
+            alias_slot: 0,
             writable,
             executable,
         };
-        alias
+        (slot, alias)
     }
 }
 
@@ -368,12 +420,23 @@ fn page_unmap(frame_slot: u64) {
     call_checked(frame_slot, LABEL_RISCV_PAGE_UNMAP, &[], &[]);
 }
 
-fn lookup_alias(pid: u64, child_page: u64) -> Option<u64> {
-    lookup_mapping(pid, child_page).map(|m| m.alias_page)
-}
-
 pub(crate) fn is_child_page_mapped(child: &Child, va: u64) -> bool {
     lookup_mapping(child.pid, va).is_some()
+}
+
+fn lookup_mapping_index(pid: u64, child_page: u64) -> Option<usize> {
+    unsafe {
+        let page = align_down(child_page);
+        let mut i = 0;
+        while i < MAPPING_COUNT {
+            let m = MAPPINGS[i];
+            if m.pid == pid && m.child_page == page {
+                return Some(i);
+            }
+            i += 1;
+        }
+        None
+    }
 }
 
 fn lookup_mapping(pid: u64, child_page: u64) -> Option<Mapping> {
@@ -391,16 +454,27 @@ fn lookup_mapping(pid: u64, child_page: u64) -> Option<Mapping> {
     }
 }
 
-fn alloc_process_frame(alloc: &mut Allocator, child: &Child) -> u64 {
+fn alloc_process_frame(alloc: &mut Allocator, child: &Child) -> (u64, usize, bool) {
     unsafe {
-        let len = FRAME_POOL_LEN[child.proc_slot];
-        if len > 0 {
-            let next = len - 1;
-            FRAME_POOL_LEN[child.proc_slot] = next;
-            return FRAME_POOL[child.proc_slot][next];
+        let mut i = FRAME_POOL_LEN;
+        if i > 0 {
+            i -= 1;
+            let owner_proc_slot = FRAME_POOL[i].proc_slot;
+            let frame_slot = FRAME_POOL[i].frame_slot;
+            FRAME_POOL_LEN -= 1;
+            FRAME_POOL[i] = FRAME_POOL[FRAME_POOL_LEN];
+            FRAME_POOL[FRAME_POOL_LEN] = FramePoolEntry {
+                proc_slot: 0,
+                frame_slot: 0,
+            };
+            return (frame_slot, owner_proc_slot, true);
         }
     }
-    alloc.retype_one_from(child.untyped, OBJ_4K, 0)
+    (
+        alloc.retype_one_from(child.untyped, OBJ_4K, 0),
+        child.proc_slot,
+        false,
+    )
 }
 
 fn release_process_frame(alloc: &mut Allocator, proc_slot: usize, frame_slot: u64) {
@@ -408,45 +482,75 @@ fn release_process_frame(alloc: &mut Allocator, proc_slot: usize, frame_slot: u6
         return;
     }
     unsafe {
-        let len = FRAME_POOL_LEN[proc_slot];
-        if len >= MAX_MAPPINGS {
+        let len = FRAME_POOL_LEN;
+        if len >= FRAME_POOL_CAP {
             alloc.delete_cap_slot(frame_slot);
             return;
         }
-        FRAME_POOL[proc_slot][len] = frame_slot;
-        FRAME_POOL_LEN[proc_slot] = len + 1;
+        FRAME_POOL[len] = FramePoolEntry {
+            proc_slot,
+            frame_slot,
+        };
+        FRAME_POOL_LEN = len + 1;
     }
 }
 
 fn clear_process_frame_pool(alloc: &mut Allocator, proc_slot: usize) {
     unsafe {
-        let len = FRAME_POOL_LEN[proc_slot];
         let mut i = 0;
-        while i < len {
-            alloc.delete_cap_slot(FRAME_POOL[proc_slot][i]);
-            i += 1;
+        while i < FRAME_POOL_LEN {
+            if FRAME_POOL[i].proc_slot == proc_slot {
+                alloc.delete_cap_slot(FRAME_POOL[i].frame_slot);
+                FRAME_POOL_LEN -= 1;
+                FRAME_POOL[i] = FRAME_POOL[FRAME_POOL_LEN];
+                FRAME_POOL[FRAME_POOL_LEN] = FramePoolEntry {
+                    proc_slot: 0,
+                    frame_slot: 0,
+                };
+            } else {
+                i += 1;
+            }
         }
-        FRAME_POOL_LEN[proc_slot] = 0;
     }
 }
 
-fn child_ptr(child: &Child, va: u64, write: bool) -> Option<*mut u8> {
+fn child_ptr(
+    alloc: &mut Allocator,
+    child: &Child,
+    va: u64,
+    write: bool,
+    allow_lazy: bool,
+) -> Option<*mut u8> {
     let page = align_down(va);
     let off = va - page;
-    let mapping = lookup_mapping(child.pid, page)?;
+    let idx = match lookup_mapping_index(child.pid, page) {
+        Some(idx) => idx,
+        None if allow_lazy && is_lazy_heap_addr(child, va) => {
+            map_lazy_child_page(alloc, child, page, true, false);
+            lookup_mapping_index(child.pid, page)?
+        }
+        None => return None,
+    };
+    let mapping = unsafe { MAPPINGS[idx] };
     if write && !mapping.writable {
         return None;
     }
-    Some((mapping.alias_page + off) as *mut u8)
+    let alias_page = ensure_alias_for_index(alloc, idx);
+    Some((alias_page + off) as *mut u8)
 }
 
-pub(crate) fn copy_from_child(child: &Child, va: u64, out: &mut [u8]) -> bool {
+pub(crate) fn copy_from_child(
+    alloc: &mut Allocator,
+    child: &Child,
+    va: u64,
+    out: &mut [u8],
+) -> bool {
     let mut done = 0usize;
     while done < out.len() {
         let cur = va + done as u64;
         let page_left = (PAGE_SIZE - (cur & (PAGE_SIZE - 1))) as usize;
         let n = min(page_left, out.len() - done);
-        let Some(src) = child_ptr(child, cur, false) else {
+        let Some(src) = child_ptr(alloc, child, cur, false, true) else {
             return false;
         };
         unsafe { ptr::copy_nonoverlapping(src as *const u8, out[done..].as_mut_ptr(), n) };
@@ -455,13 +559,13 @@ pub(crate) fn copy_from_child(child: &Child, va: u64, out: &mut [u8]) -> bool {
     true
 }
 
-pub(crate) fn copy_to_child(child: &Child, va: u64, src: &[u8]) -> bool {
+pub(crate) fn copy_to_child(alloc: &mut Allocator, child: &Child, va: u64, src: &[u8]) -> bool {
     let mut done = 0usize;
     while done < src.len() {
         let cur = va + done as u64;
         let page_left = (PAGE_SIZE - (cur & (PAGE_SIZE - 1))) as usize;
         let n = min(page_left, src.len() - done);
-        let Some(dst) = child_ptr(child, cur, true) else {
+        let Some(dst) = child_ptr(alloc, child, cur, true, true) else {
             return false;
         };
         unsafe { ptr::copy_nonoverlapping(src[done..].as_ptr(), dst, n) };
@@ -470,13 +574,13 @@ pub(crate) fn copy_to_child(child: &Child, va: u64, src: &[u8]) -> bool {
     true
 }
 
-pub(crate) fn copy_to_child_raw(child: &Child, va: u64, src: &[u8]) -> bool {
+pub(crate) fn copy_to_child_raw(alloc: &mut Allocator, child: &Child, va: u64, src: &[u8]) -> bool {
     let mut done = 0usize;
     while done < src.len() {
         let cur = va + done as u64;
         let page_left = (PAGE_SIZE - (cur & (PAGE_SIZE - 1))) as usize;
         let n = min(page_left, src.len() - done);
-        let Some(dst) = child_ptr(child, cur, false) else {
+        let Some(dst) = child_ptr(alloc, child, cur, false, false) else {
             return false;
         };
         unsafe { ptr::copy_nonoverlapping(src[done..].as_ptr(), dst, n) };
@@ -485,10 +589,15 @@ pub(crate) fn copy_to_child_raw(child: &Child, va: u64, src: &[u8]) -> bool {
     true
 }
 
-pub(crate) fn copy_cstr_from_child(child: &Child, va: u64, out: &mut [u8]) -> Option<usize> {
+pub(crate) fn copy_cstr_from_child(
+    alloc: &mut Allocator,
+    child: &Child,
+    va: u64,
+    out: &mut [u8],
+) -> Option<usize> {
     for i in 0..out.len() {
         let mut b = [0u8; 1];
-        if !copy_from_child(child, va + i as u64, &mut b) {
+        if !copy_from_child(alloc, child, va + i as u64, &mut b) {
             return None;
         }
         out[i] = b[0];
@@ -507,10 +616,11 @@ pub(crate) fn clone_address_space(alloc: &mut Allocator, parent: &Child, child: 
             let m = MAPPINGS[i];
             let freed_heap_page = m.child_page >= live_heap_end && m.child_page < CHILD_HEAP_LIMIT;
             if m.pid == parent.pid && m.child_page != CHILD_IPC_BUFFER && !freed_heap_page {
+                let src_alias = ensure_alias_for_index(alloc, i);
                 let dst_alias =
                     map_fresh_child_page(alloc, child, m.child_page, m.writable, m.executable);
                 ptr::copy_nonoverlapping(
-                    m.alias_page as *const u8,
+                    src_alias as *const u8,
                     dst_alias as *mut u8,
                     PAGE_SIZE as usize,
                 );
@@ -564,4 +674,32 @@ pub(crate) fn write_user_context(tcb: u64, ctx: &[u64; USER_CONTEXT_WORDS], resu
 
 fn zero_page(va: u64) {
     unsafe { ptr::write_bytes(va as *mut u8, 0, PAGE_SIZE as usize) };
+}
+
+fn ensure_alias_for_index(alloc: &mut Allocator, slot: usize) -> u64 {
+    unsafe {
+        let m = MAPPINGS[slot];
+        if m.pid == 0 {
+            log("xv6-host: alias for empty mapping\n");
+            halt_loop();
+        }
+        if m.alias_slot == 0 {
+            let alias_slot = alloc.copy_cap(m.frame_slot, cap_rights(false, false, true, true));
+            page_map(alias_slot, INIT_VSPACE, m.alias_page, true, false);
+            MAPPINGS[slot].alias_slot = alias_slot;
+        }
+        MAPPINGS[slot].alias_page
+    }
+}
+
+fn zero_frame_with_temporary_alias(alloc: &mut Allocator, frame_slot: u64, alias_va: u64) {
+    let alias_slot = alloc.copy_cap(frame_slot, cap_rights(false, false, true, true));
+    page_map(alias_slot, INIT_VSPACE, alias_va, true, false);
+    zero_page(alias_va);
+    page_unmap(alias_slot);
+    alloc.delete_cap_slot(alias_slot);
+}
+
+fn is_lazy_heap_addr(child: &Child, va: u64) -> bool {
+    va >= child.heap_start && va < child.brk && va < CHILD_HEAP_LIMIT
 }
