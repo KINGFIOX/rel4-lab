@@ -71,9 +71,22 @@ Latest verified checkpoints:
   BootInfo device untyped caps, maps it at `0x50000000` in the disk server,
   allocates a DMA page, obtains its physical address with `RISCV_Page_GetAddress`,
   and maps it at `0x50001000`. The disk server now initializes queue 0 and
-  reads xv6 `fs.img` block 1 via virtio-blk, validating the on-disk superblock
-  magic `0x10203040` during `FS_OP_INIT`. The remaining staged part is routing
-  xv6 file syscalls out of the in-host in-memory FS and into the fs server.
+  can read xv6 `fs.img` blocks via virtio-blk; M6.5 below moves on-disk
+  superblock validation to the filesystem server.
+- M6.5 moves the first disk data exchange onto the fs<->disk server boundary.
+  `xv6-host` now maps a shared 4KiB frame at `0x50002000` into both
+  `xv6-fs-server` and `virtio-disk-server`; `DISK_OP_GET_INFO` is now geometry
+  only, and `xv6-fs-server` validates the superblock by calling
+  `DISK_OP_READ(1)` and reading the returned 1KiB block from that shared page.
+  Verified with `echo disk read ipc` and full `usertests`, both reaching
+  `xv6-host: exit(0) pid=1`; `usertests` also reaches `ALL TESTS PASSED`.
+- M6.6 starts real xv6 on-disk filesystem parsing in `xv6-fs-server`. During
+  `FS_OP_INIT`, the fs server now parses the superblock, reads inode blocks,
+  verifies the root inode, scans the root directory from data blocks, and finds
+  the real `README` inode from `fs.img` (`ino=2`, `size=2441`, `nlink=1` in the
+  current xv6 image). It also exposes a first read-only `FS_OP_OPEN` path lookup
+  entry point for root-level files. The remaining staged part is routing xv6
+  file syscalls out of the in-host in-memory FS and into the fs server.
 
 M4.4b unlocked the first timer-gated disabled group on the current RV64,
 non-MCS, single-core, QEMU configuration: `TIMER0001`, `TIMER0002`,
@@ -269,18 +282,52 @@ carve the 4KiB device frame, and maps that frame into `virtio-disk-server` at
 `0x50000000`. It also maps a regular DMA frame at `0x50001000` and passes its
 physical address in `a1`. The disk server initializes virtqueue 0, uses the DMA
 page for descriptor/avail/used rings plus a 1KiB data buffer, reads xv6 FS block
-1, and returns only after the superblock magic is verified:
+1 through virtio-blk, and proved the first real disk data path:
 
 ```text
 virtio-disk-server: mmio vendor=0x554d4551
 virtio-disk-server: virtqueue ready dma=...
-virtio-disk-server: get-info superblock=0x10203040
 ```
 
 This proves the first real `fs.img` data path inside a user-mode driver server.
-The fs server still does not expose general read/write operations over shared
-buffers, and `xv6-host` still services current xv6 file syscalls from its
-in-memory compatibility FS while that migration is staged.
+The next step was to make that data path cross the fs<->disk server boundary
+without letting the disk driver understand xv6 filesystem contents.
+
+M6.5 shifts superblock verification out of the disk driver and into the file
+server. `xv6-host` now allocates one regular shared frame and maps it into both
+servers at `0x50002000`. `DISK_OP_GET_INFO` returns only device geometry, while
+`DISK_OP_READ(block)` performs the virtio-blk read in `virtio-disk-server`,
+copies the 1KiB xv6 block into the shared page, and replies with the byte count
+and block number. During `FS_OP_INIT`, `xv6-fs-server` calls
+`DISK_OP_READ(1)`, reads the superblock magic from its own mapping of the
+shared page, and validates `0x10203040` there:
+
+```text
+virtio-disk-server: get-info ready
+virtio-disk-server: read block=1
+xv6-fs-server: superblock magic=270544960
+```
+
+This keeps the disk server at the block-device layer and puts filesystem
+validation in the filesystem server. Current xv6 file syscalls still go through
+the host's in-memory compatibility FS; on-disk inode/dir parsing and syscall
+routing to `xv6-fs-server` are the next migration step.
+
+M6.6 adds the first real on-disk filesystem parser to `xv6-fs-server`. The fs
+server now stores the parsed superblock, reads xv6 dinodes from `IBLOCK(inum)`,
+walks direct data blocks for directories, counts valid root entries, and
+resolves root-level names such as `README` through the directory file instead of
+hard-coded host metadata. `FS_OP_INIT` now verifies:
+
+```text
+xv6-fs-server: root entries=22 README ino=2 size=2441 nlink=1
+```
+
+There is also an initial read-only `FS_OP_OPEN` handler that accepts a packed
+path in IPC message registers and returns `(inum, type, size)` for root-level
+paths. It is not yet wired into `xv6-host`'s file syscalls; the host still owns
+the compatibility file table and mutable in-memory FS while the fs-server data
+path is expanded to reads, writes, and directory mutation.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -335,7 +382,9 @@ in-memory compatibility FS while that migration is staged.
 | M6.1 | Split groundwork for xv6 service servers: extracted `sel4-user`, added `xv6-abi`, migrated `xv6-host` to shared crates, and added compiling no_std `xv6-fs-server` / `virtio-disk-server` skeletons. | ✅ Done |
 | M6.2 | xv6 `fs.img` and virtio-blk QEMU path: build `target/xv6compat/fs.img`, attach it by default in `run-xv6-user.sh`, and add shared xv6 on-disk FS / virtio-mmio ABI constants for the future fs/disk servers. | ✅ Done |
 | M6.3 | Service topology and control-plane IPC: `xv6-host` spawns `xv6-fs-server` and `virtio-disk-server` as separate seL4 user servers, mints endpoint caps, and verifies host->fs->disk init/get-info IPC before starting the xv6 payload. | ✅ Done |
-| M6.4 | First real virtio disk-server data path: map virtio-mmio and a DMA frame into `virtio-disk-server`, initialize virtqueue 0, and read/validate xv6 `fs.img` superblock magic through virtio-blk during fs init. | ✅ Done |
+| M6.4 | First real virtio disk-server data path: map virtio-mmio and a DMA frame into `virtio-disk-server`, initialize virtqueue 0, and prove xv6 `fs.img` block reads through virtio-blk. | ✅ Done |
+| M6.5 | First fs<->disk shared-memory block read: map a shared frame at `0x50002000`, make `DISK_OP_GET_INFO` geometry-only, implement `DISK_OP_READ(block)`, and validate the xv6 superblock inside `xv6-fs-server`. | ✅ Done |
+| M6.6 | First xv6 on-disk fs parser in `xv6-fs-server`: parse superblock/inodes/root directory from `fs.img`, resolve `README`, and add a read-only root-level `FS_OP_OPEN` lookup entry point. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
@@ -434,7 +483,7 @@ Test suite passed. 124 tests passed. 43 tests disabled.
 All is well in the universe
 ```
 
-### xv6 Compatibility Checkpoint (M5.3-M6.4)
+### xv6 Compatibility Checkpoint (M5.3-M6.5)
 
 The current xv6 path is a user-space compatibility server, not a full Unix
 server yet. The helper builds one xv6 user program from
@@ -530,11 +579,11 @@ fixed-size in-memory `pipe` ring buffer with blocking reads/writes shared
 across forked processes. Process termination now uses one path for normal
 `exit`, fault kill, and `kill(pid)`, including wait reply, child reparenting,
 and blocked reply-cap cleanup.
-Remaining Unix gaps are a real xv6 filesystem image, persistence,
-permissions/devices beyond console, dynamic host keyboard input, full
-untyped-memory reclamation beyond cap-slot reuse, resource scaling beyond
-the current fixed tables, and wiring the new `xv6-fs-server` /
-`virtio-disk-server` crates into the boot-time server graph. With no
+Remaining Unix gaps are routing xv6 file syscalls to the fs server, adding
+fs-server file read/write and directory mutation over the attached xv6
+`fs.img`, persistence, permissions/devices beyond
+console, dynamic host keyboard input, full untyped-memory reclamation beyond
+cap-slot reuse, and resource scaling beyond the current fixed tables. With no
 scripted input, `init` now reaches `exec("sh")` and the shell blocks on console
 read instead of exiting and forcing `init` into a restart loop.
 
@@ -705,8 +754,7 @@ plus semantics that are implemented only as far as sel4test currently needs:
 5. **Zombie/finalisation fidelity.** CNode/TCB finalisation is good
    enough for the enabled tests, but should be brought closer to the C
    kernel's Zombie reduction model before expanding coverage further.
-6. **xv6 service split.** Next xv6 work is to add shared-memory request buffers
-   between `xv6-fs-server` and `virtio-disk-server`, implement general disk
-   block read/write operations, parse xv6's on-disk inode/directory structures
+6. **xv6 service split.** Next xv6 work is to extend the fs<->disk protocol to
+   write/multi-block operations, parse xv6's on-disk inode/directory structures
    in the fs server, and replace the in-host in-memory FS with IPC calls over
    the attached xv6 `fs.img`.

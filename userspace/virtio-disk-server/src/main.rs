@@ -12,7 +12,7 @@ use sel4_user::{
     sel4_recv, sel4_reply_recv, sel4_yield,
 };
 use xv6_abi::{
-    DISK_OP_GET_INFO, FS_BLOCK_SIZE, VIRTIO_BLK_DEVICE_ID, VIRTIO_BLK_F_CONFIG_WCE,
+    DISK_OP_GET_INFO, DISK_OP_READ, FS_BLOCK_SIZE, VIRTIO_BLK_DEVICE_ID, VIRTIO_BLK_F_CONFIG_WCE,
     VIRTIO_BLK_F_MQ, VIRTIO_BLK_F_RO, VIRTIO_BLK_F_SCSI, VIRTIO_BLK_SECTOR_SIZE, VIRTIO_BLK_T_IN,
     VIRTIO_CONFIG_S_ACKNOWLEDGE, VIRTIO_CONFIG_S_DRIVER, VIRTIO_CONFIG_S_DRIVER_OK,
     VIRTIO_CONFIG_S_FEATURES_OK, VIRTIO_F_ANY_LAYOUT, VIRTIO_MMIO_DEVICE_DESC_HIGH,
@@ -24,8 +24,9 @@ use xv6_abi::{
     VIRTIO_MMIO_QUEUE_READY, VIRTIO_MMIO_QUEUE_SEL, VIRTIO_MMIO_STATUS, VIRTIO_MMIO_VENDOR_ID,
     VIRTIO_MMIO_VERSION, VIRTIO_MMIO_VERSION_MODERN, VIRTIO_QUEUE_NUM, VIRTIO_RING_F_EVENT_IDX,
     VIRTIO_RING_F_INDIRECT_DESC, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, XV6_ABI_VERSION,
-    XV6_EINVAL, XV6_ENOSYS, XV6_FS_MAGIC, XV6_FS_SIZE_BLOCKS, XV6_FS_TO_DISK_PROTOCOL, XV6_OK,
-    XV6_SERVICE_ENDPOINT_CPTR, XV6_VIRTIO_DMA_VADDR, XV6_VIRTIO_MMIO_VADDR,
+    XV6_DISK_SHARED_BUFFER_VADDR, XV6_EINVAL, XV6_ENOSYS, XV6_FS_SIZE_BLOCKS,
+    XV6_FS_TO_DISK_PROTOCOL, XV6_OK, XV6_SERVICE_ENDPOINT_CPTR, XV6_VIRTIO_DMA_VADDR,
+    XV6_VIRTIO_MMIO_VADDR,
 };
 
 const DESC_OFF: u64 = 0x000;
@@ -69,6 +70,7 @@ pub extern "C" fn _start(ipc_buffer: usize, dma_paddr: usize) -> ! {
 fn handle_request(msg: &IpcMessage) -> [u64; 4] {
     match msg_label(msg.info) {
         DISK_OP_GET_INFO => handle_get_info(msg),
+        DISK_OP_READ => handle_read(msg),
         op => {
             log("virtio-disk-server: unsupported op=");
             print_u64(op);
@@ -87,25 +89,47 @@ fn handle_get_info(msg: &IpcMessage) -> [u64; 4] {
         log("virtio-disk-server: get-info before ready\n");
         return [XV6_EINVAL, 0, 0, 0];
     }
-    let Some(super_magic) = read_fs_block_magic(1) else {
-        log("virtio-disk-server: superblock read failed\n");
-        return [XV6_EINVAL, 0, 0, 0];
-    };
-    if super_magic != XV6_FS_MAGIC {
-        log("virtio-disk-server: bad xv6 superblock magic=");
-        print_hex(super_magic as u64);
-        log("\n");
-        return [XV6_EINVAL, 0, 0, 0];
-    }
-    log("virtio-disk-server: get-info superblock=");
-    print_hex(super_magic as u64);
+    log("virtio-disk-server: get-info ready");
     log("\n");
     [
         XV6_OK,
         VIRTIO_BLK_SECTOR_SIZE as u64,
         XV6_FS_SIZE_BLOCKS as u64,
-        super_magic as u64,
+        0,
     ]
+}
+
+fn handle_read(msg: &IpcMessage) -> [u64; 4] {
+    if msg.mrs[0] != XV6_FS_TO_DISK_PROTOCOL || msg.mrs[1] != XV6_ABI_VERSION {
+        log("virtio-disk-server: bad read protocol\n");
+        return [XV6_EINVAL, 0, 0, 0];
+    }
+    if unsafe { !DISK_READY } {
+        log("virtio-disk-server: read before ready\n");
+        return [XV6_EINVAL, 0, 0, 0];
+    }
+    let blockno = msg.mrs[2];
+    if blockno >= XV6_FS_SIZE_BLOCKS as u64 {
+        log("virtio-disk-server: read out of range block=");
+        print_u64(blockno);
+        log("\n");
+        return [XV6_EINVAL, 0, 0, 0];
+    }
+    if !read_block(blockno) {
+        return [XV6_EINVAL, 0, 0, 0];
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(
+            dma_va(DATA_OFF) as *const u8,
+            XV6_DISK_SHARED_BUFFER_VADDR as *mut u8,
+            FS_BLOCK_SIZE,
+        );
+    }
+    fence(Ordering::SeqCst);
+    log("virtio-disk-server: read block=");
+    print_u64(blockno);
+    log("\n");
+    [XV6_OK, FS_BLOCK_SIZE as u64, blockno, 0]
 }
 
 fn init_virtio_disk() -> bool {
@@ -205,13 +229,6 @@ fn check_identity() -> bool {
     print_hex(vendor as u64);
     log("\n");
     false
-}
-
-fn read_fs_block_magic(blockno: u64) -> Option<u32> {
-    if !read_block(blockno) {
-        return None;
-    }
-    Some(unsafe { ptr::read_volatile(dma_va(DATA_OFF) as *const u32) })
 }
 
 fn read_block(blockno: u64) -> bool {

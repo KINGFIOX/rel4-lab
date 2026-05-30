@@ -23,7 +23,8 @@ use consts::{
     DISK_SERVER_ELF, DISK_SERVER_PID, DISK_SERVER_PROC_SLOT, FAULT_UNKNOWN_SYSCALL, FAULT_VM_FAULT,
     FS_OP_INIT, FS_SERVER_ELF, FS_SERVER_PID, FS_SERVER_PROC_SLOT, LABEL_IRQ_ISSUE_IRQ_HANDLER,
     LABEL_IRQ_SET_NOTIFICATION, VIRTIO_BLK_SECTOR_SIZE, XV6_ABI_VERSION, XV6_DISK_ENDPOINT_CPTR,
-    XV6_HOST_TO_FS_PROTOCOL, XV6_OK, XV6_VIRTIO_DMA_VADDR, XV6_VIRTIO_MMIO_VADDR,
+    XV6_DISK_SHARED_BUFFER_VADDR, XV6_HOST_TO_FS_PROTOCOL, XV6_OK, XV6_VIRTIO_DMA_VADDR,
+    XV6_VIRTIO_MMIO_VADDR,
 };
 use consts::{
     INIT_TCB, IRQ_CONTROL, KERNEL_TIMER_IRQ, MAX_PROCS, OBJ_4K, OBJ_ENDPOINT, OBJ_NOTIFICATION,
@@ -165,6 +166,7 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
     let virtio_mmio_frame = alloc.retype_device_4k_at(consts::VIRTIO_MMIO_BASE);
     let virtio_dma_frame = alloc.retype_one(OBJ_4K, 0);
     let virtio_dma_paddr = frame_paddr(virtio_dma_frame);
+    let disk_shared_frame = alloc.retype_one(OBJ_4K, 0);
     spawn_service_server(
         alloc,
         DISK_SERVER_PROC_SLOT,
@@ -178,6 +180,7 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
         &[
             (virtio_mmio_frame, XV6_VIRTIO_MMIO_VADDR, true, false),
             (virtio_dma_frame, XV6_VIRTIO_DMA_VADDR, true, false),
+            (disk_shared_frame, XV6_DISK_SHARED_BUFFER_VADDR, true, false),
         ],
         virtio_dma_paddr,
     );
@@ -197,7 +200,7 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
             cap_rights(true, true, true, true),
             XV6_FS_SERVER_BADGE,
         )),
-        &[],
+        &[(disk_shared_frame, XV6_DISK_SHARED_BUFFER_VADDR, true, false)],
         0,
     );
     ServiceEndpoints { fs: fs_ep }
