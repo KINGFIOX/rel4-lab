@@ -19,9 +19,11 @@ pub const SYS_CALL: isize = -1;
 pub const SYS_REPLY_RECV: isize = -2;
 pub const SYS_SEND: isize = -3;
 pub const SYS_RECV: isize = -5;
+pub const SYS_REPLY: isize = -6;
 pub const SYS_YIELD: isize = -7;
 pub const SYS_DEBUG_PUT_CHAR: isize = -9;
 pub const SYS_DEBUG_HALT: isize = -11;
+pub const SYS_DEBUG_GET_CHAR: isize = -16;
 
 pub const LABEL_UNTYPED_RETYPE: u64 = 1;
 pub const LABEL_TCB_READ_REGISTERS: u64 = 2;
@@ -36,6 +38,7 @@ pub const LABEL_CNODE_COPY: u64 = 20;
 pub const LABEL_CNODE_MINT: u64 = 21;
 pub const LABEL_CNODE_SAVE_CALLER: u64 = 25;
 pub const LABEL_IRQ_ISSUE_IRQ_HANDLER: u64 = 26;
+pub const LABEL_IRQ_ACK: u64 = 27;
 pub const LABEL_IRQ_SET_NOTIFICATION: u64 = 28;
 pub const LABEL_RISCV_PAGE_MAP: u64 = 35;
 pub const LABEL_RISCV_PAGE_UNMAP: u64 = 36;
@@ -101,6 +104,7 @@ pub struct IpcBuffer {
     pub receive_depth: u64,
 }
 
+#[derive(Copy, Clone)]
 pub struct IpcMessage {
     pub badge: u64,
     pub info: u64,
@@ -191,6 +195,34 @@ pub unsafe fn sel4_reply_recv(ep: u64, info: u64, reply_mrs: &[u64]) -> IpcMessa
             options(nostack)
         );
         read_ipc_message(a0, a1, a2, a3, a4, a5)
+    }
+}
+
+pub unsafe fn sel4_reply(info: u64, reply_mrs: &[u64]) {
+    unsafe {
+        let ipc = &mut *IPC_BUFFER;
+        let mut i = 4;
+        while i < reply_mrs.len() {
+            ipc.msg[i] = reply_mrs[i];
+            i += 1;
+        }
+        let a0 = 0u64;
+        let a1 = info;
+        let a2 = mr(reply_mrs, 0);
+        let a3 = mr(reply_mrs, 1);
+        let a4 = mr(reply_mrs, 2);
+        let a5 = mr(reply_mrs, 3);
+        asm!(
+            "ecall",
+            in("a0") a0,
+            in("a1") a1,
+            in("a2") a2,
+            in("a3") a3,
+            in("a4") a4,
+            in("a5") a5,
+            in("a7") SYS_REPLY,
+            options(nostack)
+        );
     }
 }
 
@@ -299,7 +331,7 @@ pub fn msg_label(info: u64) -> u64 {
     (info >> 12) & 0x000f_ffff_ffff_ffff
 }
 
-fn msg_len(info: u64) -> u64 {
+pub fn msg_len(info: u64) -> u64 {
     info & 0x7f
 }
 
@@ -365,6 +397,19 @@ pub fn putchar(ch: u8) {
             options(nostack)
         );
     }
+}
+
+pub fn getchar() -> i32 {
+    let mut ret = 0u64;
+    unsafe {
+        asm!(
+            "ecall",
+            inlateout("a0") ret,
+            in("a7") SYS_DEBUG_GET_CHAR,
+            options(nostack)
+        );
+    }
+    ret as i64 as i32
 }
 
 pub fn log(s: &str) {

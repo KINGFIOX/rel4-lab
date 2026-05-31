@@ -27,3 +27,5 @@ target
 /images
 
 /.cursor
+
+.DS_Store

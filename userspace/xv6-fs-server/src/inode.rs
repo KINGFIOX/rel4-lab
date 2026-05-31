@@ -2,7 +2,7 @@ use core::ptr;
 use core::sync::atomic::{Ordering, fence};
 
 use sel4_user::{read_u16, read_u32, write_u16, write_u32};
-use xv6_abi::{FS_BLOCK_SIZE, XV6_DISK_SHARED_BUFFER_VADDR, XV6_FS_NDIRECT, XV6_FS_NINDIRECT};
+use xv6_abi::{FS_BLOCK_SIZE, XV6_FS_NDIRECT, XV6_FS_NINDIRECT};
 
 use crate::block::{read_disk_block, shared_block, shared_block_mut, write_disk_block};
 use crate::types::{
@@ -175,7 +175,7 @@ pub(crate) fn truncate_inode(inode: &mut Dinode) -> bool {
         let mut indirect_block = [0u8; FS_BLOCK_SIZE];
         unsafe {
             ptr::copy_nonoverlapping(
-                XV6_DISK_SHARED_BUFFER_VADDR as *const u8,
+                shared_block().as_ptr(),
                 indirect_block.as_mut_ptr(),
                 FS_BLOCK_SIZE,
             );

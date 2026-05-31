@@ -46,7 +46,74 @@ Latest verified checkpoints:
   `outofinodes`. `diskfull` now also exercises directory-block exhaustion
   without the former unexpected-`mkdir` diagnostic. The full xv6 `usertests`
   suite now reaches `ALL TESTS PASSED` with
-  `env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests`.
+  `env TIMEOUT=1200 ./tools/run-xv6-user.sh usertests`. `virtio-disk-server`
+  now saves the fs-server caller's reply cap, submits one virtio request, and
+  returns to its service endpoint while DMA is in flight. The virtio IRQ
+  notification is bound to the disk-server TCB, so completion arrives through
+  the normal receive loop; the server then ACKs the MMIO/IRQHandler path,
+  consumes the used ring, and replies through the saved reply cap. The disk
+  server now has two independent request slots, each with its own descriptor
+  chain, DMA data/status storage, and saved reply cap; the fs server currently
+  still issues disk RPCs synchronously, but host/fs payload exchange uses shared
+  slots 0..2 for xv6-sized writes while fs/disk block I/O uses shared slot 3.
+  Regular-file `write()` now uses
+  xv6's 3072-byte `filewrite` transaction chunk size and returns `-1` for
+  partial inode writes, matching xv6 rather than exposing internal fs-server
+  partial counts. The fs server
+  also now retains cwd inode references for live processes and reclaims
+  post-crash orphaned inodes during log recovery, matching the xv6
+  `forphan`/`dorphan` recovery path. `xv6-fs-server` IPC operation handlers
+  have been split into `ops.rs`, leaving `main.rs` focused on boot/init and
+  request dispatch. `xv6-host` has also started the same host-side
+  decomposition by moving pipe ring state and reader/writer accounting into
+  `pipes.rs`, and open-file backing state/refcounts/offsets into `files.rs`.
+  The xv6 `pause(n)` syscall now blocks on a saved reply cap and wakes from
+  the host's timer notification after the requested tick deadline, instead of
+  merely yielding once or advancing time on unrelated syscalls. The run helper
+  also has an explicit `--expect-timeout` mode for infinite stress programs
+  such as `grind`. The disk/fs protocol now also has `DISK_OP_FLUSH`; the
+  virtio driver negotiates `VIRTIO_BLK_F_FLUSH` when available and otherwise
+  treats flush as a successful no-op. The fs redo log now issues flush barriers
+  after log-data writes, after the commit header, after home-block install, and
+  after clearing the log header. The disk protocol now accepts an explicit
+  shared-buffer slot for read/write requests, and `virtio-disk-server` tracks
+  two independent request slots with per-slot DMA request/data/status storage
+  and per-slot saved reply caps. The current fs server still issues disk RPCs
+  synchronously, but it no longer reuses the host/fs payload slot for disk block
+  transfers and now uses an explicit `Send + DISK_OP_COMPLETE` completion id
+  path instead of `seL4_Call` for disk data/flush operations. `xv6-host` now
+  treats `XV6_EBUSY` from `xv6-fs-server` as a retryable concurrency guard and
+  yields/retries rather than surfacing it as an xv6 syscall failure. Disk
+  completions no longer depend on a blocking endpoint send back into the fs
+  server: `virtio-disk-server` writes completions into a shared ring page and
+  signals a bound completion notification, while `xv6-fs-server` drains the
+  ring when waiting for the matching completion id. The disk event loop is no
+  longer hard-coded to one pending descriptor chain. Before accepting a new disk
+  RPC, the driver now also drains already-visible used-ring completions without
+  waiting; pending request state is installed before publishing a descriptor head
+  to the avail ring, so fast
+  DMA/IRQ completion cannot race ahead of request-slot ownership. The fs server
+  now also replies `XV6_EBUSY` to unrelated host/fs IPC received while it is
+  waiting for a disk completion, preserving the pending disk operation and
+  preventing accidental shared-slot or transaction re-entry. The xv6 host
+  process/resource limits are now closer to upstream xv6: `MAX_PROCS` is 64,
+  `MAX_EXEC_ARGS` is 32, `MAX_PIPES` is 32, and child user frames come from a
+  reusable global frame pool that only recycles pool-owned mappings.
+  `xv6-fs-server` also has a small clean block cache in front of disk RPCs:
+  logged transaction blocks still dominate reads, transaction writes invalidate
+  cached home blocks, and successful raw writes refresh the committed cache
+  image. This reduces repeated inode/bitmap/directory block reads without
+  weakening the xv6 redo-log ordering. The xv6 run tooling now serializes the
+  rootserver/fs.img/elfloader pack stage with a reusable build lock and gives
+  default QEMU runs a per-run fs.img copy, so parallel smoke runs no longer race
+  on xv6's generated `fs.img` or the shared seL4 elfloader staging directory.
+  Console reads without `XV6_CONSOLE_INPUT` now block in `xv6-host` on a saved
+  reply cap and resume from timer-driven polling of a local debug getchar
+  syscall, so the shell can consume runtime QEMU stdin instead of requiring
+  build-time scripted input. Child IPC-buffer frames are now treated as
+  process-control resources rather than ordinary user mappings, which avoids
+  mapping-table pressure and recycled-slot aliasing during repeated fork/reap
+  cycles.
 - M6.1 has started the microkernel-style xv6 service split. Shared user-space
   seL4 ABI code now lives in `userspace/sel4-user`, xv6 syscall/fs/disk
   protocol constants live in `userspace/xv6-abi`, and `xv6-host` consumes those
@@ -761,8 +828,685 @@ nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m622-usertests-full-r
 The full rerun log `target/xv6-m622-usertests-full-rerun.log` ended with
 `ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`.
 
-Remaining fs-server work is further decomposition of file operation handlers
-and syscall dispatch so each server module has a clear ownership boundary.
+M6.23 makes virtio block completion IRQ-driven instead of disk-server polling.
+The kernel now has a minimal QEMU virt PLIC path for supervisor external
+interrupts: `IRQControl` enables PLIC sources, external traps claim the pending
+source, `IRQHandler_Ack` completes it, and the all-blocked kernel idle loop
+also services already-pending external IRQs so a blocked disk server can wake
+without returning to a runnable user thread first. `xv6-host` mints a badged
+send cap for the virtio IRQ notification and passes a receive cap plus
+`IRQHandler` cap to `virtio-disk-server`. The disk server submits one virtqueue
+request at a time, does not spin-poll after notifying the device, blocks on the
+notification during DMA, clears the virtio-mmio interrupt status, ACKs the
+handler, checks the used ring after the ACK, and only then reuses the shared
+DMA/ring state. This deliberately preserves the current single in-flight request
+invariant; supporting multiple outstanding requests should add explicit
+per-request descriptors, completion matching, and shared-buffer ownership rules.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p kernel -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m623-echo.log ./tools/run-xv6-user.sh echo irq disk
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m623-usertests-full.log ./tools/run-xv6-user.sh usertests
+nix develop --command cargo check -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-no-poll-echo.log ./tools/run-xv6-user.sh echo no-poll disk
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-no-poll-usertests.log ./tools/run-xv6-user.sh usertests
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m626-no-poll-ack-echo.log ./tools/run-xv6-user.sh echo no-poll ack
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m626-no-poll-ack-usertests.log ./tools/run-xv6-user.sh usertests
+```
+
+The full run log `target/xv6-m623-usertests-full.log` ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`. The no-poll rerun log
+`target/xv6-no-poll-usertests.log` ended the same way after removing the
+remaining short spin window. The latest ACK-order rerun also ended cleanly
+after changing completion wait to receive and ACK the virtio IRQ notification
+before rechecking the used ring.
+
+M6.24 tightens regular-file write semantics. `xv6-host` now handles
+`FD_FS_SERVER_FILE` writes through xv6's `filewrite` chunk size
+(`((MAXOPBLOCKS - 1 - 1 - 2) / 2) * BSIZE = 3072` bytes) instead of the old
+128-byte generic syscall scratch buffer. `xv6-fs-server` accepts that
+multi-block request through the existing shared page, copies it into a local
+server buffer before disk reads overwrite the shared block window, and commits
+the whole chunk in one redo-log transaction. If an inode write cannot complete
+the requested chunk, the syscall returns `-1` as xv6 does, while preserving any
+file offset advancement that occurred before the error.
+
+This also clarified the current direct-`UPROGS` boundary for `logstress`:
+with the unmodified upstream layout, `FSSIZE=2000`, `MAXFILE=268` blocks, and
+the generated `fs.img` starts with 965 blocks already allocated. `logstress`
+attempts 250 writes of 2000 bytes per file, or about 500KB per file, which
+exceeds upstream `MAXFILE` even for `logstress f1 f2`, and the four-file
+example also exceeds the remaining disk capacity. The observed `write failed
+-1` is therefore now a capacity/on-disk-format limit, not the earlier host
+128-byte chunking artifact.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=900 LOG_FILE=target/xv6-m624-logstress.log ./tools/run-xv6-user.sh logstress f1 f2 f3 f4
+nix develop --command env TIMEOUT=900 LOG_FILE=target/xv6-m624-logstress-2.log ./tools/run-xv6-user.sh logstress f1 f2
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m624-usertests.log ./tools/run-xv6-user.sh usertests
+```
+
+The `logstress` runs fail with `write failed -1` after hitting upstream
+`MAXFILE`/space limits. The full `usertests` rerun still ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`.
+
+M6.25 adds xv6 orphan-inode recovery and cwd inode retention. `xv6-host`
+retains each live process cwd inode through a new `FS_OP_RETAIN` operation,
+duplicates that reference on `fork`, releases it on `chdir`, `exit`, and
+process reap, and retains the initial root cwd before starting pid 1. This lets
+`unlink` of a process's current directory or open file leave an on-disk inode
+with `nlink == 0` while an in-memory reference is still live, as xv6 expects.
+On the next `FS_OP_INIT`, after redo-log recovery, `xv6-fs-server` scans the
+inode table and transactionally frees any remaining typed inode with
+`nlink == 0`, logging `ireclaim: orphaned inode <inum>`.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=8 LOG_FILE=target/xv6-m625-forphan-crash.log XV6_FS_IMG=target/xv6-m625-orphan.img ./tools/run-xv6-user.sh forphan
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m625-forphan-recover.log XV6_BUILD_FS_IMG=0 XV6_FS_IMG=target/xv6-m625-orphan.img ./tools/run-xv6-user.sh echo recover-forphan
+nix develop --command env TIMEOUT=8 LOG_FILE=target/xv6-m625-dorphan-crash.log XV6_FS_IMG=target/xv6-m625-dorphan.img ./tools/run-xv6-user.sh dorphan
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m625-dorphan-recover.log XV6_BUILD_FS_IMG=0 XV6_FS_IMG=target/xv6-m625-dorphan.img ./tools/run-xv6-user.sh echo recover-dorphan
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m625-usertests.log ./tools/run-xv6-user.sh usertests
+```
+
+The first `forphan`/`dorphan` phase intentionally times out after the program
+prints its wait-for-crash line. The recovery phase reuses the same disk image
+with `XV6_BUILD_FS_IMG=0` and logs `ireclaim: orphaned inode 22`. The full
+`target/xv6-m625-usertests.log` ended with `ALL TESTS PASSED` and
+`xv6-host: exit(0) pid=1`.
+
+M6.26 continues the fs-server decomposition by moving IPC operation handlers
+for open/close/read/write/readdir/fstat/chdir/exec lookup/link/unlink/mkdir/
+mknod/retain into `userspace/xv6-fs-server/src/ops.rs`. `main.rs` is now back
+to boot, `FS_OP_INIT`, orphan recovery, and dispatch glue, reducing it from
+644 lines to 229 lines while preserving the existing fs-server semantics.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=240 LOG_FILE=target/xv6-m626-fs-ops-split-stressfs.log ./tools/run-xv6-user.sh stressfs
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m626-fs-ops-split-usertests.log ./tools/run-xv6-user.sh usertests
+```
+
+The `stressfs` run ended with `xv6-host: exit(0) pid=1`. The full
+`target/xv6-m626-fs-ops-split-usertests.log` ended with `ALL TESTS PASSED`
+and `xv6-host: exit(0) pid=1`.
+
+M6.27 starts the host-side syscall decomposition by moving pipe ring state,
+pipe allocation, reader/writer open-file backing counts, and raw pipe
+read/write operations into `userspace/xv6-host/src/pipes.rs`. `xv6.rs` now
+keeps only syscall-level blocking/resume and fd lifecycle decisions, preserving
+the existing xv6 open-file semantics where `fork`/`dup` share one pipe backing
+until the final close.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=240 LOG_FILE=target/xv6-m627-pipes-split-pipe1.log ./tools/run-xv6-user.sh usertests pipe1
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m627-pipes-split-usertests.log ./tools/run-xv6-user.sh usertests
+```
+
+The targeted `pipe1` run ended with `xv6-host: exit(0) pid=1`. The full
+`target/xv6-m627-pipes-split-usertests.log` ended with `ALL TESTS PASSED`
+and `xv6-host: exit(0) pid=1`.
+
+M6.28 continues the host-side syscall decomposition by moving the open-file
+backing table into `userspace/xv6-host/src/files.rs`. `xv6.rs` now keeps fd
+policy and syscall blocking/resume behavior, while `files.rs` owns open-file
+allocation, retain/release, forced close, and shared file offsets. This
+preserves the xv6 semantics where `dup` and `fork` share one backing open file
+until the final close, including shared offsets for `sharedfd`.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=240 LOG_FILE=target/xv6-m628-files-split-sharedfd.log ./tools/run-xv6-user.sh usertests sharedfd
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m628-files-split-usertests.log ./tools/run-xv6-user.sh usertests
+```
+
+The targeted `sharedfd` run ended with `xv6-host: exit(0) pid=1`. The full
+`target/xv6-m628-files-split-usertests.log` ended with `ALL TESTS PASSED` and
+`xv6-host: exit(0) pid=1`.
+
+M6.29 tightens the IRQ-driven virtio completion path. The disk server still
+submits only one virtqueue request at a time because the descriptor chain,
+status byte, 1KiB DMA data window, and fs<->disk shared block page are singleton
+resources. That concurrency boundary is now explicit: a scoped
+`InFlightRequest` guard prevents accidental overlapping requests and releases
+the flag on every return path. Completion wait first checks the used-ring index,
+then blocks on the badged virtio IRQ notification only while the device still
+owns the DMA request. On IRQ wakeup the server validates the badge, clears the
+virtio-mmio interrupt status, ACKs the `IRQHandler`, and loops back to the used
+ring check before reusing the DMA/ring state.
+
+This keeps the driver non-polling during DMA while making the remaining
+single-request assumption visible. Multiple in-flight disk requests should be a
+separate change with a descriptor allocator, per-request status/data buffers,
+completion-id matching, and explicit reply-cap ownership.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m629-irq-wait-echo.log ./tools/run-xv6-user.sh echo irq-wait guard
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m629-irq-wait-usertests.log ./tools/run-xv6-user.sh usertests
+```
+
+The smoke run ended with `xv6-host: exit(0) pid=1`. The full
+`target/xv6-m629-irq-wait-usertests.log` run also ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`.
+
+M6.30 implements xv6-style `pause(n)` sleep semantics in `xv6-host`. A positive
+pause duration now saves the syscall reply cap, records a tick deadline, marks
+the process `PROC_SLEEPING`, and returns no reply until the deadline expires.
+The host's bound timer notification already wakes the fault-endpoint receive
+loop; on each timer badge the host increments the xv6 tick counter and resumes
+all sleeping processes whose deadlines have passed. Cleanup paths also drop
+saved sleep reply caps so `kill`, fault termination, and process reap do not
+leave stale reply caps behind. The older compatibility behavior that advanced
+the xv6 tick counter on every syscall has also been removed; `uptime()` and
+`pause(n)` now advance from timer notifications.
+
+This keeps `pause(0)` / negative pause as immediate success and makes programs
+such as `zombie`, `grind`, `forphan`, and `dorphan` depend on the same timer
+driven behavior as xv6 instead of an artificial single `Yield`.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m630-pause-zombie-timer-only.log ./tools/run-xv6-user.sh zombie
+nix develop --command env TIMEOUT=240 LOG_FILE=target/xv6-m630-pause-preempt-timer-only.log ./tools/run-xv6-user.sh usertests preempt
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m630-pause-usertests-timer-only.log ./tools/run-xv6-user.sh usertests
+```
+
+The `zombie` and targeted `preempt` runs ended with `xv6-host: exit(0) pid=1`.
+The full `target/xv6-m630-pause-usertests-timer-only.log` run ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`.
+
+M6.31 makes infinite xv6 stress programs usable as automated checks. `grind`
+does not terminate by design, so `tools/run-xv6-user.sh` now accepts
+`--expect-timeout` or `XV6_EXPECT_TIMEOUT=1`. In that mode a timeout is treated
+as success only if the log does not contain fatal xv6/kernel output and the root
+process did not exit. Normal mode keeps accepting full `usertests` logs where
+intentional child fault kills are part of the test semantics; the stricter
+`fault kill` / `grind:` fatal scan is only applied in expect-timeout mode.
+
+Verified commands:
+
+```text
+bash -n tools/run-xv6-user.sh
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=90 LOG_FILE=target/xv6-m631-grind-expect-timeout.log ./tools/run-xv6-user.sh --expect-timeout grind
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m631-grind-tooling-usertests-rerun.log ./tools/run-xv6-user.sh usertests
+```
+
+The `grind` run reported `PASS: timeout after 90s without fatal xv6 output`.
+The full rerun log ended with `ALL TESTS PASSED` and
+`xv6-host: exit(0) pid=1`.
+
+M6.32 changes `virtio-disk-server` from synchronous disk RPC waiting to an
+event-driven seL4 server loop. `xv6-host` now mints each service server a cap
+to its own CNode at `XV6_SERVER_CNODE_CPTR`; the disk server uses that cap to
+`CNode_SaveCaller` the fs-server reply cap into `XV6_SERVER_REPLY_CPTR`.
+`xv6-host` also binds the badged virtio IRQ notification to the disk-server TCB.
+For `DISK_OP_READ` / `DISK_OP_WRITE`, the disk server now validates the request,
+saves the caller reply, submits the virtqueue descriptor chain, and returns to
+`seL4_Recv(XV6_SERVICE_ENDPOINT_CPTR)` without blocking solely on the disk IRQ.
+When the bound IRQ notification arrives, it clears the virtio-mmio interrupt
+status, ACKs the IRQHandler, consumes the used-ring entry, copies read data back
+to the shared page when needed, and replies through the saved reply cap.
+
+The concurrency boundary remains explicit: there is still one shared descriptor
+chain, one status byte, one 1KiB DMA data window, and one fs<->disk shared block
+page, so a second block request while one is active is rejected instead of
+overlapping DMA state. True multi-request virtqueue use remains future work and
+needs descriptor/data/status allocation plus completion-id matching.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m632-virtio-async-echo.log ./tools/run-xv6-user.sh echo virtio async
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m632-virtio-async-usertests.log ./tools/run-xv6-user.sh usertests
+```
+
+The smoke run ended with `xv6-host: exit(0) pid=1`. The full
+`target/xv6-m632-virtio-async-usertests.log` run ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`; an additional log scan found
+no kernel panic, kernel-mode trap, user fault, virtio completion failure,
+spurious IRQ-completion diagnostic, or concurrent-request rejection.
+
+Remaining work is further decomposition of host-side syscall dispatch and
+server operation internals, plus the longer-running functional gaps around
+interactive input, device coverage, resource scaling, optional larger files,
+and multi-request virtio queueing.
+
+M6.33 adds an explicit disk flush operation and fs redo-log write barriers.
+`xv6-abi` now exposes `DISK_OP_FLUSH`, `VIRTIO_BLK_F_FLUSH`, and
+`VIRTIO_BLK_T_FLUSH`. `virtio-disk-server` keeps the feature bit enabled during
+negotiation when QEMU advertises it, records whether flush is supported, and
+submits flush requests through the same event-driven reply-cap/IRQ-completion
+path as read/write. If a device does not advertise flush, the server returns
+success as a no-op so the fs layer can keep one simple durability protocol.
+
+`xv6-fs-server` now uses flush barriers around the redo-log commit sequence:
+after writing log data blocks, after writing the non-zero commit header, after
+installing home blocks, and after clearing the log header. Recovery also flushes
+after replaying home blocks and after clearing the header. This preserves the
+single in-flight disk request invariant while making committed metadata updates
+less dependent on QEMU/device writeback timing.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m633-disk-flush-echo.log ./tools/run-xv6-user.sh echo disk flush
+nix develop --command env TIMEOUT=300 LOG_FILE=target/xv6-m633-disk-flush-stressfs.log ./tools/run-xv6-user.sh stressfs
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m633-disk-flush-usertests.log ./tools/run-xv6-user.sh usertests
+```
+
+The `echo` and `stressfs` runs ended with `xv6-host: exit(0) pid=1`. The full
+`target/xv6-m633-disk-flush-usertests.log` run ended with `ALL TESTS PASSED`
+and `xv6-host: exit(0) pid=1`; a fatal-pattern scan found no disk flush
+failure, virtio failure, unexpected IRQ completion, kernel panic, kernel-mode
+trap, user fault, or concurrent-request rejection.
+
+M6.34 prepares the virtio block path for real multi-request operation without
+lying about the remaining shared-memory ownership constraints. `sel4-user` now
+exports `msg_len`, and `xv6-abi` defines `XV6_DISK_MAX_IN_FLIGHT = 2` plus
+`XV6_DISK_SHARED_BUFFER_SLOTS = 4`. The 4 KiB fs<->disk shared page is treated
+as four 1 KiB block windows; disk read/write IPC accepts an optional fourth MR
+selecting the shared slot, defaulting to slot 0 for backward compatibility.
+`xv6-fs-server` now sends slot 0 explicitly.
+
+Inside `virtio-disk-server`, the singleton pending request has been replaced by
+a small request-slot table. Each request slot owns a descriptor-chain head,
+request header, data DMA buffer, status byte, and saved reply-cap slot. Virtio
+used-ring completion is matched by descriptor head id, and an IRQ can consume
+and reply to multiple used entries before returning to the service endpoint.
+The server rejects duplicate active shared-buffer slots so read completion
+cannot overwrite an in-use caller-visible block window. Flush remains serialized
+behind active data requests, preserving the barrier semantics added in M6.33.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m634-disk-slots-echo.log ./tools/run-xv6-user.sh echo disk slots
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m634-disk-slots-usertests.log ./tools/run-xv6-user.sh usertests
+```
+
+The smoke run ended with `xv6-host: exit(0) pid=1`. The full
+`target/xv6-m634-disk-slots-usertests.log` run ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`; a diagnostic scan found no
+shared-slot conflict, request-slot exhaustion, unknown used-ring head,
+unexpected IRQ completion, virtio failure, disk flush failure, kernel panic,
+kernel-mode trap, user fault, or server panic.
+
+M6.35 tightens the no-poll virtio completion/concurrency model. The disk server
+still does not busy-wait after `QUEUE_NOTIFY`: once a request is submitted, it
+returns to the seL4 receive loop and later completes via the bound virtio IRQ
+notification. The new change is a single non-blocking used-ring harvest before
+handling each non-IRQ disk RPC. This covers endpoint ordering where a DMA
+completion is already visible but the IRQ badge is still queued behind another
+client message, avoiding stale `request_slot` or `shared_slot` busy decisions
+without spinning.
+
+The request publication ordering is also stricter: read/write/flush now install
+the `PENDING_REQUESTS` entry before the descriptor head is written to the avail
+ring and before `avail.idx` is advanced. Completion lookup by descriptor head
+therefore has valid software ownership as soon as the device can observe the
+request. A later IRQ with no newly drained used entry is accepted as benign,
+because the completion may have been harvested by the RPC path first.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt
+nix develop --command cargo check -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m635-virtio-nopoll-echo.log ./tools/run-xv6-user.sh echo virtio nopoll
+nix develop --command env TIMEOUT=300 LOG_FILE=target/xv6-m635-virtio-nopoll-stressfs.log ./tools/run-xv6-user.sh stressfs
+```
+
+Both targeted runs ended with `xv6-host: exit(0) pid=1`, and a diagnostic scan
+of those logs found no virtio failure, disk flush failure, unknown used-ring
+head, stale IRQ-completion diagnostic, request-slot exhaustion, shared-slot
+conflict, kernel panic, kernel-mode trap, user fault, or seL4 call failure.
+M6.36 below validates the later resource-scaling worktree with a full
+`usertests` run.
+
+M6.36 scales xv6-host resources toward upstream xv6's `param.h` while keeping
+the service topology unchanged. `MAX_PROCS` is now 64, matching xv6 `NPROC`;
+`MAX_EXEC_ARGS` is 32, matching xv6 `MAXARG`; and `MAX_PIPES` is 32. The
+process table moved out of the host stack into static storage, per-process
+control-object untyped memory was reduced to 256 KiB, and user data frames are
+allocated from the largest non-device RAM untyped instead of each process
+untyped.
+
+The frame reuse path now records mapping ownership explicitly: only pages
+allocated by the host's global process-frame allocator are returned to the
+global frame pool. IPC-buffer frames, shared/device/server frames, and other
+externally supplied caps are unmapped/deleted without entering that pool, so a
+later process cannot reuse a cap invalidated by process-untyped revoke. Dead
+`Mapping.proc_slot`, `Child.proc_slot`, and service proc-slot bookkeeping were
+removed after this ownership split.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m636-resource-scale-echo-clean.log ./tools/run-xv6-user.sh echo resource scale clean
+nix develop --command env TIMEOUT=360 LOG_FILE=target/xv6-m636-twochildren.log ./tools/run-xv6-user.sh usertests twochildren
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m636-resource-scale-usertests-clean.log ./tools/run-xv6-user.sh usertests
+```
+
+The final clean full run ended with `ALL TESTS PASSED` and
+`xv6-host: exit(0) pid=1`. A diagnostic scan found no seL4 call failure,
+mapping-table exhaustion, CSpace exhaustion, kernel panic, kernel-mode trap,
+user fault, server panic, virtio failure, disk flush failure, unknown used-ring
+head, stale IRQ-completion diagnostic, request-slot exhaustion, shared-slot
+conflict, or xv6 failure marker.
+
+M6.37 adds a small fs-server block cache on top of the fs->disk RPC boundary.
+`read_disk_block()` now first checks the active transaction log, then a
+16-entry clean block cache, and only then calls `virtio-disk-server`. Cache
+hits copy the cached 1 KiB block back into the shared disk page so existing
+inode, directory, and file helpers keep the same interface. Raw disk reads fill
+the cache after a successful disk reply.
+
+The cache is deliberately conservative around mutation. `log_write_shared()`
+invalidates the affected home block instead of caching uncommitted data, so an
+aborted transaction cannot leave dirty data visible. Successful raw writes,
+including redo-log commit home-block installs and log-header updates, refresh
+the cache with the committed shared-block image. This preserves the existing
+xv6 redo-log ordering and still reduces repeated metadata reads.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m637-block-cache-echo.log ./tools/run-xv6-user.sh echo block cache
+nix develop --command env TIMEOUT=300 LOG_FILE=target/xv6-m637-block-cache-stressfs.log ./tools/run-xv6-user.sh stressfs
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m637-block-cache-usertests.log ./tools/run-xv6-user.sh usertests
+```
+
+The `echo` and `stressfs` runs ended with `xv6-host: exit(0) pid=1`. The full
+`target/xv6-m637-block-cache-usertests.log` run ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`; a diagnostic scan found no
+seL4 call failure, mapping-table exhaustion, CSpace exhaustion, kernel panic,
+kernel-mode trap, user fault, server panic, virtio failure, disk flush failure,
+unknown used-ring head, stale IRQ-completion diagnostic, request-slot
+exhaustion, shared-slot conflict, or xv6 failure marker.
+
+M6.38 makes xv6 smoke/full-suite tooling safe for parallel local runs. The
+helper scripts now share `tools/xv6-build-lock.sh`, a small reentrant lock around
+the mutable xv6 build tree, Cargo rootserver payload rebuilds, upstream
+`fs.img` generation, and the shared sel4test elfloader staging directory used
+by `tools/pack-image.sh`. `run-xv6-user.sh` holds that lock only through
+rootserver build, fs image build/copy, and image packing; QEMU runs after the
+lock is released.
+
+Default `run-xv6-user.sh` invocations also use a per-run kernel image name and a
+per-run `fs.img` copy for QEMU. That avoids concurrent QEMU instances writing
+the same raw xv6 disk image. Explicit `XV6_FS_IMG=...` keeps the old behavior,
+which is still required for persistence/recovery tests such as the
+`forphan`/`dorphan` crash+recover flow. `XV6_KEEP_RUN_FS_IMG=1` keeps the
+temporary per-run image for inspection.
+
+Verified commands:
+
+```text
+bash -n tools/xv6-build-lock.sh
+bash -n tools/build-xv6-fs-img.sh
+bash -n tools/build-xv6-user-rootserver.sh
+bash -n tools/run-xv6-user.sh
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m638-tool-lock-echo.log ./tools/run-xv6-user.sh echo tool lock
+nix develop --command bash -c 'set -euo pipefail; env TIMEOUT=180 LOG_FILE=target/xv6-m638-parallel-echo.log ./tools/run-xv6-user.sh echo parallel lock & p1=$!; env TIMEOUT=300 LOG_FILE=target/xv6-m638-parallel-stressfs.log ./tools/run-xv6-user.sh stressfs & p2=$!; wait "$p1"; wait "$p2"'
+nix develop --command cargo fmt --check
+```
+
+The sequential `echo` run and the parallel `echo`/`stressfs` run all ended with
+`xv6-host: exit(0) pid=1`. After the parallel run, the build lock directory was
+gone and the default per-run fs images had been cleaned up.
+
+M6.39 wires dynamic host console input through the microkernel path. The kernel
+now exposes a local debug `SYS_DEBUG_GET_CHAR` syscall backed by OpenSBI
+`console_getchar`, `sel4-user` wraps it as `getchar()`, and `xv6-host` uses it
+only in user space to implement xv6 console `read()`. If no build-time
+`XV6_CONSOLE_INPUT` is embedded, a console read saves the fault reply cap,
+records the destination buffer, marks the process `PROC_CONSOLE_READ`, and
+returns to the host receive loop. Timer notifications then poll debug getchar
+without blocking; when a byte is available, the host copies it into the child,
+echoes it, and replies through the saved cap.
+
+`tools/run-xv6-user.sh` also has `--qemu-stdin` and `--qemu-stdin-file` for
+tests that must feed runtime QEMU stdin rather than compile-time scripted
+console input. Since EOF on a UART-like console is treated as no input, these
+tests normally use `--expect-timeout` and then inspect the log for the command
+that should have run.
+
+Verified commands:
+
+```text
+bash -n tools/run-xv6-user.sh
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p kernel -p sel4-user -p xv6-fs-server -p virtio-disk-server -p xv6-abi
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m639-console-scripted.log ./tools/run-xv6-user.sh --stdin 'echo scripted console\n' sh
+nix develop --command env TIMEOUT=60 LOG_FILE=target/xv6-m639-console-dynamic-qemu-stdin2.log ./tools/run-xv6-user.sh --expect-timeout --qemu-stdin $'\necho dynamic console\n' sh
+rg -n 'dynamic console|xv6-host: exec echo|xv6-host: exit|fault kill|KERNEL PANIC|user fault' target/xv6-m639-console-dynamic-qemu-stdin2.log
+```
+
+The scripted shell run exited with `xv6-host: exit(0) pid=1`. The dynamic QEMU
+stdin run timed out as expected after the shell returned to waiting for further
+console input, and its log showed `$ echo dynamic console`,
+`xv6-host: exec echo pid=2`, `dynamic console`, and `xv6-host: exit(0) pid=2`
+with no fatal diagnostics.
+
+M6.40 tightens xv6-host process control-object cleanup. The child IPC-buffer
+frame is now stored in `Child` and mapped directly into the child VSpace rather
+than being registered as a normal user mapping. This keeps `MAPPINGS` focused on
+payload/heap/stack pages, prevents `exec()`/reap mapping cleanup from owning a
+control-object cap, and lets `destroy_child_objects()` explicitly delete the IPC
+frame slot exactly once. Fork failure cleanup also clears any child mappings
+created before destroying the partially constructed TCB/CNode/VSpace objects.
+
+This fixes the recycled-slot aliasing exposed by repeated shell `forktest`
+runs: the old attempted ownership split could delete the IPC frame once through
+`clear_process_mappings()` and again through `destroy_child_objects()`, causing
+a later CNode copy to see an invalid source cap. The new ownership boundary is
+one object owner per cap slot: process mappings own user frame caps, and
+`Child` owns TCB/CNode/VSpace/IPC-frame control caps.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p kernel -p sel4-user -p xv6-fs-server -p virtio-disk-server -p xv6-abi
+nix develop --command env TIMEOUT=240 LOG_FILE=target/xv6-m640-ipc-frame-forktest.log ./tools/run-xv6-user.sh forktest
+nix develop --command env TIMEOUT=360 LOG_FILE=target/xv6-m640-ipc-frame-shell-forktest-repeat3.log ./tools/run-xv6-user.sh --stdin $'forktest\nforktest\nforktest\nforktest\nforktest\n' sh
+rg -c 'fork test OK' target/xv6-m640-ipc-frame-shell-forktest-repeat3.log
+```
+
+The direct `forktest` exited with `xv6-host: exit(0) pid=1`. The repeated shell
+run reported five `fork test OK` lines and ended with
+`xv6-host: exit(0) pid=1`, with no `seL4 call failed`, CSpace exhaustion,
+mapping-table exhaustion, kernel panic, kernel-mode trap, or user fault.
+
+M6.41 clarifies the virtio no-poll invariant. The disk server still returns to
+`seL4_Recv` while DMA is in flight and resumes completion from the bound virtio
+IRQ notification. The pre-RPC used-ring harvest is deliberately non-blocking:
+it only handles the endpoint ordering case where a device completion is already
+visible but the IRQ badge is queued behind a client message, so request-slot
+and shared-slot ownership stay current without spinning.
+
+M6.42 splits fs-server shared-buffer ownership. Shared slots 0..2 are now
+reserved for host/fs syscall payloads and replies, covering xv6's 3072-byte
+`filewrite` chunks, while fs/disk block I/O uses shared slot 3. This lets
+`FS_OP_WRITE` consume the host-provided write payload directly while inode,
+bitmap, directory, log, and cache disk operations use a separate block window,
+removing the former `WRITE_BUFFER` copy. `FS_OP_READ` now explicitly copies the
+requested bytes from the disk block window back to the host-visible slot 0
+before replying. The fs server is still synchronous around disk RPCs; this
+change removes the shared-memory aliasing constraint needed before a real async
+fs-server state machine can be introduced.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m642-shared-slots-cat.log ./tools/run-xv6-user.sh cat README
+nix develop --command env TIMEOUT=300 LOG_FILE=target/xv6-m642-shared-slots-stressfs.log ./tools/run-xv6-user.sh stressfs
+nix develop --command env TIMEOUT=240 LOG_FILE=target/xv6-m642-shared-slots-bigwrite.log ./tools/run-xv6-user.sh usertests bigwrite
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m642-shared-slots-usertests-rerun.log ./tools/run-xv6-user.sh usertests
+rg -n "virtio failure|disk flush failed|used entry for unknown|request slots exhausted|shared slot busy|KERNEL PANIC|kernel-mode trap|user fault|seL4 call failed|xv6-host: panic|xv6-fs-server: panic|virtio-disk-server: panic" target/xv6-m642-shared-slots-bigwrite.log target/xv6-m642-shared-slots-usertests-rerun.log
+```
+
+`cat README`, `stressfs`, and targeted `usertests bigwrite` ended with
+`xv6-host: exit(0) pid=1`, covering the readback path from disk slot 3 to host
+slot 0 and the 3072-byte write path that keeps host payload bytes stable while
+disk metadata/data blocks move through slot 3. The full
+`target/xv6-m642-shared-slots-usertests-rerun.log` run ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`; the fatal-pattern scan above
+returned no matches. An earlier full run caught the initial slot-1 overlap as
+`xv6-fs-server: panic` in `bigwrite`, which is why the final disk work slot is
+slot 3 rather than slot 1.
+
+M6.43 adds an explicit disk-completion IPC path while keeping virtio DMA
+event-driven. `xv6-host` now mints `virtio-disk-server` a badged send cap to
+the fs-server endpoint. `xv6-fs-server` sends disk read/write/flush requests
+with a completion id instead of using `seL4_Call`, then waits for
+`DISK_OP_COMPLETE` on its own service endpoint. `virtio-disk-server` keeps the
+old synchronous reply-cap path for compatibility, but async requests complete by
+sending `[status, bytes, blockno, completion_id, detail]` back to that endpoint.
+
+The disk server still does not poll while DMA is in flight. After publishing a
+virtqueue descriptor, it returns to `seL4_Recv(XV6_SERVICE_ENDPOINT_CPTR)` and
+can receive either a virtio IRQ notification or another client IPC. Completion
+processing is driven by the bound IRQ badge; the pre-RPC used-ring drain remains
+a non-blocking ordering fix for the case where a device completion is already
+visible but the IRQ badge is queued behind an IPC message. Concurrency ownership
+is still explicit: `PENDING_REQUESTS` owns each request slot until its used-ring
+head is consumed, shared slots cannot be reused while active, and flush remains
+a barrier that is rejected while data requests are in flight.
+
+This step does not yet make `xv6-fs-server` a fully asynchronous state machine.
+The fs block layer now avoids `seL4_Call` to the disk server, but the fs server
+still waits synchronously for the matching completion before replying to
+`xv6-host`. The next concurrency step is to save the host caller reply cap,
+record pending fs operation state, and let the fs-server main loop process other
+host IPC while disk requests are outstanding.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m643-disk-completion-cat.log ./tools/run-xv6-user.sh cat README
+nix develop --command env TIMEOUT=300 LOG_FILE=target/xv6-m643-disk-completion-stressfs.log ./tools/run-xv6-user.sh stressfs
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m643-disk-completion-usertests.log ./tools/run-xv6-user.sh usertests
+rg -n "virtio failure|disk flush failed|used entry for unknown|request slots exhausted|shared slot busy|unexpected disk completion|KERNEL PANIC|kernel-mode trap|user fault|seL4 call failed|xv6-host: panic|xv6-fs-server: panic|virtio-disk-server: panic" target/xv6-m643-disk-completion-cat.log target/xv6-m643-disk-completion-stressfs.log target/xv6-m643-disk-completion-usertests.log
+```
+
+`cat README`, `stressfs`, and the full `usertests` run all ended with
+`xv6-host: exit(0) pid=1`; the full `usertests` log also ended with
+`ALL TESTS PASSED`. The fatal-pattern scan above returned no matches.
+
+M6.44 hardens the fs-server disk-wait path for future host/fs concurrency.
+`sel4-user` now exposes a minimal `seL4_Reply` wrapper, and `xv6-abi` defines
+`XV6_EBUSY`. While `xv6-fs-server` is waiting for a specific
+`DISK_OP_COMPLETE`, it now loops on its service endpoint instead of treating the
+first non-matching message as the current disk operation's failure. A wrong disk
+completion id is still a protocol error, but an unrelated host/fs IPC is replied
+to immediately with `XV6_EBUSY` and the original disk wait continues.
+
+This is intentionally a guard, not the final async fs-server scheduler. It
+prevents shared slot 3, the transaction log, and the block cache from being
+re-entered by a second fs operation while one disk request is outstanding. The
+next step is to convert fs operations into saved-reply continuations instead of
+replying busy to concurrent fs work.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m644-fs-busy-guard-cat.log ./tools/run-xv6-user.sh cat README
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m644-fs-busy-guard-usertests.log ./tools/run-xv6-user.sh usertests
+rg -n "busy while disk pending|virtio failure|disk flush failed|used entry for unknown|request slots exhausted|shared slot busy|unexpected disk completion|KERNEL PANIC|kernel-mode trap|user fault|seL4 call failed|xv6-host: panic|xv6-fs-server: panic|virtio-disk-server: panic" target/xv6-m644-fs-busy-guard-cat.log target/xv6-m644-fs-busy-guard-usertests.log
+```
+
+`cat README` ended with `xv6-host: exit(0) pid=1`. The full
+`target/xv6-m644-fs-busy-guard-usertests.log` run ended with
+`ALL TESTS PASSED` and `xv6-host: exit(0) pid=1`; the fatal-pattern scan above
+returned no matches.
+
+M6.45 makes the host side understand the fs-server busy guard. All host->fs
+IPC calls now go through a centralized `fs_server_call()` helper; replies with
+`XV6_EBUSY` cause `xv6-host` to `seL4_Yield` and retry up to a bounded limit,
+while non-busy fs statuses keep their previous syscall semantics. This keeps
+the M6.44 guard from leaking as ordinary xv6 I/O failures and prepares the path
+for fs-server saved-reply continuations.
+
+M6.46 removes the remaining blocking edge from disk completion delivery.
+`xv6-host` now allocates and maps a dedicated completion ring page at
+`XV6_DISK_COMPLETION_RING_VADDR`, gives `virtio-disk-server` a badged send cap
+to a completion Notification, and binds that Notification to the fs-server TCB.
+On used-ring completion, `virtio-disk-server` writes
+`[status, bytes, blockno, completion_id, detail]` into the ring and signals the
+Notification instead of blocking in an endpoint `Send`. `xv6-fs-server` drains
+the ring while waiting for its outstanding disk completion and ignores stale
+completion notification badges in its main loop, so a notification delivered
+after an opportunistic ring drain is not mistaken for `FS_OP_INIT`.
+
+The fs server is still intentionally single-outstanding around disk I/O: shared
+slot 3, the transaction log, and the block cache are protected by `XV6_EBUSY`
+rather than a full continuation scheduler. The next step is to save host reply
+caps and convert fs operations into explicit continuations so unrelated host/fs
+IPC can make progress while a disk request is in flight.
+
+Verified commands:
+
+```text
+nix develop --command cargo fmt --check
+nix develop --command cargo check -p xv6-fs-server -p virtio-disk-server -p xv6-abi -p sel4-user
+nix develop --command env TIMEOUT=180 LOG_FILE=target/xv6-m646-disk-completion-ring-cat.log ./tools/run-xv6-user.sh cat README
+nix develop --command env TIMEOUT=300 LOG_FILE=target/xv6-m646-disk-completion-ring-stressfs.log ./tools/run-xv6-user.sh stressfs
+nix develop --command env TIMEOUT=1200 LOG_FILE=target/xv6-m646-disk-completion-ring-usertests.log ./tools/run-xv6-user.sh usertests
+rg -n "completion ring full|unexpected disk completion|unexpected disk completion ring|fs busy retry exhausted|busy while disk pending|virtio failure|disk flush failed|used entry for unknown|request slots exhausted|shared slot busy|KERNEL PANIC|kernel-mode trap|user fault|seL4 call failed|xv6-host: panic|xv6-fs-server: panic|virtio-disk-server: panic" target/xv6-m646-disk-completion-ring-cat.log target/xv6-m646-disk-completion-ring-stressfs.log target/xv6-m646-disk-completion-ring-usertests.log
+```
+
+`cat README`, `stressfs`, and full `usertests` all ended with
+`xv6-host: exit(0) pid=1`; full `usertests` also ended with
+`ALL TESTS PASSED`. The fatal-pattern scan above returned no matches.
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -836,6 +1580,30 @@ and syscall dispatch so each server module has a clear ownership boundary.
 | M6.20 | First xv6-fs-server module split: disk/runtime FS types and statics moved to `types.rs`; transaction, redo-log, disk IPC, and shared-block helpers moved to `block.rs`. Full `usertests` still passes. | ✅ Done |
 | M6.21 | Inode-layer split: raw dinode IO, open-reference tracking, inode allocation/free, truncation, data writes, bitmap allocation, and direct/indirect block mapping moved to `inode.rs`. Full `usertests` still passes. | ✅ Done |
 | M6.22 | Directory/path split: dirent read/write, root/path/parent lookup, empty-directory checks, directory entry insertion/removal, node creation, and path-byte logging moved to `dir.rs`. Full `usertests` still passes. | ✅ Done |
+| M6.23 | IRQ-driven virtio disk completion: add minimal PLIC external IRQ delivery, complete PLIC IRQs through `IRQHandler_Ack`, pass a badged virtio IRQ notification/handler cap to `virtio-disk-server`, and block the disk server on notification instead of polling DMA completion. Full `usertests` still passes. | ✅ Done |
+| M6.24 | xv6 `filewrite` chunk semantics: regular-file writes use the upstream 3072-byte max transaction chunk, fs-server accepts multi-block write IPC via the shared page plus a local buffer, and partial inode writes return `-1` instead of leaking internal short counts. Full `usertests` still passes; `logstress` is now blocked by upstream `MAXFILE`/FSSIZE limits rather than host chunking. | ✅ Done |
+| M6.25 | xv6 orphan recovery: `xv6-host` retains cwd inode refs for live processes and releases them on cwd/process lifetime transitions; `xv6-fs-server` reclaims post-crash `nlink == 0` typed inodes after log recovery. `forphan`, `dorphan`, and full `usertests` pass. | ✅ Done |
+| M6.26 | Fs-server operation split: move open/close/read/write/readdir/fstat/chdir/exec lookup/link/unlink/mkdir/mknod/retain IPC handlers into `ops.rs`, leaving `main.rs` to boot/init/orphan recovery/dispatch. `stressfs` and full `usertests` pass. | ✅ Done |
+| M6.27 | Host pipe split: move pipe ring state, allocation, reader/writer backing counts, and raw pipe read/write operations into `xv6-host/src/pipes.rs`, keeping syscall block/resume policy in `xv6.rs`. Targeted `pipe1` and full `usertests` pass. | ✅ Done |
+| M6.28 | Host open-file split: move open-file backing allocation, refcounts, forced close, and shared offsets into `xv6-host/src/files.rs`, keeping fd/syscall policy in `xv6.rs`. Targeted `sharedfd` and full `usertests` pass. | ✅ Done |
+| M6.29 | Virtio completion wait cleanup: keep one request in flight with a scoped guard, check the used ring before blocking, then sleep on the badged IRQ notification during DMA and ACK the handler before reusing shared DMA state. | ✅ Done |
+| M6.30 | xv6 `pause(n)` semantics: positive pause saves the reply cap, blocks the process until timer notifications advance ticks past its deadline, removes syscall-driven pseudo-ticks, and cleans up saved sleep replies on kill/reap. `zombie`, targeted `preempt`, and full `usertests` pass. | ✅ Done |
+| M6.31 | `run-xv6-user.sh --expect-timeout` validation mode for infinite stress programs such as `grind`; timeout is success only when no fatal xv6/kernel output is seen, while normal full `usertests` still tolerates intentional child fault-kill logs. | ✅ Done |
+| M6.32 | Event-driven virtio disk server: save the fs-server reply cap, submit DMA, return to the service endpoint, receive the bound IRQ notification through the same server loop, then ACK and reply through the saved cap. One request remains in flight. Full `usertests` passes. | ✅ Done |
+| M6.33 | Disk flush + fs log barriers: add `DISK_OP_FLUSH`, negotiate `VIRTIO_BLK_F_FLUSH` with no-op fallback, and flush after log data, commit header, home install, and log clear. `stressfs` and full `usertests` pass. | ✅ Done |
+| M6.34 | Disk request-slot groundwork: split the shared block page into explicit 1KiB shared slots, track two virtio request slots with per-slot DMA/status/reply caps, match used-ring completions by descriptor head, and keep flush serialized as a barrier. Full `usertests` passes. | ✅ Done |
+| M6.35 | No-poll virtio concurrency tightening: opportunistically harvest already-visible used-ring completions before new disk RPC handling, publish pending request state before `avail.idx`, and tolerate IRQ badges whose completion was drained by the RPC path. Targeted `echo` and `stressfs` pass. | ✅ Done |
+| M6.36 | xv6-host resource scaling: align `MAX_PROCS=64`, `MAX_EXEC_ARGS=32`, and `MAX_PIPES=32`, move the process table to static storage, allocate user frames from global RAM, and recycle only pool-owned mappings. Full `usertests` passes. | ✅ Done |
+| M6.37 | Fs-server clean block cache: cache successful disk reads, prefer active transaction-log blocks, invalidate home-block cache entries on journal absorption, and refresh cache after committed raw writes. `echo`, `stressfs`, and full `usertests` pass. | ✅ Done |
+| M6.38 | Parallel-safe xv6 run tooling: add a reentrant build/pack lock, use per-run packed image names, and give default QEMU runs private fs.img copies while preserving explicit `XV6_FS_IMG` persistence semantics. Sequential `echo` and parallel `echo`/`stressfs` pass. | ✅ Done |
+| M6.39 | Dynamic console input: add local debug getchar plumbing, block xv6 console reads on saved reply caps, resume them from timer-driven host polling, and add `run-xv6-user.sh --qemu-stdin` for runtime stdin validation. Scripted shell and dynamic QEMU-stdin shell smoke pass. | ✅ Done |
+| M6.40 | xv6-host control-cap ownership: keep child IPC-buffer frames out of the normal user mapping table, store/delete them as `Child` control caps, and clear partial child mappings on fork-construction failure. Direct `forktest` and five repeated shell `forktest` runs pass. | ✅ Done |
+| M6.41 | Virtio no-poll invariant cleanup: document the disk server's event-driven DMA path in code and README. The pre-RPC used-ring harvest is explicitly non-blocking and only resolves endpoint/IRQ ordering races; DMA completion still resumes via the bound virtio IRQ notification and saved reply caps. | ✅ Done |
+| M6.42 | Fs-server shared-slot split: reserve slots 0..2 for host/fs payloads, move fs/disk block I/O to slot 3, remove the write-side `WRITE_BUFFER` copy, and copy read replies explicitly from the disk slot back to the host slot. `cat README` and `stressfs` pass. | ✅ Done |
+| M6.43 | Explicit disk completion channel: fs-server disk I/O now uses `Send + DISK_OP_COMPLETE` with completion ids instead of `seL4_Call`, while virtio DMA remains IRQ-driven and request/shared-slot ownership prevents in-flight reuse. Full `usertests` passes. | ✅ Done |
+| M6.44 | Fs-server disk-wait concurrency guard: add user-space `seL4_Reply`, return `XV6_EBUSY` to unrelated host/fs IPC while a disk completion is pending, and keep the original disk wait alive. Full `usertests` passes. | ✅ Done |
+| M6.45 | Host fs-busy retry: centralize host->fs IPC, retry `XV6_EBUSY` with `seL4_Yield`, and preserve normal fs failure semantics for non-busy replies. `cat README` and full `usertests` pass. | ✅ Done |
+| M6.46 | Nonblocking disk completion delivery: replace disk->fs blocking completion endpoint sends with a shared completion ring plus bound Notification, while keeping fs-server single-outstanding disk concurrency guarded by `XV6_EBUSY`. `cat README`, `stressfs`, and full `usertests` pass. | ✅ Done |
 | M4.4 | Full PLIC IRQ chain, true per-hart SMP, MCS/multi-domain/VTX coverage, and the remaining upstream-disabled tests. | ⏳ Pending |
 
 ### Disabled-Test Accounting (M4.4e Single-Core)
@@ -1028,20 +1796,22 @@ xv6-host: exit(0) pid=1
 Implemented host-side compatibility now has an explicit handler for every xv6
 syscall number 1..21. The currently functional subset is process exit,
 TCB/VSpace-backed `fork`, fs.img-backed `exec`,
-zombie/blocking `wait`, scripted console input, console/file read-write where
-meaningful, per-process `open`/`close`/`dup`/`fstat`, shared open-file offsets
-across `dup`/`fork`, `sbrk`, `getpid`, `uptime`, `pause`, `chdir`,
+zombie/blocking `wait`, scripted and runtime QEMU console input, console/file
+read-write where meaningful, per-process `open`/`close`/`dup`/`fstat`, shared
+open-file offsets across `dup`/`fork`, `sbrk`, `getpid`, `uptime`, `pause`,
+`chdir`,
 `mknod("console")`, `link`/`unlink`/`mkdir`, mutable files/directories through
 the fs server, and a fixed-size in-memory `pipe` ring buffer with blocking
 reads/writes shared across forked processes. Process termination now uses one
 path for normal `exit`, fault kill, and `kill(pid)`, including wait reply,
 child reparenting, and blocked reply-cap cleanup.
-Remaining Unix gaps are xv6 log/transaction semantics, permissions/devices beyond
-console, dynamic host keyboard input, full untyped-memory reclamation beyond
-cap-slot reuse, and resource scaling beyond the current fixed tables. With no
-scripted input, `init` now reaches
-`exec("sh")` and the shell blocks on console read instead of exiting and
-forcing `init` into a restart loop.
+Remaining Unix gaps are permissions/devices beyond console, full
+untyped-memory reclamation beyond cap-slot reuse, multi-request virtio queueing
+beyond the current fs-server synchronous disk RPC loop, optional
+large-file/on-disk-format expansion beyond upstream `MAXFILE`, and further
+dynamic scaling beyond the current xv6-sized fixed tables. With no scripted
+input, `init` now reaches `exec("sh")` and the shell blocks on runtime console
+read until QEMU/stdin provides bytes.
 
 
 ## Repository layout
@@ -1074,6 +1844,7 @@ microkernel/
 │       │   └── trap.rs        # UserContext + handle_trap_rust
 │       ├── machine/
 │       │   ├── console.rs     # SBI-backed putc
+│       │   ├── plic.rs        # QEMU virt PLIC MMIO helper for external IRQs
 │       │   └── uart.rs        # NS16550 (M1 only)
 │       ├── kernel/
 │       │   ├── boot.rs        # bringup_rootserver
@@ -1210,7 +1981,15 @@ plus semantics that are implemented only as far as sel4test currently needs:
 5. **Zombie/finalisation fidelity.** CNode/TCB finalisation is good
    enough for the enabled tests, but should be brought closer to the C
    kernel's Zombie reduction model before expanding coverage further.
-6. **xv6 service split.** The in-host filesystem mirror is gone. Next xv6 work
-   is xv6 log/transaction fidelity in the fs server, reducing the tracing noise,
-   and splitting the large fs-server implementation into smaller modules before
-   expanding device and resource semantics.
+6. **xv6 service split.** The in-host filesystem mirror is gone, fs mutations
+   use the fs server's xv6 redo-log path, and virtio disk completion is now
+   IRQ-driven without spin-polling after submit. Fs/disk I/O now uses explicit
+   completion ids, and disk completion delivery uses a shared completion ring
+   plus a bound Notification rather than a blocking endpoint send. The fs
+   server still waits synchronously for each disk completion before replying to
+   the host; unrelated fs IPC during that wait is answered with `XV6_EBUSY`,
+   and `xv6-host` now yields/retries that busy status. Console input can now
+   arrive through runtime QEMU stdin via the host's debug-getchar path. Next xv6
+   work is splitting the remaining large fs-server/host handlers further, then
+   converting disk waits into saved-reply continuations so unrelated fs work can
+   proceed while disk DMA is in flight.

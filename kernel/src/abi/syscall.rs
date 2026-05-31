@@ -26,6 +26,7 @@ pub const SYS_DEBUG_CAP_IDENTIFY: SyscallNo = -12;
 pub const SYS_DEBUG_SNAPSHOT: SyscallNo = -13;
 pub const SYS_DEBUG_NAME_THREAD: SyscallNo = -14;
 pub const SYS_DEBUG_SEND_IPI: SyscallNo = -15;
+pub const SYS_DEBUG_GET_CHAR: SyscallNo = -16;
 
 /// Returns true for syscall numbers we recognise in the current
 /// configuration. Anything else triggers a kernel panic for now.
@@ -47,5 +48,6 @@ pub fn is_known(n: SyscallNo) -> bool {
             | SYS_DEBUG_SNAPSHOT
             | SYS_DEBUG_NAME_THREAD
             | SYS_DEBUG_SEND_IPI
+            | SYS_DEBUG_GET_CHAR
     )
 }

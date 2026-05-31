@@ -6,6 +6,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+source "${ROOT_DIR}/tools/xv6-build-lock.sh"
 XV6_DIR="${XV6_DIR:-${ROOT_DIR}/third_party/xv6-riscv}"
 OUT_DIR="${OUT_DIR:-${ROOT_DIR}/target/xv6compat}"
 XV6_FS_IMG="${XV6_FS_IMG:-${OUT_DIR}/fs.img}"
@@ -26,6 +27,11 @@ infer_toolprefix() {
 }
 
 [[ -d "${XV6_DIR}" ]] || die "XV6_DIR not found: ${XV6_DIR}"
+
+xv6_acquire_build_lock
+if [[ "${XV6_BUILD_LOCK_ACQUIRED:-0}" == "1" ]]; then
+    trap 'xv6_release_build_lock' EXIT INT TERM
+fi
 
 TOOLPREFIX="${TOOLPREFIX:-$(infer_toolprefix || true)}"
 [[ -n "${TOOLPREFIX}" ]] || die "could not find a RISC-V ELF toolchain"

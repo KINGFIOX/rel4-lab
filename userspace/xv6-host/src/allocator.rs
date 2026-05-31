@@ -1,7 +1,7 @@
 use crate::consts::{
-    LABEL_CNODE_COPY, LABEL_CNODE_DELETE, LABEL_CNODE_REVOKE, LABEL_UNTYPED_RETYPE, MAX_PROCS,
-    MAX_RECYCLED_SLOTS, OBJ_UNTYPED, PROCESS_UNTYPED_BITS, PROCESS_UNTYPED_PARENT_BITS, ROOT_CNODE,
-    ROOT_CNODE_DEPTH, VIRTIO_MMIO_BASE, VIRTIO_MMIO_SIZE,
+    LABEL_CNODE_COPY, LABEL_CNODE_DELETE, LABEL_CNODE_MINT, LABEL_CNODE_REVOKE,
+    LABEL_UNTYPED_RETYPE, MAX_PROCS, MAX_RECYCLED_SLOTS, OBJ_UNTYPED, PROCESS_UNTYPED_BITS,
+    PROCESS_UNTYPED_PARENT_BITS, ROOT_CNODE, ROOT_CNODE_DEPTH, VIRTIO_MMIO_BASE, VIRTIO_MMIO_SIZE,
 };
 use crate::types::BootInfo;
 use crate::util::{halt_loop, log, print_hex};
@@ -23,6 +23,7 @@ static mut RECYCLED_SLOTS: [u64; MAX_RECYCLED_SLOTS] = [0; MAX_RECYCLED_SLOTS];
 impl Allocator {
     pub(crate) fn new(bi: &BootInfo) -> Self {
         let mut selected = 0;
+        let mut selected_bits = 0u8;
         let mut process_parent = 0;
         let mut process_parent_bits = 0u8;
         let mut device_untyped_slot = 0;
@@ -34,8 +35,9 @@ impl Allocator {
         for i in start..end {
             let desc = bi.untyped_list[i - start];
             if desc.is_device == 0 && desc.size_bits >= 24 {
-                if selected == 0 {
+                if desc.size_bits > selected_bits {
                     selected = slot;
+                    selected_bits = desc.size_bits;
                 }
                 if desc.size_bits >= PROCESS_UNTYPED_PARENT_BITS
                     && desc.size_bits > process_parent_bits
@@ -151,6 +153,20 @@ impl Allocator {
         let dst = self.alloc_slot();
         let mrs = [dst, ROOT_CNODE_DEPTH, src_slot, ROOT_CNODE_DEPTH, rights];
         call_checked(ROOT_CNODE, LABEL_CNODE_COPY, &[ROOT_CNODE], &mrs);
+        dst
+    }
+
+    pub(crate) fn mint_cap(&mut self, src_slot: u64, rights: u64, badge: u64) -> u64 {
+        let dst = self.alloc_slot();
+        let mrs = [
+            dst,
+            ROOT_CNODE_DEPTH,
+            src_slot,
+            ROOT_CNODE_DEPTH,
+            rights,
+            badge,
+        ];
+        call_checked(ROOT_CNODE, LABEL_CNODE_MINT, &[ROOT_CNODE], &mrs);
         dst
     }
 

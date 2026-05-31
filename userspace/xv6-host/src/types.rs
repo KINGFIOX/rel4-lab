@@ -4,7 +4,6 @@ pub(crate) use sel4_user::BootInfo;
 
 #[derive(Copy, Clone)]
 pub(crate) struct Mapping {
-    pub(crate) proc_slot: usize,
     pub(crate) pid: u64,
     pub(crate) child_page: u64,
     pub(crate) alias_page: u64,
@@ -12,6 +11,7 @@ pub(crate) struct Mapping {
     pub(crate) alias_slot: u64,
     pub(crate) writable: bool,
     pub(crate) executable: bool,
+    pub(crate) pool_frame: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -38,7 +38,6 @@ impl FdEntry {
 #[derive(Copy, Clone)]
 pub(crate) struct Child {
     pub(crate) pid: u64,
-    pub(crate) proc_slot: usize,
     pub(crate) parent_pid: u64,
     pub(crate) state: u8,
     pub(crate) exit_status: i32,
@@ -46,6 +45,7 @@ pub(crate) struct Child {
     pub(crate) tcb: u64,
     pub(crate) cnode: u64,
     pub(crate) vspace: u64,
+    pub(crate) ipc_frame: u64,
     pub(crate) untyped: u64,
     pub(crate) fault_ep: u64,
     pub(crate) entry: u64,
@@ -64,13 +64,19 @@ pub(crate) struct Child {
     pub(crate) pipe_buf: u64,
     pub(crate) pipe_len: usize,
     pub(crate) pipe_done: usize,
+    pub(crate) sleep_deadline: u64,
+    pub(crate) sleep_reply_slot: u64,
+    pub(crate) sleep_reply_mrs: [u64; 11],
+    pub(crate) console_reply_slot: u64,
+    pub(crate) console_reply_mrs: [u64; 11],
+    pub(crate) console_buf: u64,
+    pub(crate) console_len: usize,
 }
 
 impl Child {
     pub(crate) const fn empty() -> Self {
         Self {
             pid: 0,
-            proc_slot: 0,
             parent_pid: 0,
             state: PROC_UNUSED,
             exit_status: 0,
@@ -78,6 +84,7 @@ impl Child {
             tcb: 0,
             cnode: 0,
             vspace: 0,
+            ipc_frame: 0,
             untyped: 0,
             fault_ep: 0,
             entry: 0,
@@ -96,6 +103,13 @@ impl Child {
             pipe_buf: 0,
             pipe_len: 0,
             pipe_done: 0,
+            sleep_deadline: 0,
+            sleep_reply_slot: 0,
+            sleep_reply_mrs: [0; 11],
+            console_reply_slot: 0,
+            console_reply_mrs: [0; 11],
+            console_buf: 0,
+            console_len: 0,
         }
     }
 }

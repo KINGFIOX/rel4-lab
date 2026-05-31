@@ -10,18 +10,20 @@ use crate::child::{
     read_user_context, reset_process_mappings, unmap_child_range, write_user_context,
 };
 use crate::consts::*;
+use crate::files;
+use crate::pipes;
 use crate::types::{Child, FdEntry};
 use crate::util::*;
-use sel4_user::{call_checked, msg_info, msg_label, sel4_call, sel4_send, sel4_yield};
+use sel4_user::{IpcMessage, call_checked, msg_info, msg_label, sel4_call, sel4_send, sel4_yield};
 
 static mut TICKS: u64 = 0;
-static mut PIPES: [Pipe; MAX_PIPES] = [Pipe::closed(); MAX_PIPES];
-static mut OPEN_FILES: [OpenFile; MAX_OPEN_FILES] = [OpenFile::closed(); MAX_OPEN_FILES];
 static mut NEXT_PID: u64 = 2;
 static mut CONSOLE_INPUT_POS: usize = 0;
 static mut SPARSE_EAGER_RESERVED: u64 = 0;
 static mut EXEC_IMAGE_BUF: [u8; MAX_FILE_BYTES] = [0; MAX_FILE_BYTES];
 static mut FS_SERVER_EP: u64 = 0;
+
+const FS_BUSY_RETRY_LIMIT: usize = 4096;
 
 pub(crate) enum SyscallResult {
     Reply(i64),
@@ -36,42 +38,8 @@ pub(crate) fn init_fs_client(fs_ep: u64) {
     }
 }
 
-#[derive(Copy, Clone)]
-struct Pipe {
-    buf: [u8; PIPE_BUF],
-    read_pos: usize,
-    len: usize,
-    readers: usize,
-    writers: usize,
-}
-
-impl Pipe {
-    const fn closed() -> Self {
-        Self {
-            buf: [0; PIPE_BUF],
-            read_pos: 0,
-            len: 0,
-            readers: 0,
-            writers: 0,
-        }
-    }
-}
-
-#[derive(Copy, Clone)]
-struct OpenFile {
-    used: bool,
-    refs: u16,
-    offset: usize,
-}
-
-impl OpenFile {
-    const fn closed() -> Self {
-        Self {
-            used: false,
-            refs: 0,
-            offset: 0,
-        }
-    }
+pub(crate) fn retain_initial_cwd(child: &Child) -> bool {
+    fs_server_retain_inode(child.cwd_inum)
 }
 
 #[derive(Copy, Clone)]
@@ -97,7 +65,6 @@ pub(crate) fn handle_xv6_syscall(
     let a0 = mrs[3];
     let a1 = mrs[4];
     let a2 = mrs[5];
-    tick();
 
     let ret = match sysno {
         SYS_FORK => return SyscallResult::Reply(sys_fork(alloc, procs, proc_idx, mrs)),
@@ -140,10 +107,7 @@ pub(crate) fn handle_xv6_syscall(
         SYS_SBRK => sys_sbrk(alloc, &mut procs[proc_idx], a0 as i64, a1),
         SYS_GETPID => procs[proc_idx].pid as i64,
         SYS_UPTIME => unsafe { TICKS as i64 },
-        SYS_PAUSE => {
-            unsafe { sel4_yield() };
-            0
-        }
+        SYS_PAUSE => return sys_pause(alloc, &mut procs[proc_idx], a0 as i64, mrs),
         SYS_KILL => sys_kill(alloc, procs, a0 as i64),
         SYS_CHDIR => sys_chdir(alloc, &mut procs[proc_idx], a0),
         SYS_PIPE => sys_pipe(alloc, &mut procs[proc_idx], a0),
@@ -198,6 +162,12 @@ fn sys_write(
     if len == 0 {
         return SyscallResult::Reply(0);
     }
+    if fd >= MAX_FD {
+        return SyscallResult::Reply(-1);
+    }
+    if child.fds[fd].kind == FD_FS_SERVER_FILE {
+        return sys_write_fs_file(alloc, child, fd, buf, len);
+    }
     let mut scratch = [0u8; 128];
     let mut done = 0usize;
     while done < len {
@@ -206,9 +176,6 @@ fn sys_write(
             return SyscallResult::Reply(-1);
         }
         let wrote = {
-            if fd >= MAX_FD {
-                return SyscallResult::Reply(-1);
-            }
             match child.fds[fd].kind {
                 FD_CONSOLE if child.fds[fd].writable => {
                     for b in &scratch[..n] {
@@ -216,21 +183,14 @@ fn sys_write(
                     }
                     n
                 }
-                FD_PIPE_WRITE => unsafe { pipe_write(child.fds[fd].aux, &scratch[..n]) },
-                FD_FS_SERVER_FILE if child.fds[fd].writable => {
-                    match fs_server_write_file(child.fds[fd], &scratch[..n]) {
-                        Some(written) => written,
-                        None if done == 0 => return SyscallResult::Reply(-1),
-                        None => 0,
-                    }
-                }
+                FD_PIPE_WRITE => pipes::write(child.fds[fd].aux, &scratch[..n]),
                 _ => return SyscallResult::Reply(-1),
             }
         };
         if wrote == 0 {
             if fd < MAX_FD
                 && child.fds[fd].kind == FD_PIPE_WRITE
-                && unsafe { pipe_has_readers(child.fds[fd].aux) }
+                && pipes::has_readers(child.fds[fd].aux)
             {
                 block_pipe_writer(alloc, child, fd, buf, len, done, mrs);
                 return SyscallResult::Block;
@@ -241,11 +201,43 @@ fn sys_write(
             break;
         }
         if fd < MAX_FD && child.fds[fd].kind == FD_FS_SERVER_FILE {
-            advance_fd_offset(child.fds[fd], wrote);
+            files::advance_offset(child.fds[fd], wrote);
         }
         done += wrote;
     }
     SyscallResult::Reply(done as i64)
+}
+
+fn sys_write_fs_file(
+    alloc: &mut Allocator,
+    child: &mut Child,
+    fd: usize,
+    buf: u64,
+    len: usize,
+) -> SyscallResult {
+    if !child.fds[fd].writable {
+        return SyscallResult::Reply(-1);
+    }
+    let mut scratch = [0u8; XV6_MAX_FILE_WRITE];
+    let mut done = 0usize;
+    while done < len {
+        let n = min(scratch.len(), len - done);
+        if !copy_from_child(alloc, child, buf + done as u64, &mut scratch[..n]) {
+            return SyscallResult::Reply(-1);
+        }
+        match fs_server_write_file(child.fds[fd], &scratch[..n]) {
+            Some(written) if written == n => {
+                files::advance_offset(child.fds[fd], written);
+                done += written;
+            }
+            Some(written) if written > 0 => {
+                files::advance_offset(child.fds[fd], written);
+                return SyscallResult::Reply(-1);
+            }
+            _ => return SyscallResult::Reply(-1),
+        }
+    }
+    SyscallResult::Reply(len as i64)
 }
 
 fn block_pipe_writer(
@@ -326,6 +318,19 @@ fn clear_wait_block(child: &mut Child) {
     child.wait_reply_mrs = [0; 11];
 }
 
+fn clear_sleep_block(child: &mut Child) {
+    child.sleep_deadline = 0;
+    child.sleep_reply_slot = 0;
+    child.sleep_reply_mrs = [0; 11];
+}
+
+fn clear_console_block(child: &mut Child) {
+    child.console_reply_slot = 0;
+    child.console_reply_mrs = [0; 11];
+    child.console_buf = 0;
+    child.console_len = 0;
+}
+
 fn drop_blocked_reply_caps(alloc: &mut Allocator, child: &mut Child) {
     if child.wait_reply_slot != 0 {
         alloc.delete_cap_slot(child.wait_reply_slot);
@@ -334,6 +339,55 @@ fn drop_blocked_reply_caps(alloc: &mut Allocator, child: &mut Child) {
     if child.pipe_reply_slot != 0 {
         alloc.delete_cap_slot(child.pipe_reply_slot);
         clear_pipe_block(child);
+    }
+    if child.sleep_reply_slot != 0 {
+        alloc.delete_cap_slot(child.sleep_reply_slot);
+        clear_sleep_block(child);
+    }
+    if child.console_reply_slot != 0 {
+        alloc.delete_cap_slot(child.console_reply_slot);
+        clear_console_block(child);
+    }
+}
+
+pub(crate) fn pump_sleep_waiters(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS]) {
+    let now = unsafe { TICKS };
+    for child in procs.iter_mut() {
+        if child.state != PROC_SLEEPING || child.sleep_reply_slot == 0 {
+            continue;
+        }
+        if now.wrapping_sub(child.sleep_deadline) >= (1u64 << 63) {
+            continue;
+        }
+        let mut reply_mrs = child.sleep_reply_mrs;
+        reply_mrs[3] = 0;
+        unsafe {
+            sel4_send(child.sleep_reply_slot, msg_info(0, 0, 0, 11), &reply_mrs);
+        }
+        alloc.delete_cap_slot(child.sleep_reply_slot);
+        child.state = PROC_RUNNABLE;
+        clear_sleep_block(child);
+    }
+}
+
+pub(crate) fn pump_console_waiters(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS]) {
+    for child in procs.iter_mut() {
+        if child.state != PROC_CONSOLE_READ || child.console_reply_slot == 0 {
+            continue;
+        }
+        let Some(ret) =
+            try_read_dynamic_console(alloc, child, child.console_buf, child.console_len)
+        else {
+            continue;
+        };
+        let mut reply_mrs = child.console_reply_mrs;
+        reply_mrs[3] = ret as u64;
+        unsafe {
+            sel4_send(child.console_reply_slot, msg_info(0, 0, 0, 11), &reply_mrs);
+        }
+        alloc.delete_cap_slot(child.console_reply_slot);
+        child.state = PROC_RUNNABLE;
+        clear_console_block(child);
     }
 }
 
@@ -362,8 +416,8 @@ fn resume_pipe_reader(alloc: &mut Allocator, child: &mut Child) -> Option<i64> {
         return Some(-1);
     }
     let pipe_idx = child.fds[fd].aux;
-    let ret = unsafe { pipe_read(alloc, child, pipe_idx, child.pipe_buf, child.pipe_len) };
-    if ret == 0 && unsafe { pipe_has_writers(pipe_idx) } {
+    let ret = pipes::read(alloc, child, pipe_idx, child.pipe_buf, child.pipe_len);
+    if ret == 0 && pipes::has_writers(pipe_idx) {
         None
     } else {
         Some(ret)
@@ -406,9 +460,9 @@ fn resume_pipe_writer(alloc: &mut Allocator, child: &mut Child) -> Option<i64> {
         ) {
             return Some(-1);
         }
-        let wrote = unsafe { pipe_write(pipe_idx, &scratch[..n]) };
+        let wrote = pipes::write(pipe_idx, &scratch[..n]);
         if wrote == 0 {
-            if unsafe { pipe_has_readers(pipe_idx) } {
+            if pipes::has_readers(pipe_idx) {
                 return None;
             }
             return Some(-1);
@@ -431,7 +485,7 @@ fn sys_read(
     }
     let entry = child.fds[fd];
     match entry.kind {
-        FD_CONSOLE => sys_read_console(alloc, child, dst, len),
+        FD_CONSOLE => sys_read_console(alloc, child, dst, len, mrs),
         FD_FS_SERVER_FILE if entry.readable => {
             SyscallResult::Reply(fs_server_read_file(alloc, child, entry, dst, len))
         }
@@ -439,8 +493,8 @@ fn sys_read(
             SyscallResult::Reply(fs_server_read_dir(alloc, child, entry, dst, len))
         }
         FD_PIPE_READ => {
-            let ret = unsafe { pipe_read(alloc, child, entry.aux, dst, len) };
-            if ret == 0 && unsafe { pipe_has_writers(entry.aux) } {
+            let ret = pipes::read(alloc, child, entry.aux, dst, len);
+            if ret == 0 && pipes::has_writers(entry.aux) {
                 block_pipe_reader(alloc, child, fd, dst, len, mrs);
                 SyscallResult::Block
             } else {
@@ -451,8 +505,18 @@ fn sys_read(
     }
 }
 
-fn sys_read_console(alloc: &mut Allocator, child: &Child, dst: u64, len: usize) -> SyscallResult {
+fn sys_read_console(
+    alloc: &mut Allocator,
+    child: &mut Child,
+    dst: u64,
+    len: usize,
+    mrs: &[u64; 64],
+) -> SyscallResult {
     if CONSOLE_INPUT.is_empty() {
+        if let Some(ret) = try_read_dynamic_console(alloc, child, dst, len) {
+            return SyscallResult::Reply(ret);
+        }
+        block_console_reader(alloc, child, dst, len, mrs);
         return SyscallResult::Block;
     }
     unsafe {
@@ -472,8 +536,62 @@ fn sys_read_console(alloc: &mut Allocator, child: &Child, dst: u64, len: usize) 
     }
 }
 
+fn block_console_reader(
+    alloc: &mut Allocator,
+    child: &mut Child,
+    dst: u64,
+    len: usize,
+    mrs: &[u64; 64],
+) {
+    let reply_slot = alloc.alloc_slot();
+    call_checked(
+        ROOT_CNODE,
+        LABEL_CNODE_SAVE_CALLER,
+        &[],
+        &[reply_slot, ROOT_CNODE_DEPTH],
+    );
+    let mut reply_mrs = [0u64; 11];
+    reply_mrs.copy_from_slice(&mrs[..11]);
+    reply_mrs[0] = mrs[0].wrapping_add(4);
+
+    child.state = PROC_CONSOLE_READ;
+    child.console_reply_slot = reply_slot;
+    child.console_reply_mrs = reply_mrs;
+    child.console_buf = dst;
+    child.console_len = len;
+}
+
+fn try_read_dynamic_console(
+    alloc: &mut Allocator,
+    child: &Child,
+    dst: u64,
+    len: usize,
+) -> Option<i64> {
+    let mut scratch = [0u8; 64];
+    let max = min(len, scratch.len());
+    let mut n = 0usize;
+    while n < max {
+        let ch = getchar();
+        if ch < 0 {
+            break;
+        }
+        scratch[n] = ch as u8;
+        n += 1;
+    }
+    if n == 0 {
+        return None;
+    }
+    if !copy_to_child(alloc, child, dst, &scratch[..n]) {
+        return Some(-1);
+    }
+    for b in &scratch[..n] {
+        putchar(*b);
+    }
+    Some(n as i64)
+}
+
 fn fs_server_open(child: &Child, path: &[u8], flags: u32) -> Option<FsServerMeta> {
-    if path.is_empty() || path.len() > 128 || unsafe { FS_SERVER_EP } == 0 {
+    if path.is_empty() || path.len() > 128 {
         return None;
     }
     let mut mrs = [0u64; 21];
@@ -488,14 +606,8 @@ fn fs_server_open(child: &Child, path: &[u8], flags: u32) -> Option<FsServerMeta
         i += 1;
     }
     let len = 5 + path.len().div_ceil(8);
-    let reply = unsafe {
-        sel4_call(
-            FS_SERVER_EP,
-            msg_info(FS_OP_OPEN, 0, 0, len as u64),
-            &mrs[..len],
-        )
-    };
-    if msg_label(reply.info) != 0 || reply.mrs[0] != XV6_OK {
+    let reply = fs_server_call(FS_OP_OPEN, &mrs[..len])?;
+    if reply.mrs[0] != XV6_OK {
         return None;
     }
     Some(FsServerMeta {
@@ -566,7 +678,7 @@ fn fs_server_read_stream(
     len: usize,
     op: u64,
 ) -> i64 {
-    let Some(offset) = fd_offset(entry) else {
+    let Some(offset) = files::offset(entry) else {
         return -1;
     };
     let mut done = 0usize;
@@ -588,29 +700,23 @@ fn fs_server_read_stream(
             break;
         }
     }
-    advance_fd_offset(entry, done);
+    files::advance_offset(entry, done);
     done as i64
 }
 
 fn fs_server_read_chunk(op: u64, inum: u32, offset: usize, len: usize) -> Option<usize> {
-    if unsafe { FS_SERVER_EP } == 0 {
-        return None;
-    }
     let request = min(len, FS_BLOCK_SIZE);
-    let reply = unsafe {
-        sel4_call(
-            FS_SERVER_EP,
-            msg_info(op, 0, 0, 5),
-            &[
-                XV6_HOST_TO_FS_PROTOCOL,
-                XV6_ABI_VERSION,
-                inum as u64,
-                offset as u64,
-                request as u64,
-            ],
-        )
-    };
-    if msg_label(reply.info) != 0 || reply.mrs[0] != XV6_OK {
+    let reply = fs_server_call(
+        op,
+        &[
+            XV6_HOST_TO_FS_PROTOCOL,
+            XV6_ABI_VERSION,
+            inum as u64,
+            offset as u64,
+            request as u64,
+        ],
+    )?;
+    if reply.mrs[0] != XV6_OK {
         return None;
     }
     let n = reply.mrs[1] as usize;
@@ -618,11 +724,11 @@ fn fs_server_read_chunk(op: u64, inum: u32, offset: usize, len: usize) -> Option
 }
 
 fn fs_server_write_file(entry: FdEntry, src: &[u8]) -> Option<usize> {
-    let offset = fd_offset(entry)?;
-    if src.is_empty() || unsafe { FS_SERVER_EP } == 0 {
+    let offset = files::offset(entry)?;
+    if src.is_empty() {
         return Some(0);
     }
-    let request = min(src.len(), FS_BLOCK_SIZE);
+    let request = min(src.len(), XV6_MAX_FILE_WRITE);
     unsafe {
         core::ptr::copy_nonoverlapping(
             src.as_ptr(),
@@ -631,20 +737,17 @@ fn fs_server_write_file(entry: FdEntry, src: &[u8]) -> Option<usize> {
         );
     }
     fence(Ordering::SeqCst);
-    let reply = unsafe {
-        sel4_call(
-            FS_SERVER_EP,
-            msg_info(FS_OP_WRITE, 0, 0, 5),
-            &[
-                XV6_HOST_TO_FS_PROTOCOL,
-                XV6_ABI_VERSION,
-                entry.aux as u64,
-                offset as u64,
-                request as u64,
-            ],
-        )
-    };
-    if msg_label(reply.info) != 0 || reply.mrs[0] != XV6_OK {
+    let reply = fs_server_call(
+        FS_OP_WRITE,
+        &[
+            XV6_HOST_TO_FS_PROTOCOL,
+            XV6_ABI_VERSION,
+            entry.aux as u64,
+            offset as u64,
+            request as u64,
+        ],
+    )?;
+    if reply.mrs[0] != XV6_OK {
         return None;
     }
     let n = reply.mrs[1] as usize;
@@ -652,21 +755,32 @@ fn fs_server_write_file(entry: FdEntry, src: &[u8]) -> Option<usize> {
 }
 
 fn fs_server_close(inum: u32) {
-    if unsafe { FS_SERVER_EP } == 0 {
-        return;
-    }
-    let _ = unsafe {
-        sel4_call(
-            FS_SERVER_EP,
-            msg_info(FS_OP_CLOSE, 0, 0, 3),
-            &[XV6_HOST_TO_FS_PROTOCOL, XV6_ABI_VERSION, inum as u64],
-        )
+    let _ = fs_server_call(
+        FS_OP_CLOSE,
+        &[XV6_HOST_TO_FS_PROTOCOL, XV6_ABI_VERSION, inum as u64],
+    );
+}
+
+fn fs_server_retain_inode(inum: u32) -> bool {
+    let Some(reply) = fs_server_call(
+        FS_OP_RETAIN,
+        &[XV6_HOST_TO_FS_PROTOCOL, XV6_ABI_VERSION, inum as u64],
+    ) else {
+        return false;
     };
+    reply.mrs[0] == XV6_OK
+}
+
+fn release_child_cwd(child: &mut Child) {
+    if child.cwd_inum != 0 {
+        fs_server_close(child.cwd_inum);
+        child.cwd_inum = 0;
+    }
 }
 
 fn fs_server_chdir(child: &Child, path: &[u8]) -> Option<u32> {
     let len = path.len();
-    if len == 0 || len > 128 || unsafe { FS_SERVER_EP } == 0 {
+    if len == 0 || len > 128 {
         return None;
     }
     let mut mrs = [0u64; 21];
@@ -676,14 +790,8 @@ fn fs_server_chdir(child: &Child, path: &[u8]) -> Option<u32> {
     mrs[4] = len as u64;
     pack_path_words(path, &mut mrs, 5);
     let msg_len = 5 + len.div_ceil(8);
-    let reply = unsafe {
-        sel4_call(
-            FS_SERVER_EP,
-            msg_info(FS_OP_CHDIR, 0, 0, msg_len as u64),
-            &mrs[..msg_len],
-        )
-    };
-    if msg_label(reply.info) == 0 && reply.mrs[0] == XV6_OK {
+    let reply = fs_server_call(FS_OP_CHDIR, &mrs[..msg_len])?;
+    if reply.mrs[0] == XV6_OK {
         Some(reply.mrs[1] as u32)
     } else {
         None
@@ -691,24 +799,18 @@ fn fs_server_chdir(child: &Child, path: &[u8]) -> Option<u32> {
 }
 
 fn fs_server_fstat(inum: u32) -> Option<(u16, u16, u64)> {
-    if unsafe { FS_SERVER_EP } == 0 {
-        return None;
-    }
-    let reply = unsafe {
-        sel4_call(
-            FS_SERVER_EP,
-            msg_info(FS_OP_FSTAT, 0, 0, 3),
-            &[XV6_HOST_TO_FS_PROTOCOL, XV6_ABI_VERSION, inum as u64],
-        )
-    };
-    if msg_label(reply.info) != 0 || reply.mrs[0] != XV6_OK {
+    let reply = fs_server_call(
+        FS_OP_FSTAT,
+        &[XV6_HOST_TO_FS_PROTOCOL, XV6_ABI_VERSION, inum as u64],
+    )?;
+    if reply.mrs[0] != XV6_OK {
         return None;
     }
     Some((reply.mrs[1] as u16, reply.mrs[2] as u16, reply.mrs[3]))
 }
 
 fn fs_server_unlink(child: &Child, path: &[u8]) -> bool {
-    if path.is_empty() || path.len() > 128 || unsafe { FS_SERVER_EP } == 0 {
+    if path.is_empty() || path.len() > 128 {
         return false;
     }
     let mut mrs = [0u64; 20];
@@ -718,23 +820,14 @@ fn fs_server_unlink(child: &Child, path: &[u8]) -> bool {
     mrs[3] = path.len() as u64;
     pack_path_words(path, &mut mrs, 4);
     let len = 4 + path.len().div_ceil(8);
-    let reply = unsafe {
-        sel4_call(
-            FS_SERVER_EP,
-            msg_info(FS_OP_UNLINK, 0, 0, len as u64),
-            &mrs[..len],
-        )
+    let Some(reply) = fs_server_call(FS_OP_UNLINK, &mrs[..len]) else {
+        return false;
     };
-    msg_label(reply.info) == 0 && reply.mrs[0] == XV6_OK
+    reply.mrs[0] == XV6_OK
 }
 
 fn fs_server_link(child: &Child, old_path: &[u8], new_path: &[u8]) -> bool {
-    if old_path.is_empty()
-        || old_path.len() > 128
-        || new_path.is_empty()
-        || new_path.len() > 128
-        || unsafe { FS_SERVER_EP } == 0
-    {
+    if old_path.is_empty() || old_path.len() > 128 || new_path.is_empty() || new_path.len() > 128 {
         return false;
     }
     let old_words = old_path.len().div_ceil(8);
@@ -748,18 +841,14 @@ fn fs_server_link(child: &Child, old_path: &[u8], new_path: &[u8]) -> bool {
     pack_path_words(old_path, &mut mrs, 5);
     pack_path_words(new_path, &mut mrs, 5 + old_words);
     let len = 5 + old_words + new_words;
-    let reply = unsafe {
-        sel4_call(
-            FS_SERVER_EP,
-            msg_info(FS_OP_LINK, 0, 0, len as u64),
-            &mrs[..len],
-        )
+    let Some(reply) = fs_server_call(FS_OP_LINK, &mrs[..len]) else {
+        return false;
     };
-    msg_label(reply.info) == 0 && reply.mrs[0] == XV6_OK
+    reply.mrs[0] == XV6_OK
 }
 
 fn fs_server_mkdir(child: &Child, path: &[u8]) -> bool {
-    if path.is_empty() || path.len() > 128 || unsafe { FS_SERVER_EP } == 0 {
+    if path.is_empty() || path.len() > 128 {
         return false;
     }
     let mut mrs = [0u64; 20];
@@ -769,18 +858,14 @@ fn fs_server_mkdir(child: &Child, path: &[u8]) -> bool {
     mrs[3] = path.len() as u64;
     pack_path_words(path, &mut mrs, 4);
     let len = 4 + path.len().div_ceil(8);
-    let reply = unsafe {
-        sel4_call(
-            FS_SERVER_EP,
-            msg_info(FS_OP_MKDIR, 0, 0, len as u64),
-            &mrs[..len],
-        )
+    let Some(reply) = fs_server_call(FS_OP_MKDIR, &mrs[..len]) else {
+        return false;
     };
-    msg_label(reply.info) == 0 && reply.mrs[0] == XV6_OK
+    reply.mrs[0] == XV6_OK
 }
 
 fn fs_server_mknod(child: &Child, path: &[u8], major: u16, minor: u16) -> bool {
-    if path.is_empty() || path.len() > 128 || unsafe { FS_SERVER_EP } == 0 {
+    if path.is_empty() || path.len() > 128 {
         return false;
     }
     let mut mrs = [0u64; 22];
@@ -792,14 +877,10 @@ fn fs_server_mknod(child: &Child, path: &[u8], major: u16, minor: u16) -> bool {
     mrs[5] = path.len() as u64;
     pack_path_words(path, &mut mrs, 6);
     let len = 6 + path.len().div_ceil(8);
-    let reply = unsafe {
-        sel4_call(
-            FS_SERVER_EP,
-            msg_info(FS_OP_MKNOD, 0, 0, len as u64),
-            &mrs[..len],
-        )
+    let Some(reply) = fs_server_call(FS_OP_MKNOD, &mrs[..len]) else {
+        return false;
     };
-    msg_label(reply.info) == 0 && reply.mrs[0] == XV6_OK
+    reply.mrs[0] == XV6_OK
 }
 
 fn fs_server_route_path_len(path: &[u8], out: &mut [u8; 128]) -> Option<usize> {
@@ -815,6 +896,34 @@ fn pack_path_words(path: &[u8], mrs: &mut [u64], start: usize) {
     while i < path.len() {
         mrs[start + i / 8] |= (path[i] as u64) << ((i % 8) * 8);
         i += 1;
+    }
+}
+
+fn fs_server_call(label: u64, mrs: &[u64]) -> Option<IpcMessage> {
+    let ep = unsafe { FS_SERVER_EP };
+    if ep == 0 {
+        return None;
+    }
+    let info = msg_info(label, 0, 0, mrs.len() as u64);
+    let mut retries = 0usize;
+    loop {
+        let reply = unsafe { sel4_call(ep, info, mrs) };
+        if msg_label(reply.info) != 0 {
+            return None;
+        }
+        if reply.mrs[0] != XV6_EBUSY {
+            return Some(reply);
+        }
+        retries += 1;
+        if retries >= FS_BUSY_RETRY_LIMIT {
+            log("xv6-host: fs busy retry exhausted op=");
+            print_u64(label);
+            log("\n");
+            return None;
+        }
+        unsafe {
+            sel4_yield();
+        }
     }
 }
 
@@ -869,22 +978,16 @@ fn sys_close(child: &mut Child, fd: usize) -> i64 {
 fn close_fd(child: &mut Child, fd: usize) {
     let entry = child.fds[fd];
     child.fds[fd] = FdEntry::closed();
-    if !release_open_file(entry) {
+    if !files::release(entry) {
         return;
     }
-    unsafe {
-        match entry.kind {
-            FD_PIPE_READ if entry.aux < MAX_PIPES && PIPES[entry.aux].readers > 0 => {
-                PIPES[entry.aux].readers -= 1;
-            }
-            FD_PIPE_WRITE if entry.aux < MAX_PIPES && PIPES[entry.aux].writers > 0 => {
-                PIPES[entry.aux].writers -= 1;
-            }
-            FD_FS_SERVER_FILE | FD_FS_SERVER_DIR => {
-                fs_server_close(entry.aux as u32);
-            }
-            _ => {}
+    match entry.kind {
+        FD_PIPE_READ => pipes::close_reader(entry.aux),
+        FD_PIPE_WRITE => pipes::close_writer(entry.aux),
+        FD_FS_SERVER_FILE | FD_FS_SERVER_DIR => {
+            fs_server_close(entry.aux as u32);
         }
+        _ => {}
     }
 }
 
@@ -899,7 +1002,7 @@ fn sys_dup(child: &mut Child, fd: usize) -> i64 {
     for i in 0..MAX_FD {
         if child.fds[i].kind == FD_CLOSED {
             child.fds[i] = entry;
-            retain_open_file(entry);
+            files::retain(entry);
             return i as i64;
         }
     }
@@ -992,6 +1095,32 @@ fn sys_sbrk(alloc: &mut Allocator, child: &mut Child, increment: i64, mode: u64)
     }
     child.brk = new_brk;
     old as i64
+}
+
+fn sys_pause(
+    alloc: &mut Allocator,
+    child: &mut Child,
+    ticks: i64,
+    mrs: &[u64; 64],
+) -> SyscallResult {
+    if ticks <= 0 {
+        return SyscallResult::Reply(0);
+    }
+    let reply_slot = alloc.alloc_slot();
+    call_checked(
+        ROOT_CNODE,
+        LABEL_CNODE_SAVE_CALLER,
+        &[],
+        &[reply_slot, ROOT_CNODE_DEPTH],
+    );
+    let mut reply_mrs = [0u64; 11];
+    reply_mrs.copy_from_slice(&mrs[..11]);
+    reply_mrs[0] = mrs[0].wrapping_add(4);
+    child.state = PROC_SLEEPING;
+    child.sleep_deadline = unsafe { TICKS }.wrapping_add(ticks as u64);
+    child.sleep_reply_slot = reply_slot;
+    child.sleep_reply_mrs = reply_mrs;
+    SyscallResult::Block
 }
 
 fn reserve_sparse_eager(child: &mut Child, bytes: u64) -> bool {
@@ -1110,6 +1239,11 @@ fn sys_fork(
     }
     child.fds = parent.fds;
     child.cwd_inum = parent.cwd_inum;
+    if !fs_server_retain_inode(child.cwd_inum) {
+        clear_process_mappings(alloc, child.pid);
+        destroy_child_objects(alloc, &child);
+        return -1;
+    }
     retain_fd_refs(&child);
     clone_address_space(alloc, &parent, &child);
 
@@ -1154,6 +1288,7 @@ fn make_zombie_process(
 ) {
     let pid = procs[proc_idx].pid;
     release_all_sparse_eager(&mut procs[proc_idx]);
+    release_child_cwd(&mut procs[proc_idx]);
     close_all_fds(&mut procs[proc_idx]);
     drop_blocked_reply_caps(alloc, &mut procs[proc_idx]);
     procs[proc_idx].state = PROC_ZOMBIE;
@@ -1278,6 +1413,7 @@ fn reparent_children(alloc: &mut Allocator, procs: &mut [Child; MAX_PROCS], exit
 
 fn reap_process(alloc: &mut Allocator, child: &mut Child) {
     release_all_sparse_eager(child);
+    release_child_cwd(child);
     clear_process_mappings(alloc, child.pid);
     destroy_child_objects(alloc, child);
     *child = Child::empty();
@@ -1437,68 +1573,65 @@ fn sys_chdir(alloc: &mut Allocator, child: &mut Child, path_ptr: u64) -> i64 {
     let Some(cwd_inum) = fs_server_chdir(child, &server_path[..server_len]) else {
         return -1;
     };
+    if !fs_server_retain_inode(cwd_inum) {
+        return -1;
+    }
+    fs_server_close(child.cwd_inum);
     child.cwd_inum = cwd_inum;
     0
 }
 
 fn sys_pipe(alloc: &mut Allocator, child: &mut Child, fds_ptr: u64) -> i64 {
-    unsafe {
-        let mut pipe_idx = MAX_PIPES;
-        for i in 0..MAX_PIPES {
-            if PIPES[i].readers == 0 && PIPES[i].writers == 0 {
-                pipe_idx = i;
-                break;
-            }
-        }
-        if pipe_idx == MAX_PIPES {
-            return -1;
-        }
-
-        let Some(read_fd) = find_free_fd(child) else {
-            return -1;
-        };
-        let Some(read_file) = alloc_open_file() else {
-            return -1;
-        };
-        child.fds[read_fd] = FdEntry {
-            kind: FD_PIPE_READ,
-            file: read_file,
-            aux: pipe_idx,
-            readable: true,
-            writable: false,
-        };
-        let Some(write_fd) = find_free_fd(child) else {
-            child.fds[read_fd] = FdEntry::closed();
-            close_open_file(read_file);
-            return -1;
-        };
-        let Some(write_file) = alloc_open_file() else {
-            child.fds[read_fd] = FdEntry::closed();
-            close_open_file(read_file);
-            return -1;
-        };
-
-        PIPES[pipe_idx] = Pipe::closed();
-        PIPES[pipe_idx].readers = 1;
-        PIPES[pipe_idx].writers = 1;
-        child.fds[write_fd] = FdEntry {
-            kind: FD_PIPE_WRITE,
-            file: write_file,
-            aux: pipe_idx,
-            readable: false,
-            writable: true,
-        };
-
-        let mut out = [0u8; 8];
-        write_i32(&mut out, 0, read_fd as i32);
-        write_i32(&mut out, 4, write_fd as i32);
-        if !copy_to_child(alloc, child, fds_ptr, &out) {
-            close_fd(child, read_fd);
-            close_fd(child, write_fd);
-            return -1;
-        }
-        0
+    let Some(pipe_idx) = pipes::alloc_unused() else {
+        return -1;
+    };
+    let Some(read_fd) = find_free_fd(child) else {
+        return -1;
+    };
+    let Some(read_file) = files::alloc() else {
+        return -1;
+    };
+    child.fds[read_fd] = FdEntry {
+        kind: FD_PIPE_READ,
+        file: read_file,
+        aux: pipe_idx,
+        readable: true,
+        writable: false,
+    };
+    let Some(write_fd) = find_free_fd(child) else {
+        child.fds[read_fd] = FdEntry::closed();
+        files::force_close(read_file);
+        return -1;
+    };
+    let Some(write_file) = files::alloc() else {
+        child.fds[read_fd] = FdEntry::closed();
+        files::force_close(read_file);
+        return -1;
+    };
+    if !pipes::init_pair(pipe_idx) {
+        child.fds[read_fd] = FdEntry::closed();
+        files::force_close(read_file);
+        files::force_close(write_file);
+        return -1;
     }
+
+    child.fds[write_fd] = FdEntry {
+        kind: FD_PIPE_WRITE,
+        file: write_file,
+        aux: pipe_idx,
+        readable: false,
+        writable: true,
+    };
+
+    let mut out = [0u8; 8];
+    write_i32(&mut out, 0, read_fd as i32);
+    write_i32(&mut out, 4, write_fd as i32);
+    if !copy_to_child(alloc, child, fds_ptr, &out) {
+        close_fd(child, read_fd);
+        close_fd(child, write_fd);
+        return -1;
+    }
+    0
 }
 
 fn sys_mknod(alloc: &mut Allocator, child: &Child, path_ptr: u64, major: u16, minor: u16) -> i64 {
@@ -1524,18 +1657,14 @@ pub(crate) fn init_fds(child: &mut Child) {
             child.fds[i] = FdEntry::closed();
             i += 1;
         }
-        let mut of = 0;
-        while of < MAX_OPEN_FILES {
-            OPEN_FILES[of] = OpenFile::closed();
-            of += 1;
-        }
-        let Some(stdin_file) = alloc_open_file() else {
+        files::reset_all();
+        let Some(stdin_file) = files::alloc() else {
             halt_loop();
         };
-        let Some(stdout_file) = alloc_open_file() else {
+        let Some(stdout_file) = files::alloc() else {
             halt_loop();
         };
-        let Some(stderr_file) = alloc_open_file() else {
+        let Some(stderr_file) = files::alloc() else {
             halt_loop();
         };
         child.fds[0] = FdEntry {
@@ -1559,18 +1688,14 @@ pub(crate) fn init_fds(child: &mut Child) {
             readable: true,
             writable: true,
         };
-        let mut p = 0;
-        while p < MAX_PIPES {
-            PIPES[p] = Pipe::closed();
-            p += 1;
-        }
+        pipes::reset_all();
         CONSOLE_INPUT_POS = 0;
     }
 }
 
 fn alloc_fd(child: &mut Child, kind: u8, aux: usize, readable: bool, writable: bool) -> i64 {
     if let Some(i) = find_free_fd(child) {
-        let Some(file) = alloc_open_file() else {
+        let Some(file) = files::alloc() else {
             return -1;
         };
         child.fds[i] = FdEntry {
@@ -1606,83 +1731,15 @@ fn find_free_proc(procs: &[Child; MAX_PROCS]) -> Option<usize> {
 
 fn retain_fd_refs(child: &Child) {
     for entry in child.fds {
-        retain_open_file(entry);
-    }
-}
-
-fn alloc_open_file() -> Option<usize> {
-    unsafe {
-        let mut i = 0;
-        while i < MAX_OPEN_FILES {
-            if !OPEN_FILES[i].used {
-                OPEN_FILES[i] = OpenFile {
-                    used: true,
-                    refs: 1,
-                    offset: 0,
-                };
-                return Some(i);
-            }
-            i += 1;
-        }
-    }
-    None
-}
-
-fn retain_open_file(entry: FdEntry) {
-    unsafe {
-        if entry.file < MAX_OPEN_FILES && OPEN_FILES[entry.file].used {
-            OPEN_FILES[entry.file].refs = OPEN_FILES[entry.file].refs.saturating_add(1);
-        }
-    }
-}
-
-fn release_open_file(entry: FdEntry) -> bool {
-    unsafe {
-        if entry.file >= MAX_OPEN_FILES || !OPEN_FILES[entry.file].used {
-            return false;
-        }
-        if OPEN_FILES[entry.file].refs > 1 {
-            OPEN_FILES[entry.file].refs -= 1;
-            return false;
-        }
-        OPEN_FILES[entry.file] = OpenFile::closed();
-        true
-    }
-}
-
-fn close_open_file(file: usize) {
-    unsafe {
-        if file < MAX_OPEN_FILES {
-            OPEN_FILES[file] = OpenFile::closed();
-        }
-    }
-}
-
-fn fd_offset(entry: FdEntry) -> Option<usize> {
-    unsafe {
-        if entry.file < MAX_OPEN_FILES && OPEN_FILES[entry.file].used {
-            Some(OPEN_FILES[entry.file].offset)
-        } else {
-            None
-        }
-    }
-}
-
-fn advance_fd_offset(entry: FdEntry, by: usize) {
-    unsafe {
-        if entry.file < MAX_OPEN_FILES && OPEN_FILES[entry.file].used {
-            OPEN_FILES[entry.file].offset = OPEN_FILES[entry.file].offset.saturating_add(by);
-        }
+        files::retain(entry);
     }
 }
 
 fn open_backing(entry: FdEntry) {
-    unsafe {
-        match entry.kind {
-            FD_PIPE_READ if entry.aux < MAX_PIPES => PIPES[entry.aux].readers += 1,
-            FD_PIPE_WRITE if entry.aux < MAX_PIPES => PIPES[entry.aux].writers += 1,
-            _ => {}
-        }
+    match entry.kind {
+        FD_PIPE_READ => pipes::add_reader(entry.aux),
+        FD_PIPE_WRITE => pipes::add_writer(entry.aux),
+        _ => {}
     }
 }
 
@@ -1772,67 +1829,6 @@ fn sys_mkdir(alloc: &mut Allocator, child: &Child, path_ptr: u64) -> i64 {
         0
     } else {
         -1
-    }
-}
-
-unsafe fn pipe_write(pipe_idx: usize, src: &[u8]) -> usize {
-    unsafe {
-        if pipe_idx >= MAX_PIPES || PIPES[pipe_idx].readers == 0 {
-            return 0;
-        }
-        let pipe = &mut PIPES[pipe_idx];
-        let mut n = 0;
-        while n < src.len() && pipe.len < PIPE_BUF {
-            let write_pos = (pipe.read_pos + pipe.len) % PIPE_BUF;
-            pipe.buf[write_pos] = src[n];
-            pipe.len += 1;
-            n += 1;
-        }
-        n
-    }
-}
-
-unsafe fn pipe_has_readers(pipe_idx: usize) -> bool {
-    unsafe { pipe_idx < MAX_PIPES && PIPES[pipe_idx].readers > 0 }
-}
-
-unsafe fn pipe_has_writers(pipe_idx: usize) -> bool {
-    unsafe { pipe_idx < MAX_PIPES && PIPES[pipe_idx].writers > 0 }
-}
-
-unsafe fn pipe_read(
-    alloc: &mut Allocator,
-    child: &Child,
-    pipe_idx: usize,
-    dst: u64,
-    len: usize,
-) -> i64 {
-    unsafe {
-        if pipe_idx >= MAX_PIPES {
-            return -1;
-        }
-        let pipe = &mut PIPES[pipe_idx];
-        if pipe.len == 0 {
-            return 0;
-        }
-
-        let mut total = 0usize;
-        let mut scratch = [0u8; 128];
-        while total < len && pipe.len > 0 {
-            let n = min(scratch.len(), min(len - total, pipe.len));
-            let mut i = 0;
-            while i < n {
-                scratch[i] = pipe.buf[pipe.read_pos];
-                pipe.read_pos = (pipe.read_pos + 1) % PIPE_BUF;
-                pipe.len -= 1;
-                i += 1;
-            }
-            if !copy_to_child(alloc, child, dst + total as u64, &scratch[..n]) {
-                return -1;
-            }
-            total += n;
-        }
-        total as i64
     }
 }
 

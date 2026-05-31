@@ -72,9 +72,11 @@ unsafe extern "C" {
 mod scause_code {
     pub const ENV_CALL_FROM_U: usize = 8;
     pub const SUPERVISOR_TIMER: usize = 5;
+    pub const SUPERVISOR_EXTERNAL: usize = 9;
 }
 
 const SIE_STIE: usize = 1 << 5;
+const SIE_SEIE: usize = 1 << 9;
 const SCOUNTEREN_TM: usize = 1 << 1;
 const TIMER_INTERVAL_TICKS: u64 = 20_000;
 static NEXT_TIMER_DEADLINE: AtomicU64 = AtomicU64::new(0);
@@ -85,7 +87,7 @@ const FAULT_VM_FAULT: u64 = 5;
 
 pub fn init_timer() {
     csr::set_scounteren(csr::scounteren() | SCOUNTEREN_TM);
-    csr::set_sie(csr::sie() | SIE_STIE);
+    csr::set_sie(csr::sie() | SIE_STIE | SIE_SEIE);
     program_next_timer();
 }
 
@@ -139,6 +141,10 @@ pub extern "C" fn handle_trap_rust(uc: &mut UserContext) -> *mut UserContext {
         match code {
             scause_code::SUPERVISOR_TIMER => {
                 handle_timer_interrupt();
+                return kernel_exit(uc);
+            }
+            scause_code::SUPERVISOR_EXTERNAL => {
+                service_pending_external_interrupt();
                 return kernel_exit(uc);
             }
             _ => {
@@ -453,6 +459,18 @@ fn handle_timer_interrupt() {
     }
 }
 
+fn service_pending_external_interrupt() -> bool {
+    let irq = crate::machine::plic::claim();
+    if irq == 0 {
+        return false;
+    }
+    let delivered = unsafe { crate::object::irq::signal_irq(irq as u64) };
+    if !delivered {
+        crate::machine::plic::complete(irq);
+    }
+    true
+}
+
 /// Program `satp` for the TCB we're about to resume.
 ///
 /// Reads the TCB's `vspace_cap` (a `PageTable` cap whose `base_ptr` is
@@ -545,10 +563,12 @@ fn kernel_exit(uc: &mut UserContext) -> *mut UserContext {
         }
 
         // We are still in the kernel trap path here, with sscratch=0.
-        // Taking a real nested timer interrupt would therefore go down
-        // the kernel-trap panic path, so idle by polling the timer
-        // deadline and servicing it explicitly.
-        if !service_due_timer_interrupts() {
+        // Taking a real nested interrupt would therefore go down the
+        // kernel-trap panic path, so idle by explicitly servicing timer
+        // deadlines and already-pending external IRQs.
+        let serviced_timer = service_due_timer_interrupts();
+        let serviced_external = service_pending_external_interrupt();
+        if !serviced_timer && !serviced_external {
             core::hint::spin_loop();
         }
     }
@@ -582,6 +602,9 @@ fn handle_syscall(uc: &mut UserContext) {
         syscall::SYS_DEBUG_PUT_CHAR => {
             let ch = uc.regs[reg::A0] as u8;
             sbi::console_putchar(ch);
+        }
+        syscall::SYS_DEBUG_GET_CHAR => {
+            uc.regs[reg::A0] = sbi::console_getchar() as i64 as u64;
         }
         syscall::SYS_DEBUG_NAME_THREAD => {
             // No-op for M2.2. The name is read from the IPC buffer in the

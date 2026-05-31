@@ -419,6 +419,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     let satp = satp_for(root_pt, 1);
     crate::println!("  satp <- {:#x}", satp);
     unsafe { switch_satp(satp) };
+    crate::machine::plic::init();
 
     unsafe {
         let t = &raw mut ROOTSERVER_TCB;

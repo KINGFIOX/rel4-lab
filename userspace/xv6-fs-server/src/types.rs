@@ -5,6 +5,7 @@ pub(crate) const DINODES_PER_BLOCK: u32 = (FS_BLOCK_SIZE / DINODE_SIZE) as u32;
 pub(crate) const BPB: u32 = (FS_BLOCK_SIZE * 8) as u32;
 pub(crate) const FS_MAX_TRACKED_INODES: usize = 512;
 pub(crate) const XV6_LOG_MAX_BLOCKS: usize = 30;
+pub(crate) const FS_BLOCK_CACHE_CAP: usize = 16;
 
 #[derive(Copy, Clone)]
 pub(crate) struct FsState {
@@ -54,3 +55,9 @@ pub(crate) static mut LOG_LEN: usize = 0;
 pub(crate) static mut LOG_BLOCKNOS: [u32; XV6_LOG_MAX_BLOCKS] = [0; XV6_LOG_MAX_BLOCKS];
 pub(crate) static mut LOG_BLOCKS: [[u8; FS_BLOCK_SIZE]; XV6_LOG_MAX_BLOCKS] =
     [[0; FS_BLOCK_SIZE]; XV6_LOG_MAX_BLOCKS];
+pub(crate) static mut BLOCK_CACHE_VALID: [bool; FS_BLOCK_CACHE_CAP] = [false; FS_BLOCK_CACHE_CAP];
+pub(crate) static mut BLOCK_CACHE_BLOCKNOS: [u32; FS_BLOCK_CACHE_CAP] = [0; FS_BLOCK_CACHE_CAP];
+pub(crate) static mut BLOCK_CACHE_AGES: [u64; FS_BLOCK_CACHE_CAP] = [0; FS_BLOCK_CACHE_CAP];
+pub(crate) static mut BLOCK_CACHE_DATA: [[u8; FS_BLOCK_SIZE]; FS_BLOCK_CACHE_CAP] =
+    [[0; FS_BLOCK_SIZE]; FS_BLOCK_CACHE_CAP];
+pub(crate) static mut BLOCK_CACHE_CLOCK: u64 = 1;

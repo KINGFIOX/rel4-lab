@@ -57,6 +57,9 @@ pub unsafe fn is_active(irq: u64) -> bool {
 pub unsafe fn issue_handler(irq: u64) {
     if let Some(e) = unsafe { entry_mut(irq) } {
         e.active = true;
+        if irq as usize <= PLIC_MAX_IRQ {
+            crate::machine::plic::enable_irq(irq as usize);
+        }
     }
 }
 
@@ -64,6 +67,9 @@ pub unsafe fn delete_handler(irq: u64) {
     if let Some(e) = unsafe { entry_mut(irq) } {
         unsafe { clear_notification_slot(e) };
         e.active = false;
+        if irq as usize <= PLIC_MAX_IRQ {
+            crate::machine::plic::disable_irq(irq as usize);
+        }
     }
 }
 
@@ -95,12 +101,20 @@ unsafe fn clear_notification_slot(e: &mut IrqEntry) {
     }
 }
 
-pub unsafe fn signal_irq(irq: u64) {
+pub unsafe fn signal_irq(irq: u64) -> bool {
     if let Some(e) = unsafe { entry_mut(irq) } {
         let cap = e.notification_slot.cap;
         if cap.tag() == Some(CapTag::Notification) && cap.notification_can_send() {
             let ntfn = cap.notification_ptr() as *mut crate::object::notification::Notification;
             unsafe { crate::object::notification::signal(ntfn, cap.notification_badge()) };
+            return true;
         }
+    }
+    false
+}
+
+pub unsafe fn ack_irq(irq: u64) {
+    if irq as usize <= PLIC_MAX_IRQ {
+        crate::machine::plic::complete(irq as u32);
     }
 }

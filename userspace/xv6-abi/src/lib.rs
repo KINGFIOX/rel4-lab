@@ -42,13 +42,14 @@ pub const CONSOLE_INO: u32 = 3;
 pub const DIRSIZ: usize = 14;
 pub const DIRENT_SIZE: usize = 16;
 pub const FS_BLOCK_SIZE: usize = 1024;
+pub const XV6_MAX_FILE_WRITE: usize = ((10 - 1 - 1 - 2) / 2) * FS_BLOCK_SIZE;
 pub const DIRENTS_PER_BLOCK: usize = FS_BLOCK_SIZE / DIRENT_SIZE;
 
 pub const MAX_FD: usize = 32;
-pub const MAX_PIPES: usize = 8;
+pub const MAX_PIPES: usize = 32;
 pub const PIPE_BUF: usize = 512;
 pub const MAX_OPEN_FILES: usize = 128;
-pub const MAX_EXEC_ARGS: usize = 16;
+pub const MAX_EXEC_ARGS: usize = 32;
 pub const MAX_EXEC_ARG_LEN: usize = 128;
 pub const MAX_FS_NODES: usize = 256;
 pub const MAX_DIR_ENTRIES: usize = 2048;
@@ -73,10 +74,21 @@ pub const XV6_FS_TO_DISK_PROTOCOL: u64 = 0x7836_626c_6b;
 
 pub const XV6_SERVICE_ENDPOINT_CPTR: u64 = 2;
 pub const XV6_DISK_ENDPOINT_CPTR: u64 = 3;
+pub const XV6_DISK_IRQ_NTFN_CPTR: u64 = 4;
+pub const XV6_DISK_IRQ_HANDLER_CPTR: u64 = 5;
+pub const XV6_SERVER_CNODE_CPTR: u64 = 6;
+pub const XV6_SERVER_REPLY_CPTR: u64 = 7;
+// Legacy name kept for older call sites; cptr 9 now carries the completion
+// Notification send cap, not an endpoint cap.
+pub const XV6_DISK_COMPLETION_ENDPOINT_CPTR: u64 = 9;
+pub const XV6_DISK_COMPLETION_NTFN_CPTR: u64 = 9;
 pub const XV6_FS_SERVER_BADGE: u64 = 0x6673;
 pub const XV6_DISK_SERVER_BADGE: u64 = 0x6469_736b;
+pub const XV6_DISK_IRQ_BADGE: u64 = 0x6469_7271;
+pub const XV6_DISK_COMPLETION_BADGE: u64 = 0x6469_636d;
 
 pub const XV6_OK: u64 = 0;
+pub const XV6_EBUSY: u64 = 16;
 pub const XV6_EINVAL: u64 = 22;
 pub const XV6_ENOSYS: u64 = 38;
 
@@ -93,11 +105,13 @@ pub const FS_OP_LINK: u64 = 9;
 pub const FS_OP_MKDIR: u64 = 10;
 pub const FS_OP_EXEC_LOOKUP: u64 = 11;
 pub const FS_OP_READDIR: u64 = 12;
+pub const FS_OP_RETAIN: u64 = 13;
 
 pub const DISK_OP_GET_INFO: u64 = 1;
 pub const DISK_OP_READ: u64 = 2;
 pub const DISK_OP_WRITE: u64 = 3;
 pub const DISK_OP_FLUSH: u64 = 4;
+pub const DISK_OP_COMPLETE: u64 = 5;
 
 pub const VIRTIO_BLK_SECTOR_SIZE: usize = 512;
 pub const XV6_FS_SECTORS_PER_BLOCK: usize = FS_BLOCK_SIZE / VIRTIO_BLK_SECTOR_SIZE;
@@ -115,6 +129,9 @@ pub const VIRTIO0_IRQ: u64 = 1;
 pub const XV6_VIRTIO_MMIO_VADDR: u64 = 0x5000_0000;
 pub const XV6_VIRTIO_DMA_VADDR: u64 = 0x5000_1000;
 pub const XV6_DISK_SHARED_BUFFER_VADDR: u64 = 0x5000_2000;
+pub const XV6_DISK_COMPLETION_RING_VADDR: u64 = 0x5000_3000;
+pub const XV6_DISK_COMPLETION_RING_ENTRIES: usize = 32;
+pub const XV6_DISK_COMPLETION_ENTRY_WORDS: usize = 5;
 
 pub const VIRTIO_MMIO_MAGIC_VALUE: u64 = 0x000;
 pub const VIRTIO_MMIO_VERSION: u64 = 0x004;
@@ -144,6 +161,7 @@ pub const VIRTIO_CONFIG_S_FEATURES_OK: u32 = 8;
 
 pub const VIRTIO_BLK_F_RO: u32 = 5;
 pub const VIRTIO_BLK_F_SCSI: u32 = 7;
+pub const VIRTIO_BLK_F_FLUSH: u32 = 9;
 pub const VIRTIO_BLK_F_CONFIG_WCE: u32 = 11;
 pub const VIRTIO_BLK_F_MQ: u32 = 12;
 pub const VIRTIO_F_ANY_LAYOUT: u32 = 27;
@@ -157,9 +175,12 @@ pub const VIRTIO_MMIO_VENDOR_QEMU: u32 = 0x554d_4551;
 
 pub const VIRTIO_BLK_T_IN: u32 = 0;
 pub const VIRTIO_BLK_T_OUT: u32 = 1;
+pub const VIRTIO_BLK_T_FLUSH: u32 = 4;
 pub const VIRTQ_DESC_F_NEXT: u16 = 1;
 pub const VIRTQ_DESC_F_WRITE: u16 = 2;
 pub const VIRTIO_QUEUE_NUM: usize = 8;
+pub const XV6_DISK_MAX_IN_FLIGHT: usize = 2;
+pub const XV6_DISK_SHARED_BUFFER_SLOTS: usize = 4;
 
 #[repr(C)]
 #[derive(Copy, Clone)]

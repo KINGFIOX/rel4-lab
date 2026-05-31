@@ -652,6 +652,7 @@ pub fn handle_irq_handler(
     match label_id {
         id if label_matches(id, label::IRQ_ACK) => {
             observe_label_shift((id - label::IRQ_ACK) as usize);
+            unsafe { crate::object::irq::ack_irq(irq) };
             Ok(())
         }
         id if label_matches(id, label::IRQ_SET_HANDLER) => {

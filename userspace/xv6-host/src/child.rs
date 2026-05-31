@@ -10,7 +10,6 @@ use sel4_user::{
 };
 
 static mut MAPPINGS: [Mapping; MAX_MAPPINGS] = [Mapping {
-    proc_slot: 0,
     pid: 0,
     child_page: 0,
     alias_page: 0,
@@ -18,19 +17,17 @@ static mut MAPPINGS: [Mapping; MAX_MAPPINGS] = [Mapping {
     alias_slot: 0,
     writable: false,
     executable: false,
+    pool_frame: false,
 }; MAX_MAPPINGS];
 static mut MAPPING_COUNT: usize = 0;
 
 #[derive(Copy, Clone)]
 struct FramePoolEntry {
-    proc_slot: usize,
     frame_slot: u64,
 }
 
-static mut FRAME_POOL: [FramePoolEntry; FRAME_POOL_CAP] = [FramePoolEntry {
-    proc_slot: 0,
-    frame_slot: 0,
-}; FRAME_POOL_CAP];
+static mut FRAME_POOL: [FramePoolEntry; FRAME_POOL_CAP] =
+    [FramePoolEntry { frame_slot: 0 }; FRAME_POOL_CAP];
 static mut FRAME_POOL_LEN: usize = 0;
 
 pub(crate) fn create_child(
@@ -41,12 +38,11 @@ pub(crate) fn create_child(
     fault_ep: u64,
 ) -> Child {
     let untyped = alloc.process_untyped(proc_slot);
-    create_child_from_untyped(alloc, proc_slot, pid, parent_pid, fault_ep, untyped)
+    create_child_from_untyped(alloc, pid, parent_pid, fault_ep, untyped)
 }
 
 pub(crate) fn create_child_from_untyped(
     alloc: &mut Allocator,
-    proc_slot: usize,
     pid: u64,
     parent_pid: u64,
     fault_ep: u64,
@@ -58,18 +54,7 @@ pub(crate) fn create_child_from_untyped(
     let ipc_frame = alloc.retype_one_from(untyped, OBJ_4K, 0);
 
     call_checked(INIT_ASID_POOL, LABEL_RISCV_ASID_POOL_ASSIGN, &[vspace], &[]);
-    map_existing_frame(
-        alloc,
-        proc_slot,
-        pid,
-        ipc_frame,
-        vspace,
-        CHILD_IPC_BUFFER,
-        true,
-        false,
-        false,
-        false,
-    );
+    page_map(ipc_frame, vspace, CHILD_IPC_BUFFER, true, false);
 
     let mrs = [
         CHILD_FAULT_EP,
@@ -88,7 +73,6 @@ pub(crate) fn create_child_from_untyped(
 
     Child {
         pid,
-        proc_slot,
         parent_pid,
         state: PROC_RUNNABLE,
         exit_status: 0,
@@ -96,6 +80,7 @@ pub(crate) fn create_child_from_untyped(
         tcb,
         cnode,
         vspace,
+        ipc_frame,
         untyped,
         fault_ep,
         entry: 0,
@@ -114,6 +99,13 @@ pub(crate) fn create_child_from_untyped(
         pipe_buf: 0,
         pipe_len: 0,
         pipe_done: 0,
+        sleep_deadline: 0,
+        sleep_reply_slot: 0,
+        sleep_reply_mrs: [0; 11],
+        console_reply_slot: 0,
+        console_reply_mrs: [0; 11],
+        console_buf: 0,
+        console_len: 0,
     }
 }
 
@@ -121,11 +113,11 @@ pub(crate) fn destroy_child_objects(alloc: &mut Allocator, child: &Child) {
     if child.pid == 0 {
         return;
     }
-    clear_process_frame_pool(alloc, child.proc_slot);
     if child.tcb != 0 {
         call_checked(child.tcb, LABEL_TCB_SUSPEND, &[], &[]);
     }
     alloc.delete_cap_slot(child.tcb);
+    alloc.delete_cap_slot(child.ipc_frame);
     alloc.delete_cap_slot(child.cnode);
     alloc.delete_cap_slot(child.vspace);
     alloc.revoke_cap_slot(child.untyped);
@@ -345,16 +337,16 @@ pub(crate) fn map_fresh_child_page(
         let alias = ensure_alias_for_index(alloc, idx);
         return alias;
     }
-    let (frame_slot, owner_proc_slot, needs_zero) = alloc_process_frame(alloc, child);
+    let (frame_slot, needs_zero) = alloc_process_frame(alloc);
     map_existing_frame(
         alloc,
-        owner_proc_slot,
         child.pid,
         frame_slot,
         child.vspace,
         page,
         writable,
         executable,
+        true,
         true,
         needs_zero,
     )
@@ -371,10 +363,9 @@ pub(crate) fn map_lazy_child_page(
     if let Some(idx) = lookup_mapping_index(child.pid, page) {
         return unsafe { MAPPINGS[idx].alias_page };
     }
-    let (frame_slot, owner_proc_slot, needs_zero) = alloc_process_frame(alloc, child);
+    let (frame_slot, needs_zero) = alloc_process_frame(alloc);
     map_existing_frame(
         alloc,
-        owner_proc_slot,
         child.pid,
         frame_slot,
         child.vspace,
@@ -382,6 +373,7 @@ pub(crate) fn map_lazy_child_page(
         writable,
         executable,
         false,
+        true,
         needs_zero,
     )
 }
@@ -396,13 +388,13 @@ pub(crate) fn map_existing_child_frame(
 ) -> u64 {
     map_existing_frame(
         alloc,
-        child.proc_slot,
         child.pid,
         frame_slot,
         child.vspace,
         child_va,
         writable,
         executable,
+        false,
         false,
         false,
     )
@@ -428,7 +420,6 @@ pub(crate) fn frame_paddr(frame_slot: u64) -> u64 {
 
 fn map_existing_frame(
     alloc: &mut Allocator,
-    proc_slot: usize,
     pid: u64,
     frame_slot: u64,
     vspace: u64,
@@ -436,10 +427,11 @@ fn map_existing_frame(
     writable: bool,
     executable: bool,
     with_alias: bool,
+    pool_frame: bool,
     zero_frame: bool,
 ) -> u64 {
     let (mapping_slot, alias_va) =
-        register_mapping(proc_slot, pid, child_va, frame_slot, writable, executable);
+        register_mapping(pid, child_va, frame_slot, writable, executable, pool_frame);
     if with_alias {
         ensure_alias_for_index(alloc, mapping_slot);
         if zero_frame {
@@ -464,12 +456,12 @@ fn page_map(frame_slot: u64, vspace: u64, va: u64, writable: bool, executable: b
 }
 
 fn register_mapping(
-    proc_slot: usize,
     pid: u64,
     child_page: u64,
     frame_slot: u64,
     writable: bool,
     executable: bool,
+    pool_frame: bool,
 ) -> (usize, u64) {
     unsafe {
         let mut slot = MAPPING_COUNT;
@@ -493,7 +485,6 @@ fn register_mapping(
             MAPPINGS[slot].alias_page
         };
         MAPPINGS[slot] = Mapping {
-            proc_slot,
             pid,
             child_page: align_down(child_page),
             alias_page: alias,
@@ -501,6 +492,7 @@ fn register_mapping(
             alias_slot: 0,
             writable,
             executable,
+            pool_frame,
         };
         (slot, alias)
     }
@@ -519,9 +511,12 @@ fn unmap_mapping_at(alloc: &mut Allocator, slot: usize) {
             page_unmap(m.frame_slot);
         }
         alloc.delete_cap_slot(m.alias_slot);
-        release_process_frame(alloc, m.proc_slot, m.frame_slot);
+        if m.pool_frame {
+            release_process_frame(alloc, m.frame_slot);
+        } else {
+            alloc.delete_cap_slot(m.frame_slot);
+        }
         MAPPINGS[slot] = Mapping {
-            proc_slot: 0,
             pid: 0,
             child_page: 0,
             alias_page: m.alias_page,
@@ -529,6 +524,7 @@ fn unmap_mapping_at(alloc: &mut Allocator, slot: usize) {
             alias_slot: 0,
             writable: false,
             executable: false,
+            pool_frame: false,
         };
     }
 }
@@ -571,30 +567,22 @@ fn lookup_mapping(pid: u64, child_page: u64) -> Option<Mapping> {
     }
 }
 
-fn alloc_process_frame(alloc: &mut Allocator, child: &Child) -> (u64, usize, bool) {
+fn alloc_process_frame(alloc: &mut Allocator) -> (u64, bool) {
     unsafe {
         let mut i = FRAME_POOL_LEN;
         if i > 0 {
             i -= 1;
-            let owner_proc_slot = FRAME_POOL[i].proc_slot;
             let frame_slot = FRAME_POOL[i].frame_slot;
             FRAME_POOL_LEN -= 1;
             FRAME_POOL[i] = FRAME_POOL[FRAME_POOL_LEN];
-            FRAME_POOL[FRAME_POOL_LEN] = FramePoolEntry {
-                proc_slot: 0,
-                frame_slot: 0,
-            };
-            return (frame_slot, owner_proc_slot, true);
+            FRAME_POOL[FRAME_POOL_LEN] = FramePoolEntry { frame_slot: 0 };
+            return (frame_slot, true);
         }
     }
-    (
-        alloc.retype_one_from(child.untyped, OBJ_4K, 0),
-        child.proc_slot,
-        false,
-    )
+    (alloc.retype_one(OBJ_4K, 0), false)
 }
 
-fn release_process_frame(alloc: &mut Allocator, proc_slot: usize, frame_slot: u64) {
+fn release_process_frame(alloc: &mut Allocator, frame_slot: u64) {
     if frame_slot == 0 {
         return;
     }
@@ -604,30 +592,8 @@ fn release_process_frame(alloc: &mut Allocator, proc_slot: usize, frame_slot: u6
             alloc.delete_cap_slot(frame_slot);
             return;
         }
-        FRAME_POOL[len] = FramePoolEntry {
-            proc_slot,
-            frame_slot,
-        };
+        FRAME_POOL[len] = FramePoolEntry { frame_slot };
         FRAME_POOL_LEN = len + 1;
-    }
-}
-
-fn clear_process_frame_pool(alloc: &mut Allocator, proc_slot: usize) {
-    unsafe {
-        let mut i = 0;
-        while i < FRAME_POOL_LEN {
-            if FRAME_POOL[i].proc_slot == proc_slot {
-                alloc.delete_cap_slot(FRAME_POOL[i].frame_slot);
-                FRAME_POOL_LEN -= 1;
-                FRAME_POOL[i] = FRAME_POOL[FRAME_POOL_LEN];
-                FRAME_POOL[FRAME_POOL_LEN] = FramePoolEntry {
-                    proc_slot: 0,
-                    frame_slot: 0,
-                };
-            } else {
-                i += 1;
-            }
-        }
     }
 }
 
