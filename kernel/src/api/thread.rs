@@ -1,10 +1,9 @@
 //! "Current thread" view used by the syscall slow path.
 //!
-//! Historically a static singleton always describing the rootserver.
-//! Since M4.2c every thread runs out of a real `Tcb`; this struct is
-//! now a per-hart cache refreshed from `tcb::current()` on every context
-//! switch (see `refresh_from_tcb` below). Cap lookups and IPC-buffer access
-//! via this struct therefore follow whichever TCB the local scheduler picked.
+//! This is a per-hart cache refreshed from `tcb::current()` on every
+//! context switch (see `refresh_from_tcb` below). Cap lookups and
+//! IPC-buffer access through this struct therefore follow whichever TCB
+//! the local scheduler picked.
 
 #![allow(dead_code)]
 

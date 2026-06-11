@@ -1,10 +1,9 @@
 //! Slow-path syscall dispatch (Call / Send / Recv / ReplyRecv …).
 //!
-//! For M3 we only handle `seL4_Call`, since that's what the rootserver
-//! uses to drive cap invocations during bootstrap. The arch trap handler
-//! decodes the syscall number and routes here; we read message registers
-//! from the `UserContext`, perform the invocation, and write the reply
-//! back into the same context before returning to user mode.
+//! The arch trap handler decodes the syscall number and routes here. This
+//! module dispatches capability invocations, endpoint/notification IPC,
+//! replies, and MCS receive variants, then writes the seL4-style reply
+//! registers back into the saved `UserContext` before returning to user mode.
 
 #![allow(dead_code)]
 

@@ -6,8 +6,9 @@
 //! `capPtr` is the kernel-window VA of the start of the region. The
 //! region must be aligned to its size.
 //!
-//! For M3 we only implement the enumeration helpers — the actual
-//! `Untyped_Retype` syscall path is a separate file (TBD).
+//! This module only handles boot-time untyped range splitting and cap
+//! construction. The `Untyped_Retype` syscall path lives in
+//! `api::invocation`.
 
 #![allow(dead_code)]
 

@@ -70,7 +70,7 @@ pub unsafe extern "C" fn _start() -> ! {
         // Call init_kernel(a0..a7). The elfloader's args are already in place.
         "call   {init_kernel}",
 
-        // init_kernel currently returns; for M2 we just spin afterwards.
+        // init_kernel normally never returns. If it does, park the boot hart.
         "3:",
         "wfi",
         "j      3b",

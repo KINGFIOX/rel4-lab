@@ -1,8 +1,9 @@
 //! S-mode trap handling: assembly entry, Rust dispatcher, and the
 //! `UserContext` shape we save/restore through `sret`.
 //!
-//! For M2.2 the only user-mode trap we recognise is an `ecall` carrying a
-//! known seL4 syscall number in `a7`. Other exceptions panic the kernel.
+//! User `ecall`s are decoded as seL4 syscalls. User faults are delivered
+//! through the fault IPC path when a fault endpoint is configured; unsupported
+//! or kernel-mode traps halt the current thread or panic the kernel.
 
 use core::arch::global_asm;
 use log_crate::{error, warn};
@@ -556,27 +557,6 @@ fn send_timeout_fault_ipc() -> bool {
     send_timeout_fault_ipc_for(crate::object::tcb::current())
 }
 
-unsafe fn block_fault_sender(
-    cur: *mut crate::object::tcb::Tcb,
-    ep: *mut crate::object::endpoint::Endpoint,
-    badge: u64,
-    can_grant: bool,
-    can_grant_reply: bool,
-    label: u64,
-    len: u64,
-    mrs: [u64; 16],
-) {
-    use crate::object::endpoint;
-
-    if cur.is_null() || ep.is_null() {
-        return;
-    }
-    let _guard = unsafe { endpoint::lock_queue(ep) };
-    unsafe {
-        block_fault_sender_locked(cur, ep, badge, can_grant, can_grant_reply, label, len, mrs);
-    }
-}
-
 unsafe fn block_fault_sender_locked(
     cur: *mut crate::object::tcb::Tcb,
     ep: *mut crate::object::endpoint::Endpoint,
@@ -886,10 +866,6 @@ fn handle_debug_name_thread(uc: &UserContext) {
     debug_halt("SysDebugNameThread: Name too long, halting");
 }
 
-/// Walk the rootserver's PT for VA 0x10004000 and assert it still points
-/// at PA 0x8034D000 (the boot-time mapping). If a syscall ever stomps on
-/// the PT we'll catch it here. Disabled in release; left in until M3.7
-/// is debugged.
 /// Called when scause = environment call from U-mode.
 ///
 /// On RV64 seL4, the syscall number is passed in `a7` as a signed `isize`.
@@ -983,7 +959,7 @@ fn handle_syscall(uc: &mut UserContext) {
     }
 }
 
-/// Kernel-mode trap panic stub — referenced from `trap.S`.
+/// Kernel-mode trap panic entry — referenced from `trap.S`.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_trap_panic() -> ! {
     let cause = csr::scause();
@@ -993,7 +969,7 @@ pub extern "C" fn kernel_trap_panic() -> ! {
         "kernel-mode trap: scause={:#x} stval={:#x} sepc={:#x}",
         cause, stval, sepc
     );
-    panic!("kernel trap (M2: not handled)");
+    panic!("kernel trap");
 }
 
 /// Install `trap_entry` as the S-mode trap vector (`stvec`).

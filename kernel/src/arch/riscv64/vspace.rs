@@ -11,8 +11,7 @@ use crate::abi::constants::{
 };
 use crate::arch::riscv64::csr;
 use crate::arch::riscv64::sv39::{
-    PAGE_SIZE, PTE_A, PTE_D, PTE_G, PTE_R, PTE_U, PTE_V, PTE_W, PTE_X, PageTable, Pte, make_satp,
-    pt_index,
+    PTE_A, PTE_D, PTE_G, PTE_R, PTE_U, PTE_V, PTE_W, PTE_X, PageTable, Pte, make_satp, pt_index,
 };
 use crate::kernel::smp::{BklCell, BklObjectGuard};
 
@@ -29,25 +28,17 @@ fn lock_vspace(_root: *const PageTable) -> VspaceLockGuard {
 /// Convert a kernel-window (PSpace) virtual address to its physical
 /// address. The C kernel calls this `addrFromPPtr`.
 ///
-/// Only valid for VAs in `[PPTR_BASE, PPTR_TOP)`. **The PSpace window is
-/// not mapped by the elfloader**; it gets set up by us later in M3+. For
-/// boot-time use the `kpptr_to_paddr` / `paddr_to_kpptr` helpers below.
+/// Only valid for VAs in `[PPTR_BASE, PPTR_TOP)`. Boot code that runs before
+/// `make_boot_root_pt` installs the PSpace mappings must use
+/// `kpptr_to_paddr` / `paddr_to_kpptr` instead.
 #[inline]
-#[allow(dead_code)]
 pub const fn pptr_to_paddr(vaddr: usize) -> usize {
     vaddr - PPTR_BASE + PADDR_BASE
 }
 
 #[inline]
-#[allow(dead_code)]
 pub const fn paddr_to_pptr(paddr: usize) -> usize {
     paddr - PADDR_BASE + PPTR_BASE
-}
-
-#[inline]
-#[allow(dead_code)]
-pub const fn is_kernel_vaddr(va: usize) -> bool {
-    va >= PPTR_BASE && va < PPTR_TOP
 }
 
 /// Convert a kernel-ELF VA (anything in the kernel image: text, rodata,
@@ -73,10 +64,10 @@ pub const fn paddr_to_kpptr(paddr: usize) -> usize {
 
 // The boot pool backs kernel-owned page-table pages: the initial root
 // VSpace, the initial thread's boot-created user paging objects, and any
-// legacy kernel boot mappings. Normal user mappings are made through
-// user-visible `PageTable` caps retyped from Untyped, matching seL4's
-// explicit paging-object model. The initial boot-created user paging
-// objects are exposed through BootInfo's `userImagePaging` range.
+// kernel boot mappings. Normal user mappings are made through user-visible
+// `PageTable` caps retyped from Untyped, matching seL4's explicit
+// paging-object model. The initial boot-created user paging objects are
+// exposed through BootInfo's `userImagePaging` range.
 const BOOT_PT_POOL_PAGES: usize = 1024;
 
 #[repr(C, align(4096))]
@@ -115,25 +106,6 @@ pub fn alloc_pt_page() -> *mut PageTable {
             p
         }
     })
-}
-
-/// Read the currently active Sv39 root PT from `satp`. The elfloader places
-/// its boot PT inside its own image (low PA region) which is _not_ in our
-/// kernel ELF window nor in the PSpace window, so this returns the raw
-/// physical address — callers that want to read it must arrange a mapping.
-#[allow(dead_code)]
-pub fn current_root_pt_paddr() -> usize {
-    let satp = csr::satp();
-    (satp & ((1usize << 44) - 1)) << RISCV_PG_SHIFT
-}
-
-#[inline]
-pub const fn frame_size_bytes(size_class: u64) -> usize {
-    match size_class {
-        1 => 1 << (RISCV_PG_SHIFT + PT_INDEX_BITS),
-        2 => 1 << (RISCV_PG_SHIFT + PT_INDEX_BITS * 2),
-        _ => PAGE_SIZE,
-    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -227,46 +199,11 @@ unsafe fn lookup_pt_slot_user(
     Ok(PtSlotLookup { slot, bits_left })
 }
 
-/// Map a RISC-V frame cap at its natural Sv39 level:
+/// Prepare a RISC-V frame-cap mapping at its natural Sv39 level:
 ///
 /// * size class 0: 4 KiB leaf at level 0
 /// * size class 1: 2 MiB leaf at level 1
 /// * size class 2: 1 GiB leaf at level 2
-pub unsafe fn map_user_frame(
-    root: *mut PageTable,
-    vaddr: usize,
-    paddr: usize,
-    size_class: u64,
-    flags: u64,
-) -> Result<(), UserMapError> {
-    unsafe { map_user_frame_at(root, vaddr, paddr, size_class, flags, false) }
-}
-
-pub unsafe fn remap_user_frame(
-    root: *mut PageTable,
-    vaddr: usize,
-    paddr: usize,
-    size_class: u64,
-    flags: u64,
-) -> Result<(), UserMapError> {
-    unsafe { map_user_frame_at(root, vaddr, paddr, size_class, flags, true) }
-}
-
-unsafe fn map_user_frame_at(
-    root: *mut PageTable,
-    vaddr: usize,
-    paddr: usize,
-    size_class: u64,
-    flags: u64,
-    replace_existing_leaf: bool,
-) -> Result<(), UserMapError> {
-    let prepared = unsafe {
-        prepare_user_frame_map_at(root, vaddr, paddr, size_class, flags, replace_existing_leaf)?
-    };
-    unsafe { commit_user_frame_map(prepared) };
-    Ok(())
-}
-
 pub unsafe fn prepare_user_frame_map(
     root: *mut PageTable,
     vaddr: usize,
@@ -358,17 +295,6 @@ pub unsafe fn commit_user_page_table_map(prepared: PreparedUserPageTableMap) {
     }
     csr::sfence_vma_va(prepared.mapped_addr);
     crate::kernel::smp::remote_sfence_vma_all();
-}
-
-pub unsafe fn map_user_page_table(
-    root: *mut PageTable,
-    vaddr: usize,
-    pt_kva: *mut PageTable,
-) -> Result<usize, UserMapError> {
-    let prepared = unsafe { prepare_user_page_table_map(root, vaddr, pt_kva)? };
-    let mapped_addr = prepared.mapped_addr;
-    unsafe { commit_user_page_table_map(prepared) };
-    Ok(mapped_addr)
 }
 
 pub unsafe fn unmap_user_page_table(

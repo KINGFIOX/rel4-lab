@@ -1085,8 +1085,8 @@ pub fn reply_recv(uc: &mut UserContext) {
 /// "No sender, no payload" reply written into the syscall return
 /// registers. Used by `recv` when there's nothing pending and the
 /// caller asked for non-blocking semantics (or the cap was bogus).
-/// Mirrors the M3 stubbed behaviour so userspace doesn't see leftover
-/// register state from the trap path.
+/// Clears the returned badge/info/MR registers so userspace never observes
+/// stale trap-entry state for an empty receive.
 fn write_empty_reply(uc: &mut UserContext) {
     uc.regs[UserRegister::A0.index()] = 0;
     uc.regs[UserRegister::A1.index()] = 0;

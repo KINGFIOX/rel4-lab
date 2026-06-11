@@ -16,9 +16,8 @@
 //! slot holds another CNode cap, recursion continues; otherwise the
 //! lookup terminates with the cap and remaining bits.
 //!
-//! For M3.1 the rootserver only has a single root CNode and uses CPtrs
-//! that fit within its radix, so we implement the single-level case
-//! tail-call style with a manual loop (no recursion).
+//! The implementation walks nested CNodes iteratively under the CSpace lock,
+//! matching seL4's depth-limited lookup model without using recursion.
 
 #![allow(dead_code)]
 
@@ -108,17 +107,6 @@ pub fn lookup_cap_in(
             (*r.slot).cap
         };
         Ok((cap, r.slot))
-    }
-}
-
-/// Variant used by invocations that need a *specific* cap type. Returns
-/// the slot pointer alongside the cap so the caller can mutate the cte.
-pub fn lookup_cap_of(thread: &Thread, cptr: u64, want: CapTag) -> Option<(Cap, *mut Cte)> {
-    let (cap, slot) = lookup_cap(thread, cptr).ok()?;
-    if cap.tag() == Some(want) {
-        Some((cap, slot))
-    } else {
-        None
     }
 }
 
