@@ -1,0 +1,7 @@
+[submodule "third_party/xv6-riscv"]
+	path = third_party/xv6-riscv
+	url = https://github.com/mit-pdos/xv6-riscv
+
+[submodule "third_party/sel4-lab"]
+	path = third_party/sel4-lab
+	url = git@github.com:KINGFIOX/sel4-lab.git
