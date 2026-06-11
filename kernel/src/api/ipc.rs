@@ -50,8 +50,10 @@ use crate::object::tcb;
 /// `seL4_MsgMaxLength` (libsel4/include/sel4/constants.h).
 const MSG_MAX_LENGTH: u64 = 120;
 const MSG_MAX_EXTRA_CAPS: u64 = 3;
+const MSG_MAX_EXTRA_CAPS_USIZE: usize = MSG_MAX_EXTRA_CAPS as usize;
 const MR_REG_COUNT: u64 = 4;
 const MR_REG_COUNT_USIZE: usize = MR_REG_COUNT as usize;
+type ExtraCapSlots = [u64; MSG_MAX_EXTRA_CAPS_USIZE];
 
 #[repr(usize)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -77,6 +79,7 @@ unsafe fn transfer_message(
     badge: u64,
     endpoint: *mut endpoint::Endpoint,
     can_grant: bool,
+    extra_cap_slots: ExtraCapSlots,
 ) {
     let label = info_in.label();
     let mut length = info_in.length();
@@ -88,24 +91,41 @@ unsafe fn transfer_message(
     unsafe { tcb::write_ipc_message_regs(receiver, badge, &mr_regs, length) };
 
     unsafe {
+        let mut transferred_length = length;
         if length > MR_REG_COUNT {
-            let extra = length - MR_REG_COUNT;
-            tcb::copy_ipc_buffer_words(sender, receiver, 1 + MR_REG_COUNT_USIZE, extra as usize);
+            if tcb::has_ipc_buffer(sender) && tcb::has_ipc_buffer(receiver) {
+                let extra = length - MR_REG_COUNT;
+                tcb::copy_ipc_buffer_words(
+                    sender,
+                    receiver,
+                    1 + MR_REG_COUNT_USIZE,
+                    extra as usize,
+                );
+            } else {
+                transferred_length = MR_REG_COUNT;
+            }
         }
 
-        let (caps_unwrapped, extra_caps) =
-            transfer_caps(sender, receiver, info_in, endpoint, can_grant);
-        let info_out = MessageInfo::new(label, caps_unwrapped, extra_caps, length);
+        let (caps_unwrapped, extra_caps) = transfer_caps(
+            sender,
+            receiver,
+            info_in,
+            endpoint,
+            can_grant,
+            extra_cap_slots,
+        );
+        let info_out = MessageInfo::new(label, caps_unwrapped, extra_caps, transferred_length);
         tcb::write_message_info(receiver, info_out.0);
     }
 }
 
 unsafe fn transfer_caps(
-    sender: *mut tcb::Tcb,
+    _sender: *mut tcb::Tcb,
     receiver: *mut tcb::Tcb,
     info_in: MessageInfo,
     endpoint: *mut endpoint::Endpoint,
     can_grant: bool,
+    extra_cap_slots: ExtraCapSlots,
 ) -> (u64, u64) {
     if !can_grant {
         return (0, 0);
@@ -114,17 +134,23 @@ unsafe fn transfer_caps(
     if requested == 0 {
         return (0, 0);
     }
+    if extra_cap_slots[0] == 0 || !tcb::has_ipc_buffer(receiver) {
+        return (0, 0);
+    }
 
     let mut dest_slot = unsafe { get_receive_slot(receiver) };
     let mut caps_unwrapped = 0u64;
     let mut transferred = 0u64;
 
     for i in 0..requested as usize {
-        let cptr = tcb::ipc_buffer_word_snapshot(sender, IpcBufferSlot::CapsOrBadges.index() + i);
-        let (src_cap, src_slot) = match unsafe { lookup_cap_in_tcb(sender, cptr) } {
-            Some(v) => v,
-            None => break,
-        };
+        let src_slot = extra_cap_slots[i] as *mut Cte;
+        if src_slot.is_null() {
+            break;
+        }
+        let src_cap = crate::object::cnode::cap_snapshot(src_slot);
+        if src_cap.is_null() {
+            break;
+        }
 
         if src_cap.tag() == Some(CapTag::Endpoint)
             && !endpoint.is_null()
@@ -140,23 +166,52 @@ unsafe fn transfer_caps(
                 break;
             }
             caps_unwrapped |= 1u64 << i;
-        } else {
-            let dst = match dest_slot {
-                Some(s) => s,
-                None => break,
-            };
-            let derived = match unsafe { derive_transfer_cap(src_slot, src_cap) } {
-                Some(c) => c,
-                None => break,
-            };
-            unsafe { insert_derived_cap(src_slot, dst, derived) };
-            dest_slot = None;
+            transferred = i as u64 + 1;
+            continue;
+        };
+
+        let dst = match dest_slot {
+            Some(s) => s,
+            None => break,
+        };
+        let derived = match unsafe { derive_transfer_cap(src_slot, src_cap) } {
+            Some(c) => c,
+            None => break,
+        };
+        if !unsafe { insert_derived_cap(src_slot, dst, derived) } {
+            break;
         }
+        dest_slot = None;
 
         transferred = i as u64 + 1;
     }
 
     (caps_unwrapped, transferred)
+}
+
+fn snapshot_extra_cap_slots(
+    sender: *mut tcb::Tcb,
+    info: MessageInfo,
+    can_grant: bool,
+) -> Result<ExtraCapSlots, u64> {
+    let mut slots = [0u64; MSG_MAX_EXTRA_CAPS_USIZE];
+    if sender.is_null() || !can_grant {
+        return Ok(slots);
+    }
+    let requested = info.extra_caps().min(MSG_MAX_EXTRA_CAPS) as usize;
+    if requested == 0 || !tcb::has_ipc_buffer(sender) {
+        return Ok(slots);
+    }
+
+    for (i, slot_out) in slots.iter_mut().enumerate().take(requested) {
+        let cptr = tcb::ipc_buffer_word_snapshot(sender, IpcBufferSlot::CapsOrBadges.index() + i);
+        let Some(slot) = (unsafe { lookup_slot_in_tcb(sender, cptr) }) else {
+            return Err(cptr);
+        };
+        *slot_out = slot as u64;
+    }
+
+    Ok(slots)
 }
 
 unsafe fn lookup_cap_in_tcb(t: *mut tcb::Tcb, cptr: u64) -> Option<(Cap, *mut Cte)> {
@@ -172,6 +227,21 @@ unsafe fn lookup_cap_in_tcb(t: *mut tcb::Tcb, cptr: u64) -> Option<(Cap, *mut Ct
         return None;
     }
     Some((cap, slot))
+}
+
+unsafe fn lookup_slot_in_tcb(t: *mut tcb::Tcb, cptr: u64) -> Option<*mut Cte> {
+    if t.is_null() {
+        return None;
+    }
+    let root = tcb::cspace_cap_snapshot(t);
+    if root.tag() != Some(CapTag::CNode) {
+        return None;
+    }
+    let r = cspace::lookup_slot_in(root, cptr, cspace::WORD_BITS).ok()?;
+    if r.bits_remaining != 0 {
+        return None;
+    }
+    Some(r.slot)
 }
 
 unsafe fn get_receive_slot(receiver: *mut tcb::Tcb) -> Option<*mut Cte> {
@@ -217,13 +287,14 @@ unsafe fn derive_transfer_cap(src_slot: *mut Cte, cap: Cap) -> Option<Cap> {
     }
 }
 
-unsafe fn insert_derived_cap(src_slot: *mut Cte, dst: *mut Cte, cap: Cap) {
+unsafe fn insert_derived_cap(src_slot: *mut Cte, dst: *mut Cte, cap: Cap) -> bool {
     unsafe {
         let cspace_guard = crate::object::cnode::lock_cspace();
         if !(*dst).cap.is_null() || (*dst).mdb.prev() != 0 || (*dst).mdb.next() != 0 {
-            return;
+            return false;
         }
         crate::object::cnode::cte_insert_locked(&cspace_guard, cap, src_slot, dst);
+        true
     }
 }
 
@@ -273,6 +344,7 @@ unsafe fn block_sender(
     badge: u64,
     can_grant: bool,
     can_grant_reply: bool,
+    extra_cap_slots: ExtraCapSlots,
 ) {
     if ep.is_null() {
         return;
@@ -283,7 +355,15 @@ unsafe fn block_sender(
     }
     let _guard = unsafe { endpoint::lock_queue(ep) };
     unsafe {
-        block_sender_locked(ep, cur, is_call, badge, can_grant, can_grant_reply);
+        block_sender_locked(
+            ep,
+            cur,
+            is_call,
+            badge,
+            can_grant,
+            can_grant_reply,
+            extra_cap_slots,
+        );
     }
 }
 
@@ -294,13 +374,22 @@ unsafe fn block_sender_locked(
     badge: u64,
     can_grant: bool,
     can_grant_reply: bool,
+    extra_cap_slots: ExtraCapSlots,
 ) {
     if cur.is_null() || ep.is_null() {
         return;
     }
     unsafe {
         tcb::dequeue(cur);
-        tcb::set_blocked_sender(cur, ep as u64, is_call, badge, can_grant, can_grant_reply);
+        tcb::set_blocked_sender(
+            cur,
+            ep as u64,
+            is_call,
+            badge,
+            can_grant,
+            can_grant_reply,
+            extra_cap_slots,
+        );
         endpoint::enqueue_waiter_locked(ep, cur, EpState::Sending);
     }
 }
@@ -495,6 +584,7 @@ unsafe fn complete_receive_from_sender(
                 sender_state.badge,
                 ep,
                 sender_state.can_grant,
+                sender_state.extra_cap_slots,
             );
         }
         if sender_state.is_call && can_reply {
@@ -549,6 +639,15 @@ pub fn send(uc: &mut UserContext, blocking: bool, can_donate: bool) {
     if cur.is_null() {
         return;
     }
+    let extra_cap_slots = match snapshot_extra_cap_slots(cur, info, cap.endpoint_can_grant()) {
+        Ok(slots) => slots,
+        Err(bad_cptr) => {
+            if blocking {
+                let _ = crate::arch::riscv64::trap::send_cap_fault_ipc(uc, bad_cptr, false);
+            }
+            return;
+        }
+    };
     let receiver = unsafe {
         let _guard = endpoint::lock_queue(ep);
         let receiver = endpoint::pop_receiver_locked(ep);
@@ -560,6 +659,7 @@ pub fn send(uc: &mut UserContext, blocking: bool, can_donate: bool) {
                 badge,
                 cap.endpoint_can_grant(),
                 cap.endpoint_can_grant_reply(),
+                extra_cap_slots,
             );
         }
         receiver
@@ -568,7 +668,15 @@ pub fn send(uc: &mut UserContext, blocking: bool, can_donate: bool) {
         return;
     }
     unsafe {
-        transfer_message(cur, receiver, info, badge, ep, cap.endpoint_can_grant());
+        transfer_message(
+            cur,
+            receiver,
+            info,
+            badge,
+            ep,
+            cap.endpoint_can_grant(),
+            extra_cap_slots,
+        );
         tcb::wake_blocked_receiver_after_send(receiver);
         if can_donate {
             maybe_donate_sched_context(cur, receiver);
@@ -696,6 +804,13 @@ pub fn call(uc: &mut UserContext) {
     if cur.is_null() {
         return;
     }
+    let extra_cap_slots = match snapshot_extra_cap_slots(cur, info, cap.endpoint_can_grant()) {
+        Ok(slots) => slots,
+        Err(bad_cptr) => {
+            let _ = crate::arch::riscv64::trap::send_cap_fault_ipc(uc, bad_cptr, false);
+            return;
+        }
+    };
     let receiver = unsafe {
         let _guard = endpoint::lock_queue(ep);
         let receiver = endpoint::pop_receiver_locked(ep);
@@ -707,6 +822,7 @@ pub fn call(uc: &mut UserContext) {
                 badge,
                 cap.endpoint_can_grant(),
                 cap.endpoint_can_grant_reply(),
+                extra_cap_slots,
             );
         }
         receiver
@@ -715,7 +831,15 @@ pub fn call(uc: &mut UserContext) {
         return;
     }
     unsafe {
-        transfer_message(cur, receiver, info, badge, ep, cap.endpoint_can_grant());
+        transfer_message(
+            cur,
+            receiver,
+            info,
+            badge,
+            ep,
+            cap.endpoint_can_grant(),
+            extra_cap_slots,
+        );
         let (receiver_reply_cptr, receiver_reply_kva, receiver_reply_can_grant) =
             tcb::start_receiver_rendezvous(receiver);
         tcb::dequeue(cur);
@@ -762,7 +886,15 @@ pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb) {
         let mut wake_caller = true;
         let (was_fault, fault_label) = tcb::sender_fault_snapshot(caller);
         if !was_fault {
-            transfer_message(cur, caller, info, 0, core::ptr::null_mut(), false);
+            transfer_message(
+                cur,
+                caller,
+                info,
+                0,
+                core::ptr::null_mut(),
+                false,
+                [0; MSG_MAX_EXTRA_CAPS_USIZE],
+            );
         } else {
             if info.label() == 0 {
                 match fault_label {

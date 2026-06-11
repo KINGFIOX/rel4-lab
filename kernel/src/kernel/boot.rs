@@ -9,15 +9,16 @@ use log_crate::{info, warn};
 use crate::abi::bootinfo::{BootInfo, RootCNodeCapSlot, SlotRegion, UntypedDesc};
 use crate::abi::constants::SEL4_MIN_SCHED_CONTEXT_BITS;
 use crate::abi::constants::{
-    KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, MAX_NUM_NODES, ROOT_CNODE_SIZE_BITS,
-    SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
+    KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, MAX_NUM_NODES, PT_INDEX_BITS, RISCV_PG_SHIFT,
+    ROOT_CNODE_SIZE_BITS, SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
 };
-use crate::arch::riscv64::sv39::{PAGE_SIZE, PageTable};
+use crate::arch::riscv64::sv39::{PAGE_SIZE, PageTable, Pte, pt_index};
 use crate::arch::riscv64::trap::{
     UserContext, init_timer, install_trap_vector, restore_user_context_with_kernel_lock,
 };
 use crate::arch::riscv64::vspace::{
-    kpptr_to_paddr, make_boot_root_pt, map_user_4k, satp_for, switch_satp, user_flags,
+    alloc_pt_page, kpptr_to_paddr, make_boot_root_pt, paddr_to_kpptr, satp_for, switch_satp,
+    user_flags,
 };
 use crate::kernel::bootmem;
 use crate::object::cap::{Cap, FRAME_RIGHTS_READ_WRITE, FRAME_SIZE_4K};
@@ -40,6 +41,9 @@ pub const USER_BOOTINFO_VA: usize = 0x7FFF_E000;
 pub const USER_STACK_TOP: usize = 0x7FFE_F000;
 pub const USER_STACK_PAGES: usize = 16; // 64 KiB
 const ROOTSERVER_ASID: u16 = 1;
+const MAX_BOOT_USER_PAGING_CAPS: usize = 256;
+const SV39_L1_COVERAGE_BITS: usize = RISCV_PG_SHIFT + PT_INDEX_BITS * 2;
+const SV39_L0_COVERAGE_BITS: usize = RISCV_PG_SHIFT + PT_INDEX_BITS;
 
 #[repr(C)]
 pub struct BootArgs {
@@ -105,6 +109,112 @@ impl RootSchedContextCell {
 }
 
 static ROOTSERVER_SC: RootSchedContextCell = RootSchedContextCell::new();
+
+#[derive(Copy, Clone)]
+struct BootUserPageTableCap {
+    pt: *mut PageTable,
+    mapped_addr: usize,
+    level: usize,
+}
+
+impl BootUserPageTableCap {
+    const fn empty() -> Self {
+        Self {
+            pt: core::ptr::null_mut(),
+            mapped_addr: 0,
+            level: 0,
+        }
+    }
+}
+
+struct BootUserPaging {
+    root: *mut PageTable,
+    caps: [BootUserPageTableCap; MAX_BOOT_USER_PAGING_CAPS],
+    cap_count: usize,
+}
+
+impl BootUserPaging {
+    fn new(root: *mut PageTable) -> Self {
+        Self {
+            root,
+            caps: [BootUserPageTableCap::empty(); MAX_BOOT_USER_PAGING_CAPS],
+            cap_count: 0,
+        }
+    }
+
+    fn map_4k(&mut self, vaddr: usize, paddr: usize, flags: u64) {
+        assert!(vaddr & (PAGE_SIZE - 1) == 0, "user VA is not 4K-aligned");
+        assert!(paddr & (PAGE_SIZE - 1) == 0, "user PA is not 4K-aligned");
+        let l1 = self.ensure_table(self.root, vaddr, 2);
+        let l0 = self.ensure_table(l1, vaddr, 1);
+        let slot = unsafe { &mut (*l0).entries[pt_index(vaddr, 0)] };
+        assert!(
+            !slot.is_valid(),
+            "duplicate boot user mapping at VA {:#x}",
+            vaddr
+        );
+        *slot = Pte::leaf(paddr as u64, flags);
+        crate::arch::riscv64::csr::sfence_vma_va(vaddr);
+        crate::kernel::smp::remote_sfence_vma_all();
+    }
+
+    fn ensure_table(
+        &mut self,
+        parent: *mut PageTable,
+        vaddr: usize,
+        parent_level: usize,
+    ) -> *mut PageTable {
+        let slot = unsafe { &mut (*parent).entries[pt_index(vaddr, parent_level)] };
+        if slot.is_valid() {
+            assert!(
+                !slot.is_leaf(),
+                "boot user mapping collided with a leaf at level {}",
+                parent_level
+            );
+            return paddr_to_kpptr(slot.next_pt_paddr() as usize) as *mut PageTable;
+        }
+
+        let child = alloc_pt_page();
+        *slot = Pte::next(kpptr_to_paddr(child as usize) as u64);
+        let child_level = parent_level - 1;
+        self.record_cap(
+            child,
+            align_down(vaddr, table_coverage_bits(child_level)),
+            child_level,
+        );
+        child
+    }
+
+    fn record_cap(&mut self, pt: *mut PageTable, mapped_addr: usize, level: usize) {
+        for i in 0..self.cap_count {
+            if self.caps[i].pt == pt {
+                return;
+            }
+        }
+        assert!(
+            self.cap_count < self.caps.len(),
+            "too many boot user PageTable caps"
+        );
+        self.caps[self.cap_count] = BootUserPageTableCap {
+            pt,
+            mapped_addr,
+            level,
+        };
+        self.cap_count += 1;
+    }
+}
+
+const fn table_coverage_bits(level: usize) -> usize {
+    match level {
+        1 => SV39_L1_COVERAGE_BITS,
+        0 => SV39_L0_COVERAGE_BITS,
+        _ => RISCV_PG_SHIFT,
+    }
+}
+
+fn align_down(value: usize, bits: usize) -> usize {
+    value & !((1usize << bits) - 1)
+}
 
 const _: () = {
     assert!(core::mem::size_of::<RootTcbCell>() == core::mem::size_of::<Tcb>());
@@ -174,10 +284,11 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     info!("  satp <- {:#x}", satp);
 
     // Map the rootserver image: PA = VA + pv_offset (elfloader convention).
+    let mut boot_user_paging = BootUserPaging::new(root_pt);
     let user_va_start = args.user_pstart.wrapping_sub(args.pv_offset);
     let user_va_end = args.user_pend.wrapping_sub(args.pv_offset);
     map_range_4k_identity_from_elfloader(
-        root_pt,
+        &mut boot_user_paging,
         user_va_start,
         user_va_end,
         args.pv_offset,
@@ -187,31 +298,17 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     // Allocate + map BootInfo, IPC buffer, user stack.
     let bi_kva = bootmem::alloc_page();
     let bi_pa = kpptr_to_paddr(bi_kva);
-    unsafe {
-        map_user_4k(
-            root_pt,
-            USER_BOOTINFO_VA,
-            bi_pa,
-            user_flags(true, true, false),
-        )
-    };
+    boot_user_paging.map_4k(USER_BOOTINFO_VA, bi_pa, user_flags(true, true, false));
 
     let ipc_kva = bootmem::alloc_page();
     let ipc_pa = kpptr_to_paddr(ipc_kva);
-    unsafe {
-        map_user_4k(
-            root_pt,
-            USER_IPC_BUFFER_VA,
-            ipc_pa,
-            user_flags(true, true, false),
-        )
-    };
+    boot_user_paging.map_4k(USER_IPC_BUFFER_VA, ipc_pa, user_flags(true, true, false));
 
     for i in 0..USER_STACK_PAGES {
         let kva = bootmem::alloc_page();
         let pa = kpptr_to_paddr(kva);
         let va = USER_STACK_TOP - (i + 1) * PAGE_SIZE;
-        unsafe { map_user_4k(root_pt, va, pa, user_flags(true, true, false)) };
+        boot_user_paging.map_4k(va, pa, user_flags(true, true, false));
     }
 
     let asid_pool_kva = bootmem::alloc_page();
@@ -234,6 +331,8 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         next_slot: usize,
         schedcontrol_start_slot: usize,
         schedcontrol_end_slot: usize,
+        user_image_paging_start: usize,
+        user_image_paging_end: usize,
         untyped_start_slot: usize,
         untyped_end_slot: usize,
         device_start_slot: usize,
@@ -397,6 +496,9 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
             }
             (start, next_slot)
         };
+
+        let (user_image_paging_start, user_image_paging_end) =
+            install_boot_user_paging_caps(cnode, &boot_user_paging, &mut next_slot);
         let untyped_start_slot = next_slot;
         let mut bi_untyped_count = 0usize;
         let mut untyped_list_local: [UntypedDesc; MAX_NUM_BOOTINFO_UNTYPED_CAPS] = [const {
@@ -507,6 +609,8 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
             next_slot,
             schedcontrol_start_slot,
             schedcontrol_end_slot,
+            user_image_paging_start,
+            user_image_paging_end,
             untyped_start_slot,
             untyped_end_slot,
             device_start_slot,
@@ -524,6 +628,8 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         next_slot,
         schedcontrol_start_slot,
         schedcontrol_end_slot,
+        user_image_paging_start,
+        user_image_paging_end,
         untyped_start_slot,
         untyped_end_slot,
         device_start_slot,
@@ -535,6 +641,12 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         untyped_list_local,
     } = unsafe { with_cnode_at(cnode_base as *mut u8, ROOT_CNODE_SIZE_BITS, init_root_cnode) };
 
+    info!(
+        "  user image paging: slots {}..{} ({} caps)",
+        user_image_paging_start,
+        user_image_paging_end,
+        user_image_paging_end - user_image_paging_start,
+    );
     info!(
         "  user image frames: slots {}..{} ({} caps)",
         user_image_frames_start,
@@ -593,7 +705,10 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
             start: user_image_frames_start as u64,
             end: user_image_frames_end as u64,
         };
-        (*bi).user_image_paging = SlotRegion { start: 0, end: 0 };
+        (*bi).user_image_paging = SlotRegion {
+            start: user_image_paging_start as u64,
+            end: user_image_paging_end as u64,
+        };
         (*bi).io_space_caps = SlotRegion { start: 0, end: 0 };
         (*bi).extra_bi_pages = SlotRegion { start: 0, end: 0 };
         (*bi).init_thread_cnode_size_bits = ROOT_CNODE_SIZE_BITS as u64;
@@ -658,7 +773,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
 /// and PAs are required to be 4 KiB aligned; the caller passes the
 /// elfloader's `pv_offset` to recover PA from VA (PA = VA + pv_offset).
 fn map_range_4k_identity_from_elfloader(
-    root: *mut PageTable,
+    paging: &mut BootUserPaging,
     va_start: usize,
     va_end: usize,
     pv_offset: usize,
@@ -669,7 +784,48 @@ fn map_range_4k_identity_from_elfloader(
     let mut va = start;
     while va < end {
         let pa = va.wrapping_add(pv_offset);
-        unsafe { map_user_4k(root, va, pa, flags) };
+        paging.map_4k(va, pa, flags);
         va += PAGE_SIZE;
     }
+}
+
+fn install_boot_user_paging_caps(
+    cnode: &mut [Cte],
+    paging: &BootUserPaging,
+    next_slot: &mut usize,
+) -> (usize, usize) {
+    let start = *next_slot;
+    let mut emitted = [false; MAX_BOOT_USER_PAGING_CAPS];
+
+    for level in [1usize, 0usize] {
+        loop {
+            let mut best: Option<usize> = None;
+            for i in 0..paging.cap_count {
+                if emitted[i] || paging.caps[i].level != level {
+                    continue;
+                }
+                if best
+                    .map(|best_idx| paging.caps[i].mapped_addr < paging.caps[best_idx].mapped_addr)
+                    .unwrap_or(true)
+                {
+                    best = Some(i);
+                }
+            }
+
+            let Some(i) = best else {
+                break;
+            };
+            assert!(
+                *next_slot < cnode.len(),
+                "root CNode full while installing boot user PageTable caps"
+            );
+            let mut cap = Cap::new_page_table(paging.caps[i].pt as u64);
+            cap.set_page_table_mapping(ROOTSERVER_ASID, paging.caps[i].mapped_addr as u64);
+            install_initial_cap(cnode, *next_slot, cap);
+            *next_slot += 1;
+            emitted[i] = true;
+        }
+    }
+
+    (start, *next_slot)
 }

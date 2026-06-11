@@ -70,17 +70,12 @@ pub const fn paddr_to_kpptr(paddr: usize) -> usize {
 // distinct from the rootserver-visible "untyped" memory and is only used
 // by the kernel itself.
 
-// The boot pool keeps L1/L0 page-table pages for *every* user VSpace
-// the rootserver creates. Each Page_Map call can pull up to two fresh
-// pages out of this pool; without recycling, a 100-test sweep blows
-// past anything we'd ship in `.bss`. We keep enough pages for xv6's
-// sparse lazy-allocation tests (1 GiB touched once per 2 MiB needs just
-// over 512 L0 tables) and reclaim empty interior tables back onto the
-// `BOOT_PT_FREELIST` stack as soon as `unmap_user_4k` empties them.
-//
-// `seL4` would normally manage these via user-supplied `PageTable`
-// objects (Retype-from-Untyped); modelling that properly is on the
-// M4 todo list.
+// The boot pool backs kernel-owned page-table pages: the initial root
+// VSpace, the initial thread's boot-created user paging objects, and any
+// legacy kernel boot mappings. Normal user mappings are made through
+// user-visible `PageTable` caps retyped from Untyped, matching seL4's
+// explicit paging-object model. The initial boot-created user paging
+// objects are also exposed through BootInfo's `userImagePaging` range.
 const BOOT_PT_POOL_PAGES: usize = 1024;
 const BOOT_PT_FREELIST_EMPTY: usize = usize::MAX;
 

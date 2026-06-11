@@ -62,6 +62,7 @@ pub const TCB_VTABLE_SLOT: usize = 1;
 pub const TCB_BUFFER_SLOT: usize = 2;
 pub const TCB_FAULT_HANDLER_SLOT: usize = 3;
 pub const TCB_TIMEOUT_HANDLER_SLOT: usize = 4;
+pub(crate) const TCB_SENDER_EXTRA_CAPS: usize = 3;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -183,6 +184,7 @@ pub(crate) struct QueuedSenderSnapshot {
     pub is_call: bool,
     pub can_grant: bool,
     pub can_grant_reply: bool,
+    pub extra_cap_slots: [u64; TCB_SENDER_EXTRA_CAPS],
     pub is_fault: bool,
     pub fault_label: u64,
 }
@@ -1014,6 +1016,7 @@ unsafe fn clear_endpoint_ipc_state_locked(tcb: *mut Tcb) {
         (*tcb).sender_badge = 0;
         (*tcb).sender_can_grant = 0;
         (*tcb).sender_can_grant_reply = 0;
+        (*tcb).sender_extra_cap_slots = [0; TCB_SENDER_EXTRA_CAPS];
         (*tcb).sender_is_call = 0;
         (*tcb).sender_is_fault = 0;
         (*tcb).fault_label = 0;
@@ -1293,6 +1296,16 @@ pub(crate) fn ipc_buffer_word_snapshot(tcb: *const Tcb, index: usize) -> u64 {
     }
 }
 
+pub(crate) fn has_ipc_buffer(tcb: *const Tcb) -> bool {
+    if tcb.is_null() {
+        return false;
+    }
+    unsafe {
+        let _guard = lock_state(tcb);
+        (*tcb).ipc_buffer_kva != 0
+    }
+}
+
 pub(crate) unsafe fn write_message_info(tcb: *mut Tcb, info_word: u64) {
     if tcb.is_null() {
         return;
@@ -1365,6 +1378,7 @@ pub(crate) fn queued_sender_snapshot(tcb: *const Tcb) -> QueuedSenderSnapshot {
             is_call: false,
             can_grant: false,
             can_grant_reply: false,
+            extra_cap_slots: [0; TCB_SENDER_EXTRA_CAPS],
             is_fault: false,
             fault_label: 0,
         };
@@ -1378,6 +1392,7 @@ pub(crate) fn queued_sender_snapshot(tcb: *const Tcb) -> QueuedSenderSnapshot {
             is_call: (*tcb).sender_is_call != 0,
             can_grant: (*tcb).sender_can_grant != 0,
             can_grant_reply: (*tcb).sender_can_grant_reply != 0,
+            extra_cap_slots: (*tcb).sender_extra_cap_slots,
             is_fault,
             fault_label: if is_fault { (*tcb).fault_label } else { 0 },
         }
@@ -1452,6 +1467,7 @@ pub(crate) unsafe fn set_blocked_sender(
     badge: u64,
     can_grant: bool,
     can_grant_reply: bool,
+    extra_cap_slots: [u64; TCB_SENDER_EXTRA_CAPS],
 ) {
     if tcb.is_null() {
         return;
@@ -1464,6 +1480,7 @@ pub(crate) unsafe fn set_blocked_sender(
         (*tcb).sender_badge = badge;
         (*tcb).sender_can_grant = if can_grant { 1 } else { 0 };
         (*tcb).sender_can_grant_reply = if can_grant_reply { 1 } else { 0 };
+        (*tcb).sender_extra_cap_slots = extra_cap_slots;
         (*tcb).sender_is_call = if is_call { 1 } else { 0 };
         (*tcb).sender_is_fault = 0;
     }
@@ -1513,6 +1530,7 @@ pub(crate) unsafe fn set_blocked_fault_sender(
         (*tcb).sender_badge = badge;
         (*tcb).sender_can_grant = if can_grant { 1 } else { 0 };
         (*tcb).sender_can_grant_reply = if can_grant_reply { 1 } else { 0 };
+        (*tcb).sender_extra_cap_slots = [0; TCB_SENDER_EXTRA_CAPS];
         (*tcb).sender_is_call = 1;
         (*tcb).sender_is_fault = 1;
         (*tcb).fault_label = label;
@@ -1992,6 +2010,7 @@ pub struct Tcb {
     /// blocks on an Endpoint so the eventual receiver can read it back
     /// without re-walking the sender's CSpace.
     pub sender_badge: u64,
+    pub sender_extra_cap_slots: [u64; TCB_SENDER_EXTRA_CAPS],
     pub sender_can_grant: u8,
     pub sender_can_grant_reply: u8,
     /// `1` iff the queued-up Send was originally a `seL4_Call`. The
@@ -2056,6 +2075,7 @@ impl Tcb {
             reply_slot: 0,
             reply_object: 0,
             sender_badge: 0,
+            sender_extra_cap_slots: [0; TCB_SENDER_EXTRA_CAPS],
             sender_can_grant: 0,
             sender_can_grant_reply: 0,
             sender_is_call: 0,
