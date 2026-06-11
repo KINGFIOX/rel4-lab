@@ -27,10 +27,12 @@
 //!   * The receiver's a0 is set to the *sender's* badge (from the
 //!     sender's cap, stashed in `sender_badge` when queueing).
 //!
-//! Notes / non-goals for this iteration:
-//!   * Cap transfer implements the single receive-slot path used by
-//!     libsel4serialserver and libsel4utils. Multi-slot receive and the
-//!     subtler cleanup/preemption cases are still future work.
+//! seL4 alignment notes:
+//!   * Cap transfer follows upstream seL4's `transferCaps` /
+//!     `getReceiveSlots` model: the sender can name up to
+//!     `seL4_MsgMaxExtraCaps` extra caps, but there is only one destination
+//!     receive slot for an inserted cap. Endpoint caps to the send endpoint
+//!     are unwrapped into badges instead of inserted.
 //!   * VSpace switching is handled on kernel exit from each TCB's VTable
 //!     CTE slot; this layer only performs the IPC object and message-transfer
 //!     state transitions.
@@ -127,6 +129,9 @@ unsafe fn transfer_caps(
     can_grant: bool,
     extra_cap_slots: ExtraCapSlots,
 ) -> (u64, u64) {
+    // Mirrors upstream seL4's single-cap receive-slot transfer. `extraCaps`
+    // reports how many extra cap refs were consumed, not how many caps were
+    // inserted; endpoint unwraps count as consumed refs.
     if !can_grant {
         return (0, 0);
     }

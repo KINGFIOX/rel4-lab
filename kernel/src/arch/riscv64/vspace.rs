@@ -1,9 +1,10 @@
 //! Kernel + user VSpace helpers.
 //!
-//! For M2 we keep things very simple: the elfloader hands us a Sv39 root PT
-//! already containing the 1 GiB kernel-window mapping. We simply walk that
-//! page table to install user-image mappings, allocating fresh 4 KiB PT
-//! pages out of a static kernel boot pool when needed.
+//! The boot page-table pool is reserved for kernel-owned boot objects: the
+//! initial root VSpace and the initial thread's boot-created user paging
+//! structures. Runtime user mappings follow seL4's explicit paging-object
+//! model: user frames can only be mapped through already-mapped `PageTable`
+//! caps, and `PageTable_Map` installs those caps into the VSpace.
 
 use crate::abi::constants::{
     KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE, PPTR_TOP, PT_INDEX_BITS, RISCV_PG_SHIFT,
@@ -75,15 +76,13 @@ pub const fn paddr_to_kpptr(paddr: usize) -> usize {
 // legacy kernel boot mappings. Normal user mappings are made through
 // user-visible `PageTable` caps retyped from Untyped, matching seL4's
 // explicit paging-object model. The initial boot-created user paging
-// objects are also exposed through BootInfo's `userImagePaging` range.
+// objects are exposed through BootInfo's `userImagePaging` range.
 const BOOT_PT_POOL_PAGES: usize = 1024;
-const BOOT_PT_FREELIST_EMPTY: usize = usize::MAX;
 
 #[repr(C, align(4096))]
 struct BootPtPool {
     pages: [PageTable; BOOT_PT_POOL_PAGES],
     next: usize,
-    freelist_head: usize,
 }
 
 impl BootPtPool {
@@ -91,52 +90,22 @@ impl BootPtPool {
         Self {
             pages: [const { PageTable::zeroed() }; BOOT_PT_POOL_PAGES],
             next: 0,
-            freelist_head: BOOT_PT_FREELIST_EMPTY,
         }
-    }
-
-    #[inline]
-    fn base(&self) -> *const PageTable {
-        self.pages.as_ptr()
     }
 
     #[inline]
     fn base_mut(&mut self) -> *mut PageTable {
         self.pages.as_mut_ptr()
     }
-
-    #[inline]
-    fn contains(&self, p: *mut PageTable) -> bool {
-        let base = self.base() as usize;
-        let end = base + BOOT_PT_POOL_PAGES * core::mem::size_of::<PageTable>();
-        let v = p as usize;
-        v >= base && v < end && (v - base) % core::mem::size_of::<PageTable>() == 0
-    }
-
-    #[inline]
-    fn index_of(&self, p: *mut PageTable) -> usize {
-        ((p as usize) - (self.base() as usize)) / core::mem::size_of::<PageTable>()
-    }
 }
 
 static BOOT_PT_POOL: BklCell<BootPtPool> = BklCell::new(BootPtPool::new());
 
 /// Allocate a fresh zeroed page-table page from the boot pool. Returns its
-/// kernel-window virtual address. Prefers the freelist over the bump
-/// pointer so long-running suites don't starve the pool.
+/// kernel-window virtual address. This is for boot-created kernel-owned
+/// paging objects only; runtime user paging objects come from Untyped.
 pub fn alloc_pt_page() -> *mut PageTable {
     BOOT_PT_POOL.with_mut(|pool| {
-        let head = pool.freelist_head;
-        if head != BOOT_PT_FREELIST_EMPTY {
-            unsafe {
-                let p = pool.base_mut().add(head);
-                // Next-free index is stashed in entries[0].
-                let next = (*p).entries[0].raw() as usize;
-                pool.freelist_head = next;
-                (*p).entries = [Pte::NULL; 512];
-                return p;
-            }
-        }
         let idx = pool.next;
         assert!(idx < BOOT_PT_POOL_PAGES, "boot PT pool exhausted");
         pool.next += 1;
@@ -148,27 +117,6 @@ pub fn alloc_pt_page() -> *mut PageTable {
     })
 }
 
-/// Push a PT page back onto the boot-pool freelist. Silently ignores
-/// pages outside the pool (e.g. caller-owned page-table objects we
-/// never allocated).
-pub unsafe fn free_pt_page(p: *mut PageTable) {
-    BOOT_PT_POOL.with_mut(|pool| {
-        if !pool.contains(p) {
-            return;
-        }
-        let idx = pool.index_of(p);
-        unsafe {
-            let head = pool.freelist_head;
-            (*p).entries[0] = Pte::from_raw(head as u64);
-            // Zero the rest so a stale entry can't accidentally look valid.
-            for i in 1..512 {
-                (*p).entries[i] = Pte::NULL;
-            }
-            pool.freelist_head = idx;
-        }
-    });
-}
-
 /// Read the currently active Sv39 root PT from `satp`. The elfloader places
 /// its boot PT inside its own image (low PA region) which is _not_ in our
 /// kernel ELF window nor in the PSpace window, so this returns the raw
@@ -177,79 +125,6 @@ pub unsafe fn free_pt_page(p: *mut PageTable) {
 pub fn current_root_pt_paddr() -> usize {
     let satp = csr::satp();
     (satp & ((1usize << 44) - 1)) << RISCV_PG_SHIFT
-}
-
-/// Map a single 4 KiB user page at `vaddr` to `paddr` with given flags,
-/// allocating intermediate PT levels from the boot pool as needed.
-///
-/// `flags` must include at least `PTE_V` and any of R/W/X to mark it as a
-/// leaf entry. `PTE_U` is automatically added for user mappings.
-///
-/// Walking page tables during boot is tricky because the *only* mapping
-/// guaranteed by the elfloader is the 1 GiB kernel-ELF window, while the
-/// pages of the root PT itself can live anywhere. To keep things
-/// well-defined we:
-///
-///   1. Allocate every new PT level from `BOOT_PT_POOL` (kernel-ELF window,
-///      always accessible).
-///   2. When following an existing entry, assume it points into the boot
-///      pool too (true because *we* allocated everything below the root).
-///
-/// We must NOT chase entries installed by the elfloader itself, but the
-/// elfloader only ever wrote the kernel-window L1 entries, never user-space
-/// L2/L1 chains.
-pub unsafe fn map_user_4k(root: *mut PageTable, vaddr: usize, paddr: usize, flags: u64) {
-    let _guard = lock_vspace(root);
-    unsafe { map_user_4k_locked(root, vaddr, paddr, flags) };
-}
-
-unsafe fn map_user_4k_locked(root: *mut PageTable, vaddr: usize, paddr: usize, mut flags: u64) {
-    debug_assert!(vaddr & (PAGE_SIZE - 1) == 0, "vaddr not 4K-aligned");
-    debug_assert!(paddr & (PAGE_SIZE - 1) == 0, "paddr not 4K-aligned");
-    flags |= PTE_U | PTE_V | PTE_A | PTE_D;
-
-    let mut pt = root;
-    let mut l1pt_pa = 0u64;
-    let mut l0pt_pa = 0u64;
-    for level in (1..=2).rev() {
-        let i = pt_index(vaddr, level);
-        let entry = unsafe { (*pt).entries[i] };
-        let next_pt: *mut PageTable = if !entry.is_valid() {
-            let new_pt = alloc_pt_page();
-            let new_pt_pa = kpptr_to_paddr(new_pt as usize) as u64;
-            if level == 2 {
-                l1pt_pa = new_pt_pa;
-            } else {
-                l0pt_pa = new_pt_pa;
-            }
-            unsafe {
-                (*pt).entries[i] = Pte::next(new_pt_pa);
-            }
-            new_pt
-        } else if entry.is_leaf() {
-            panic!(
-                "map_user_4k: collision with megapage at level {} for VA {:#x}",
-                level, vaddr
-            );
-        } else {
-            let pa = entry.next_pt_paddr();
-            if level == 2 {
-                l1pt_pa = pa;
-            } else {
-                l0pt_pa = pa;
-            }
-            paddr_to_kpptr(pa as usize) as *mut PageTable
-        };
-        pt = next_pt;
-    }
-
-    let i = pt_index(vaddr, 0);
-    let _ = (l1pt_pa, l0pt_pa);
-    unsafe {
-        (*pt).entries[i] = Pte::leaf(paddr as u64, flags);
-    }
-    csr::sfence_vma_va(vaddr);
-    crate::kernel::smp::remote_sfence_vma_all();
 }
 
 #[inline]
@@ -527,81 +402,9 @@ pub unsafe fn unmap_user_page_table(
     false
 }
 
-/// Remove the 4 KiB user mapping at `vaddr` if present and trim any
-/// interior PT levels that become empty as a result.  Returns the
-/// physical address the page used to map to, or `None` if no mapping
-/// existed.
-///
-/// Recycling empty L1/L0 tables back onto the boot pool's freelist is
-/// what keeps `BOOT_PT_POOL` from growing unbounded across the
-/// rootserver's test sweep — every test process eventually has its
-/// frames unmapped via `seL4_RISCV_Page_Unmap` (directly or via the
-/// Revoke walk in `finalize_cap`), so this is also where we close the
-/// loop on per-VSpace cleanup.
-///
-/// We follow the same "only chase entries we allocated" invariant as
-/// `map_user_4k`: every interior PTE is expected to live in the boot
-/// pool, so its physical address can be translated back to a kernel-ELF
-/// VA via `paddr_to_kpptr`.
-pub unsafe fn unmap_user_4k(root: *mut PageTable, vaddr: usize) -> Option<usize> {
-    let _guard = lock_vspace(root);
-    unsafe { unmap_user_4k_locked(root, vaddr) }
-}
-
-unsafe fn unmap_user_4k_locked(root: *mut PageTable, vaddr: usize) -> Option<usize> {
-    debug_assert!(vaddr & (PAGE_SIZE - 1) == 0, "vaddr not 4K-aligned");
-
-    // Remember each interior table we walked so we can prune the
-    // empties on the way back up.  `pts[level]` is the table that
-    // *contains* `pt_index(vaddr, level)`; `pts[2]` is the root and is
-    // never freed.
-    let mut pts: [*mut PageTable; 3] = [core::ptr::null_mut(); 3];
-    pts[2] = root;
-    let mut pt = root;
-    for level in (1..=2).rev() {
-        let i = pt_index(vaddr, level);
-        let entry = unsafe { (*pt).entries[i] };
-        if !entry.is_valid() || entry.is_leaf() {
-            return None;
-        }
-        pt = paddr_to_kpptr(entry.next_pt_paddr() as usize) as *mut PageTable;
-        pts[level - 1] = pt;
-    }
-
-    let i = pt_index(vaddr, 0);
-    let entry = unsafe { (*pt).entries[i] };
-    if !entry.is_valid() || !entry.is_leaf() {
-        return None;
-    }
-    let pa = entry.leaf_pa() as usize;
-    unsafe {
-        (*pt).entries[i] = Pte::NULL;
-    }
-    csr::sfence_vma_va(vaddr);
-    crate::kernel::smp::remote_sfence_vma_all();
-
-    // Walk up, freeing each interior table that no longer references
-    // anything.  We *never* trim the root (`level == 2`): it carries
-    // the kernel-ELF + PSpace mappings every process depends on.
-    for level in 0..=1 {
-        let child = pts[level];
-        if unsafe { !pt_is_empty(child) } {
-            break;
-        }
-        let parent = pts[level + 1];
-        let parent_i = pt_index(vaddr, level + 1);
-        unsafe {
-            (*parent).entries[parent_i] = Pte::NULL;
-            free_pt_page(child);
-        }
-    }
-    Some(pa)
-}
-
 /// Remove a user frame mapping at the natural Sv39 level for the cap's
-/// size class. Unlike the old boot-pool helper, this does not try to
-/// reclaim interior page-table pages: user PageTable caps manage those
-/// explicitly.
+/// size class. This does not reclaim interior page-table objects: mapped
+/// user `PageTable` caps manage those pages explicitly.
 pub unsafe fn unmap_user_frame(
     root: *mut PageTable,
     vaddr: usize,
@@ -678,18 +481,6 @@ unsafe fn reclaim_page_table_locked(pt: *mut PageTable, level: usize) {
             (*pt).entries[i] = Pte::NULL;
         }
     }
-}
-
-/// True if every entry in `pt` is invalid (i.e. the table contributes
-/// no mappings).  Cheap because `Pte` is `Copy`.
-#[inline]
-unsafe fn pt_is_empty(pt: *mut PageTable) -> bool {
-    for i in 0..512 {
-        if unsafe { (*pt).entries[i] }.is_valid() {
-            return false;
-        }
-    }
-    true
 }
 
 /// Install a fresh `satp` value, then flush the TLB.
@@ -800,7 +591,9 @@ pub fn copy_kernel_mappings_to(pt: *mut PageTable) {
 ///     `PPTR_BASE + p`; we use it as the `capPtr` encoding for both
 ///     regular and device untyped/frame caps.
 ///
-/// User mappings (≤ L2[255]) are filled in later via `map_user_4k`.
+/// Initial user-image mappings are installed during boot and exposed as
+/// BootInfo `userImagePaging` caps; later user mappings require explicit
+/// `PageTable` caps.
 pub fn make_boot_root_pt() -> *mut PageTable {
     let root = alloc_pt_page();
     let kernel_flags = PTE_V | PTE_R | PTE_W | PTE_X | PTE_G | PTE_A | PTE_D;
