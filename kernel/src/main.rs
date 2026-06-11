@@ -1,0 +1,45 @@
+#![no_std]
+#![no_main]
+#![allow(dead_code)]
+
+//! Rust seL4-compatible microkernel.
+//!
+//! Boot flow on `qemu-riscv-virt` (RV64, Sv39):
+//!
+//! ```text
+//! QEMU -> elfloader (M/S-mode) -> kernel `_start` (S-mode, paging on)
+//!                                  |
+//!                                  v
+//!                          init_kernel(a0..a7)
+//! ```
+
+#[cfg(any(target_feature = "f", target_feature = "d"))]
+compile_error!("kernel must be built for RV64 without F/D floating-point extensions");
+
+extern crate core;
+
+#[macro_use]
+mod print;
+
+mod abi;
+mod api;
+mod arch;
+mod kernel;
+mod logger;
+mod machine;
+mod object;
+
+pub use arch::riscv64::boot::_start;
+pub use arch::riscv64::boot::init_kernel;
+pub use log_crate::{debug, error, info, trace, warn};
+
+/// Panic handler — print location + message, then halt.
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    println!("\n*** KERNEL PANIC ***");
+    if let Some(loc) = info.location() {
+        println!("at {}:{}", loc.file(), loc.line());
+    }
+    println!("{}", info.message());
+    arch::riscv64::boot::halt()
+}
