@@ -2,9 +2,9 @@
 //!
 //! Everything we allocate here lives inside a fixed 1 MiB pool in the
 //! kernel ELF's BSS. The pool is 4 KiB-aligned so callers can hand pages
-//! back to user-space via Sv39 mappings.
+//! back to user-space via the active architecture's paging objects.
 
-use crate::arch::current::sv39::PAGE_SIZE;
+use crate::arch::current::paging::PAGE_SIZE;
 use crate::kernel::smp::BklCell;
 
 const BOOT_POOL_PAGES: usize = 256; // 1 MiB

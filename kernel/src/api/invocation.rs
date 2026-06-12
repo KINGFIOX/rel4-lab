@@ -13,6 +13,7 @@ use crate::abi::types::MessageInfo;
 use crate::api::cspace;
 use crate::api::syscall::SyscallError;
 use crate::api::thread::Thread;
+use crate::arch::current::paging::{PAGE_SIZE, PageTable};
 use crate::arch::current::trap::{
     SEL4_TCB_FRAME_REGS, SEL4_TCB_GP_REGS, SEL4_USER_CONTEXT_REGS, SEL4_USER_CONTEXT_WORDS,
     UserContext, UserRegister,
@@ -588,7 +589,7 @@ pub fn handle_frame(
                 if !same_object_as(current_cap, cap) {
                     return Err(SyscallError::InvalidCapability);
                 }
-                let root_pt = root_pt_kva as *mut crate::arch::current::sv39::PageTable;
+                let root_pt = root_pt_kva as *mut PageTable;
                 let flags = vspace::user_flags(can_read, can_write, !exec_never);
                 let prepared_map = if current_cap.frame_is_mapped() {
                     if current_cap.frame_mapped_asid() != asid {
@@ -642,7 +643,7 @@ pub fn handle_frame(
                     return Ok(());
                 }
                 let _ = vspace::unmap_user_frame(
-                    root_pt_kva as *mut crate::arch::current::sv39::PageTable,
+                    root_pt_kva as *mut PageTable,
                     frame_va as usize,
                     cap.frame_size(),
                     kva_to_pa(cap.frame_base_ptr()) as usize,
@@ -722,9 +723,9 @@ pub fn handle_page_table(
                     return Err(SyscallError::InvalidCapability);
                 }
                 let prepared_map = vspace::prepare_user_page_table_map(
-                    root_pt_kva as *mut crate::arch::current::sv39::PageTable,
+                    root_pt_kva as *mut PageTable,
                     vaddr as usize,
-                    current_cap.page_table_base_ptr() as *mut crate::arch::current::sv39::PageTable,
+                    current_cap.page_table_base_ptr() as *mut PageTable,
                 )
                 .map_err(user_map_error)?;
                 let mapped_addr = prepared_map.mapped_addr();
@@ -746,19 +747,18 @@ pub fn handle_page_table(
                 if current_cap.page_table_is_mapped() {
                     let asid = current_cap.page_table_mapped_asid();
                     let root_pt_kva = crate::object::asid::lookup(asid);
-                    let pt = current_cap.page_table_base_ptr()
-                        as *mut crate::arch::current::sv39::PageTable;
+                    let pt = current_cap.page_table_base_ptr() as *mut PageTable;
                     if root_pt_kva == pt as u64 {
                         return Err(SyscallError::RevokeFirst);
                     }
                     if root_pt_kva != 0 {
                         let _ = vspace::unmap_user_page_table(
-                            root_pt_kva as *mut crate::arch::current::sv39::PageTable,
+                            root_pt_kva as *mut PageTable,
                             current_cap.page_table_mapped_addr() as usize,
                             pt,
                         );
                     }
-                    ptr::write_bytes(pt as *mut u8, 0, crate::arch::current::sv39::PAGE_SIZE);
+                    ptr::write_bytes(pt as *mut u8, 0, PAGE_SIZE);
                 }
                 (*slot).cap.clear_page_table_is_mapped();
             }
@@ -895,9 +895,7 @@ pub fn handle_asid_pool(
         // Match `performASIDPoolInvocation`: make the vspace cap mapped,
         // initialise global kernel mappings, then publish the ASID pool entry.
         (*vspace_slot).cap.set_page_table_mapping(asid, 0);
-        crate::arch::current::vspace::copy_kernel_mappings_to(
-            root_pt_kva as *mut crate::arch::current::sv39::PageTable,
-        );
+        crate::arch::current::vspace::copy_kernel_mappings_to(root_pt_kva as *mut PageTable);
         if !crate::object::asid::publish_pool_assignment(
             cap.asid_pool_base(),
             cap.asid_pool_ptr(),
@@ -3107,7 +3105,7 @@ fn finalize_cap(
                 if root_pt_kva != 0 {
                     unsafe {
                         let _ = crate::arch::current::vspace::unmap_user_frame(
-                            root_pt_kva as *mut crate::arch::current::sv39::PageTable,
+                            root_pt_kva as *mut PageTable,
                             va as usize,
                             cap.frame_size(),
                             pa as usize,
@@ -3129,9 +3127,9 @@ fn finalize_cap(
                 } else {
                     unsafe {
                         let _ = crate::arch::current::vspace::unmap_user_page_table(
-                            root_pt_kva as *mut crate::arch::current::sv39::PageTable,
+                            root_pt_kva as *mut PageTable,
                             cap.page_table_mapped_addr() as usize,
-                            pt_kva as *mut crate::arch::current::sv39::PageTable,
+                            pt_kva as *mut PageTable,
                         );
                     }
                 }

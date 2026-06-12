@@ -8,7 +8,12 @@
 
 use crate::abi::constants::{PT_INDEX_BITS, RISCV_PG_SHIFT, SEL4_PAGE_TABLE_ENTRIES};
 
+pub const PAGE_SHIFT: usize = RISCV_PG_SHIFT;
 pub const PAGE_SIZE: usize = 1 << RISCV_PG_SHIFT; // 4096
+pub const LEAF_LEVEL: usize = 0;
+pub const ROOT_LEVEL: usize = 2;
+pub const ROOT_CHILD_COVERAGE_BITS: usize = RISCV_PG_SHIFT + PT_INDEX_BITS * 2;
+pub const LEAF_PARENT_COVERAGE_BITS: usize = RISCV_PG_SHIFT + PT_INDEX_BITS;
 
 // Levels: 0 = leaf (4K), 1 = 2MiB, 2 = 1GiB.
 // (Confusingly, the seL4 C code numbers levels the other way; we use

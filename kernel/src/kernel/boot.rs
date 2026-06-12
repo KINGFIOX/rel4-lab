@@ -9,10 +9,13 @@ use log_crate::{info, warn};
 use crate::abi::bootinfo::{BootInfo, RootCNodeCapSlot, SlotRegion, UntypedDesc};
 use crate::abi::constants::SEL4_MIN_SCHED_CONTEXT_BITS;
 use crate::abi::constants::{
-    KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, MAX_NUM_NODES, PT_INDEX_BITS, RISCV_PG_SHIFT,
-    ROOT_CNODE_SIZE_BITS, SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
+    KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, MAX_NUM_NODES, ROOT_CNODE_SIZE_BITS,
+    SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
 };
-use crate::arch::current::sv39::{PAGE_SIZE, PageTable, Pte, pt_index};
+use crate::arch::current::paging::{
+    LEAF_PARENT_COVERAGE_BITS, PAGE_SHIFT, PAGE_SIZE, PageTable, Pte, ROOT_CHILD_COVERAGE_BITS,
+    pt_index,
+};
 use crate::arch::current::trap::{
     UserContext, init_timer, install_trap_vector, restore_user_context_with_kernel_lock,
 };
@@ -42,8 +45,6 @@ pub const USER_STACK_TOP: usize = 0x7FFE_F000;
 pub const USER_STACK_PAGES: usize = 16; // 64 KiB
 const ROOTSERVER_ASID: u16 = 1;
 const MAX_BOOT_USER_PAGING_CAPS: usize = 256;
-const SV39_L1_COVERAGE_BITS: usize = RISCV_PG_SHIFT + PT_INDEX_BITS * 2;
-const SV39_L0_COVERAGE_BITS: usize = RISCV_PG_SHIFT + PT_INDEX_BITS;
 
 #[repr(C)]
 pub struct BootArgs {
@@ -206,9 +207,9 @@ impl BootUserPaging {
 
 const fn table_coverage_bits(level: usize) -> usize {
     match level {
-        1 => SV39_L1_COVERAGE_BITS,
-        0 => SV39_L0_COVERAGE_BITS,
-        _ => RISCV_PG_SHIFT,
+        1 => ROOT_CHILD_COVERAGE_BITS,
+        0 => LEAF_PARENT_COVERAGE_BITS,
+        _ => PAGE_SHIFT,
     }
 }
 
