@@ -255,6 +255,7 @@ fn pa_to_pspace_va(pa: u64) -> u64 {
 /// Bootstrap the user environment and drop into U-mode.
 pub fn bringup_rootserver(args: &BootArgs) -> ! {
     crate::kernel::smp::init_current_hart(args.hart_id, args.core_id);
+    crate::arch::riscv64::fpu::init_current_core();
     install_trap_vector();
     init_timer();
 
@@ -755,6 +756,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         t as *mut Tcb
     });
     tcb::set_current(t);
+    crate::arch::riscv64::fpu::lazy_restore(t);
     // Seed the scheduler's runqueue with the rootserver, so
     // `schedule()` always has a runnable TCB to return.
     unsafe {

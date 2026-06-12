@@ -78,6 +78,7 @@ pub const LABEL_TCB_SET_PRIORITY: u64 = 6;
 pub const LABEL_TCB_SET_SCHED_PARAMS: u64 = 8;
 pub const LABEL_TCB_SUSPEND: u64 = 12;
 pub const LABEL_TCB_BIND_NOTIFICATION: u64 = 14;
+pub const LABEL_TCB_SET_FLAGS: u64 = 17;
 pub const LABEL_CNODE_REVOKE: u64 = 18;
 pub const LABEL_CNODE_DELETE: u64 = 19;
 pub const LABEL_CNODE_COPY: u64 = 21;
@@ -105,9 +106,26 @@ pub const OBJ_MEGA_PAGE: u64 = 9;
 pub const OBJ_PAGE_TABLE: u64 = 10;
 
 pub const FAULT_UNKNOWN_SYSCALL: u64 = 2;
+pub const FAULT_USER_EXCEPTION: u64 = 3;
 pub const FAULT_VM_FAULT: u64 = 6;
 
+pub const USER_EXCEPTION_FAULT_IP: usize = 0;
+pub const USER_EXCEPTION_SP: usize = 1;
+pub const USER_EXCEPTION_NUMBER: usize = 2;
+pub const USER_EXCEPTION_CODE: usize = 3;
+pub const USER_EXCEPTION_LENGTH: usize = 4;
+
 pub const KERNEL_TIMER_IRQ: u64 = 96;
+
+pub const TCB_FLAG_NO_FLAG: u64 = 0x0;
+pub const TCB_FLAG_FPU_DISABLED: u64 = 0x1;
+pub const TCB_FLAG_MASK: u64 = TCB_FLAG_NO_FLAG | TCB_FLAG_FPU_DISABLED;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TcbSetFlagsResult {
+    pub error: u64,
+    pub flags: u64,
+}
 
 #[repr(C)]
 pub struct SlotRegion {
@@ -413,6 +431,29 @@ pub fn call_checked(service: u64, label: u64, extra_caps: &[u64], mrs: &[u64]) {
         if err != 0 {
             log_crate::error!("sel4-user: seL4 call failed label={} err={}", label, err);
             halt_loop();
+        }
+    }
+}
+
+/// Set or clear seL4 TCB feature flags.
+///
+/// Passing zero for both `clear` and `set` reads the current flags, matching
+/// upstream seL4's `TCB_SetFlags` contract.
+/// `flags` is valid when `error == 0`.
+pub fn sel4_tcb_set_flags(tcb: u64, clear: u64, set: u64) -> TcbSetFlagsResult {
+    unsafe {
+        let reply = sel4_call(tcb, msg_info(LABEL_TCB_SET_FLAGS, 0, 0, 2), &[clear, set]);
+        let err = msg_label(reply.info);
+        if err == 0 {
+            TcbSetFlagsResult {
+                error: err,
+                flags: reply.mrs[0],
+            }
+        } else {
+            TcbSetFlagsResult {
+                error: err,
+                flags: 0,
+            }
         }
     }
 }

@@ -17,7 +17,7 @@ Key commands:
 ```sh
 cargo fmt --all --check
 cargo check
-cargo build --release --target riscv64imac-unknown-none-elf -p kernel
+cargo build --release --target riscv64gc-unknown-none-elf -p kernel
 ./tools/pack-image.py
 ./tools/simulate.py
 ./tools/run-tests.py
@@ -30,7 +30,7 @@ TIMEOUT=1200 ./tools/run-xv6-user.py usertests
 
 ## Coding Style & Naming Conventions
 
-Follow standard Rust formatting with `cargo fmt`; the workspace uses the stable toolchain and the `riscv64imac-unknown-none-elf` target from `rust-toolchain.toml`. Use 4-space indentation, `snake_case` for functions and modules, `CamelCase` for types, and `SCREAMING_SNAKE_CASE` for constants. Keep unsafe, architecture-specific, and concurrency-sensitive code localized and documented where invariants are not obvious.
+Follow standard Rust formatting with `cargo fmt`; the workspace uses the stable toolchain and the `riscv64gc-unknown-none-elf` target from `rust-toolchain.toml`. Use 4-space indentation, `snake_case` for functions and modules, `CamelCase` for types, and `SCREAMING_SNAKE_CASE` for constants. Keep unsafe, architecture-specific, and concurrency-sensitive code localized and documented where invariants are not obvious.
 
 ## Testing Guidelines
 

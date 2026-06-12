@@ -142,14 +142,11 @@ restore_user_context:
 1:
     sd      sp, TRAP_SCRATCH_USER_CONTEXT(t0)
 
-    // Load sepc and sstatus. The kernel intentionally does not save or
-    // restore floating-point state; force sstatus.FS=Off on every return.
+    // Load sepc and sstatus. Rust updates sstatus.FS before reaching this
+    // path so it reflects the selected TCB's seL4 FPU flag state.
     ld      t0, 32*8(sp)
     csrw    sepc, t0
     ld      t2, 33*8(sp)
-    li      t3, 0x6000
-    not     t3, t3
-    and     t2, t2, t3
     csrw    sstatus, t2
 
     // Restore registers x1, x3..x31. x2 (user sp) is loaded last.

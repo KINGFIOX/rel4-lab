@@ -58,6 +58,8 @@ DEFAULT_CMAKE_DEFS = {
     "PLATFORM": "qemu-riscv-virt",
     "KernelSel4Arch": "riscv64",
     "SIMULATION": "ON",
+    "KernelRiscvExtD": "ON",
+    "KernelRiscvExtF": "ON",
     "MCS": "ON",
     "SMP": "ON",
     "NUM_NODES": "2",
@@ -145,6 +147,9 @@ def cache_needs_reconfigure(build_dir: Path, source_dir: Path, cache: dict[str, 
 def cache_env_overrides_differ(build_dir: Path, cache: dict[str, str]) -> bool:
     if "MCS" not in os.environ and cache.get("MCS") != DEFAULT_CMAKE_DEFS["MCS"]:
         return True
+    for key in ("KernelRiscvExtD", "KernelRiscvExtF"):
+        if cache.get(key) != DEFAULT_CMAKE_DEFS[key]:
+            return True
     if "SMP" in os.environ and cache.get("SMP") != cmake_smp(os.environ["SMP"]):
         return True
     if "SMP" in os.environ and "NUM_NODES" not in os.environ:
@@ -156,7 +161,8 @@ def cache_env_overrides_differ(build_dir: Path, cache: dict[str, str]) -> bool:
             return True
     if "NUM_NODES" in os.environ and cache.get("NUM_NODES") != os.environ["NUM_NODES"]:
         return True
-    if "SEL4TEST_REGEX" in os.environ and cache.get("LibSel4TestPrinterRegex") != os.environ["SEL4TEST_REGEX"]:
+    expected_regex = os.environ.get("SEL4TEST_REGEX", DEFAULT_CMAKE_DEFS["LibSel4TestPrinterRegex"])
+    if cache.get("LibSel4TestPrinterRegex") != expected_regex:
         return True
     if "QEMU_DTB" in os.environ:
         qemu_dtb = Path(os.environ["QEMU_DTB"])
@@ -182,6 +188,8 @@ def effective_cmake_values(build_dir: Path, cache: dict[str, str]) -> dict[str, 
     values = dict(DEFAULT_CMAKE_DEFS)
     for key in PRESERVED_CMAKE_KEYS:
         if key == "MCS" and "MCS" not in os.environ:
+            continue
+        if key == "LibSel4TestPrinterRegex" and "SEL4TEST_REGEX" not in os.environ:
             continue
         value = cache.get(key)
         if value:
@@ -246,7 +254,7 @@ def ensure_sel4_configured(build_dir: Path) -> None:
 
 def main() -> int:
     sel4_build_dir = Path(getenv("SEL4_BUILD_DIR", str(DEFAULT_SEL4_BUILD_DIR)))
-    rust_target = getenv("RUST_TARGET", "riscv64imac-unknown-none-elf")
+    rust_target = getenv("RUST_TARGET", "riscv64gc-unknown-none-elf")
     rust_kernel_elf = ROOT_DIR / "target" / rust_target / "release" / "kernel"
     rootserver_elf_env = os.environ.get("ROOTSERVER_ELF", "")
     rootserver_elf = Path(rootserver_elf_env) if rootserver_elf_env else None

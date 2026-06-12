@@ -23,7 +23,7 @@ from tool_common import (
 
 
 IMAGE_NAME = "sel4test-driver-image-riscv-qemu-riscv-virt"
-DEFAULT_EXPECTED_BASELINE = "162/165"
+DEFAULT_EXPECTED_BASELINE = ""
 
 
 def usage_error(arg: str) -> int:
@@ -85,7 +85,9 @@ def main(argv: list[str]) -> int:
     proc = runner.start()
     status = 2
     deadline = time.time() + timeout
-    baseline_re = rf"Test suite failed\. {expected_baseline} tests passed\."
+    baseline_re = (
+        rf"Test suite failed\. {expected_baseline} tests passed\." if expected_baseline else None
+    )
 
     def test_log_has(pattern: str) -> bool:
         return file_has_regex(kernel_debug_log_file, pattern) or file_has_regex(log_file, pattern)
@@ -97,7 +99,7 @@ def main(argv: list[str]) -> int:
             if test_log_has(r"Test suite passed\."):
                 status = 0
                 break
-            if test_log_has(baseline_re):
+            if baseline_re is not None and test_log_has(baseline_re):
                 status = 0
                 break
             if test_log_has(r"Test suite failed|seL4 root server abort|\*\*\* KERNEL PANIC"):
@@ -110,16 +112,23 @@ def main(argv: list[str]) -> int:
 
     if status == 2 and test_log_has(r"Test suite passed\."):
         status = 0
-    if status == 2 and test_log_has(baseline_re):
+    if status == 2 and baseline_re is not None and test_log_has(baseline_re):
         status = 0
 
     passed_line = last_regex_line(kernel_debug_log_file, r"Test suite passed\..*tests passed") or last_regex_line(
         log_file, r"Test suite passed\..*tests passed"
     )
-    baseline_line = last_regex_line(kernel_debug_log_file, baseline_re) or last_regex_line(log_file, baseline_re)
+    baseline_line = (
+        (
+            last_regex_line(kernel_debug_log_file, baseline_re)
+            or last_regex_line(log_file, baseline_re)
+        )
+        if baseline_re is not None
+        else None
+    )
     result_line = (
         passed_line
-        or (f"known no-FPU baseline: {baseline_line}" if baseline_line else None)
+        or (f"accepted baseline: {baseline_line}" if baseline_line else None)
         or "Test suite passed."
     )
     test_count = count_regex_lines(kernel_debug_log_file, r"^Starting test [0-9]+:")

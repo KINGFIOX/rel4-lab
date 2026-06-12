@@ -31,9 +31,8 @@ pub unsafe extern "C" fn _start() -> ! {
     naked_asm!(
         "fence.i",
 
-        // Clear sstatus.FS before any hart enters Rust or parks. This is
-        // CSR hygiene only: the kernel is built for IMAC and does not save,
-        // restore, or execute floating-point state.
+        // Clear sstatus.FS before any hart enters Rust or parks. The FPU
+        // path enables it explicitly only while saving/restoring user state.
         "li     t0, 0x6000",
         "csrc   sstatus, t0",
 
@@ -111,7 +110,8 @@ pub extern "C" fn init_kernel(
     hart_id: usize,
     core_id: usize,
 ) -> ! {
-    crate::arch::riscv64::trap::disable_fpu_access();
+    crate::arch::riscv64::fpu::clear_supervisor_access();
+    crate::arch::riscv64::fpu::disable_access();
 
     // Touch the linker symbols so they don't get stripped.
     let _ = unsafe {
@@ -147,8 +147,8 @@ pub extern "C" fn init_secondary_hart(
     hart_id: usize,
     core_id: usize,
 ) -> ! {
-    crate::arch::riscv64::trap::disable_fpu_access();
     crate::kernel::smp::init_current_hart(hart_id, core_id);
+    crate::arch::riscv64::fpu::init_current_core();
     if let Some(satp) = crate::kernel::smp::kernel_satp() {
         unsafe { crate::arch::riscv64::vspace::switch_satp(satp) };
     }

@@ -66,7 +66,7 @@ the shell.
 Build the Rust kernel explicitly:
 
 ```sh
-cargo build --release --target riscv64imac-unknown-none-elf -p kernel
+cargo build --release --target riscv64gc-unknown-none-elf -p kernel
 ```
 
 Pack the Rust kernel into the upstream `sel4test` image:
@@ -150,7 +150,7 @@ cargo check
 Build the kernel package explicitly:
 
 ```sh
-cargo build --release --target riscv64imac-unknown-none-elf -p kernel
+cargo build --release --target riscv64gc-unknown-none-elf -p kernel
 ```
 
 Clean up a stuck QEMU test process if a run is interrupted:

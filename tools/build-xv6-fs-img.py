@@ -32,7 +32,7 @@ def main() -> int:
     xv6_dir = Path(getenv("XV6_DIR", str(ROOT_DIR / "third_party" / "xv6-riscv")))
     out_dir = Path(getenv("OUT_DIR", str(ROOT_DIR / "target" / "xv6compat")))
     xv6_fs_img = Path(getenv("XV6_FS_IMG", str(out_dir / "fs.img")))
-    march = getenv("XV6_USER_MARCH", "rv64imac")
+    march = getenv("XV6_USER_MARCH", "rv64gc")
     mabi = getenv("XV6_USER_MABI", "lp64")
 
     require_dir(PREFIX, xv6_dir, f"XV6_DIR not found: {xv6_dir}")

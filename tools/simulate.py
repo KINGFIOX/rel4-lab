@@ -15,7 +15,7 @@ IMAGE_NAME = "sel4test-driver-image-riscv-qemu-riscv-virt"
 
 
 def main(argv: list[str]) -> int:
-    rust_target = getenv("RUST_TARGET", "riscv64imac-unknown-none-elf")
+    rust_target = getenv("RUST_TARGET", "riscv64gc-unknown-none-elf")
     kernel_elf = ROOT_DIR / "target" / rust_target / "release" / "kernel"
     packed_image = ROOT_DIR / "images" / IMAGE_NAME
     smp = qemu_smp_arg("1")

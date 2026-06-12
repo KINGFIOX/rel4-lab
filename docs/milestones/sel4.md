@@ -39,10 +39,154 @@ Focused single-core MCS slice:
 62/62 tests passed under qemu-riscv-virt with SMP=OFF.
 
 Broader single-core MCS run:
-best recorded result is 162/165 tests passed. The remaining failures are the
-known unsupported FPU tests. A later consumed-accounting run reached 161/165
-because SCHED0011 exceeded the QEMU timing tolerance by about 2 ms; that is
-tracked as simulation timing jitter, not the main MCS conformance frontier.
+the previous best recorded result was 162/165 tests passed before RISC-V FPU
+support landed. This broad run is now stale and should be refreshed; a later
+consumed-accounting run reached 161/165 because SCHED0011 exceeded the QEMU
+timing tolerance by about 2 ms, which is tracked as simulation timing jitter.
+
+Current broader SMP MCS sample:
+with an unfiltered `SMP=ON NUM_NODES=2` image and RISC-V FPU enabled,
+`TIMEOUT=300 ./tools/run-tests.py` reached TIMEOUTFAULT0002 before the harness
+timeout. The full-run log confirms FPU0000, FPU0002, FPU0003, and FPU0004 pass;
+observed non-FPU failures before the timeout were CANCEL_BADGED_SENDS_0001 and
+the known timing-sensitive SCHED0011.
+
+Focused RISC-V FPU slice:
+`SEL4TEST_REGEX='FPU000[0-4]' ./tools/pack-image.py` followed by
+`./tools/run-tests.py` passes 6 tests with 1 disabled under SMP=ON NUM_NODES=2.
+The upstream sel4test source defines FPU0001 as disabled; the kernel debug log
+confirms FPU0000, FPU0002, FPU0003, and FPU0004 pass.
+The requirement-by-requirement FPU alignment matrix lives in
+[`fpu-sel4-alignment.md`](fpu-sel4-alignment.md); the notes below summarize the
+current evidence but the matrix is the closure checklist for this area.
+A release-kernel instruction audit via `./tools/audit-kernel-fpu.py --build`
+maps every emitted FP-register/fcsr instruction found by `objdump` back to
+`kernel/src/arch/riscv64/fpu.rs` in `save_fpu_state`, `load_fpu_state`,
+`read_fcsr`, or `write_fcsr`; no incidental kernel FPU use is currently emitted
+outside the explicit context-management helpers. The audit recognises both
+FPU pseudo mnemonics and explicit `fcsr` / `fflags` / `frm` CSR operands in
+generic `csr*` disassembly forms. The 2026-06-12 revalidation found 464 such
+instructions, all confined to the FPU helper file, and the focused FPU
+sel4test slice still passed 6 tests with 1 disabled. The separate lifecycle audit
+covers the `sstatus` FS bit encodings and enable/disable paths, the
+upstream/local `csrr/csrw fcsr` helper shape, and the `set_fs_clean()` ordering
+before FP save/load instructions. It also rejects `nomem` on the Rust save/load
+asm so the compiler continues to treat the saved FPU image as memory touched by
+the context-management helpers, and now checks that the Rust toolchain, Cargo
+default target, kernel packer, and FPU instruction audit all default to the
+FPU-capable `riscv64gc-unknown-none-elf` target.
+The kernel packer also pins upstream sel4test's RISC-V `KernelRiscvExtD` and
+`KernelRiscvExtF` CMake options to `ON`, matching seL4's D-extension rule that
+enables F and `KernelHaveFPU`, so the packed user/test image and Rust kernel
+agree on the double-precision FPU context layout.
+It also pins the boot-only rootserver TCB to the same zero-state FPU baseline:
+`ROOTSERVER_TCB` is built from `Tcb::zero()`, `UserContext::zero()` embeds
+`FpuState::zero()`, initial user `sstatus` values do not pre-set FS bits, and
+the first user return still passes through `lazy_restore` before `sret`.
+A source lifecycle audit via `./tools/audit-fpu-lifecycle.py` checks vendored
+upstream seL4 anchors for the RISC-V FPU boot, owner-switch, lazy-restore,
+`switchToThread` restore point, restore-boundary, `TCB_SetFlags`,
+domain-handoff rules, D-extension FPU state layout and its 35-word
+`user_context` placement, and full `f0..f31`/`fcsr` save-load coverage, then
+checks the Rust hooks around per-core owner switching, per-hart boot
+initialisation,
+`TCB_SetFlags`, remote Thread invocation stall, TCB finalisation, affinity
+migration, trap entry/restore FS handling, and the RISC-V `UserException`
+fault-message shape used by FPU-disabled traps. It now also anchors the
+`TCB_SetFlags` decode boundary: upstream requires the two clear/set message
+words, reports `seL4_TruncatedMessage` for shorter invocations, and only
+writes the updated flags word for Call-style replies; the Rust path reads the
+same A2/A3 words and leaves Send/NBSend invocations reply-less. The same audit
+also anchors the
+upstream sel4test FPU source expectations for basic user FPU execution,
+multi-thread context-switch preservation, cross-core FPU migration,
+`TCB_SetFlags` read/disable/enable return flags, and disable-fault plus
+re-enable/reply completion. It also anchors the local
+TCB register and timeout-fault reply mapping to upstream RISC-V
+`frameRegisters[]` / `gpRegisters[]` and libsel4 `seL4_UserContext` order, so
+FPU-disabled fault replies and TCB register operations share the same visible
+register ABI. UserException fault replies are checked against upstream
+RISC-V's `EXCEPTION_MESSAGE`: replies may restore only FaultIP and SP, while
+Number and Code remain fault payload fields rather than reply-writeback
+registers. The FPU-disabled trap payload is now checked back to upstream
+RISC-V's default exception path: non-VM exceptions, including illegal
+instruction with `scause == 2`, call `handleUserLevelFault(scause, 0)`, so
+the delivered `UserException` carries Number 2 and Code 0.
+The local `sel4-user` crate exposes the same `TCB_SetFlags` label and
+`fpuDisabled` flag constants, plus a `seL4_TCB_SetFlags`-style result helper
+that returns both the error label and updated flags word. The audit now anchors
+the upstream `object-api.xml` contract that the resulting flags are returned in
+the first message register, and the syscall path keeps `TCB_SetFlags` Call
+success replies at one word for that value while Send/NBSend Thread-cap
+invocations only perform the flag side effects. It also exposes the RISC-V
+`UserException` fault label and MR indexes used to decode FPU-disabled trap IPC.
+`TCB_CopyRegisters` remains limited to upstream RISC-V's frame and
+general-purpose register sets: RISC-V `Arch_decodeTransfer` returns 0 and
+`Arch_performTransfer` is a no-op, so the saved FPU state is not an ABI-visible
+copy-register payload.
+Upstream also boots the idle thread with `seL4_TCBFlag_fpuDisabled`; this
+kernel has no persistent idle TCB, but its empty-runqueue path keeps the live
+FPU owner until the next thread switch or explicit release instead of trying
+to synthesize an idle-thread FPU handoff.
+The user-restore audit confirms every scheduler return path refreshes the
+selected TCB through `prepare_for_user_restore` / `lazy_restore`, with the
+rootserver boot path explicitly calling `lazy_restore` before the first `sret`.
+It now also locks the normal `kernel_exit`, remote-stall recovery, and
+empty-runqueue idle-loop resume paths to that same boundary, matching upstream
+seL4's normal and fastpath FS-state update points before dropping the kernel
+lock.
+Ordinary TCBs keep the upstream default flags value 0: both kernels create
+normal TCBs from zeroed memory and initialise only non-zero TCB fields, so
+`fpuDisabled` remains an opt-in `TCB_SetFlags` state rather than the default
+for normal user threads.
+The Rust implementation now mirrors upstream RISC-V's per-core
+`isFPUEnabled[]` shadow state with a local `FPU_ACCESS_ENABLED[]` shadow: trap
+entry still clears S-mode FS while Rust dispatch runs, `lazy_restore` updates
+the shadow for `fpuDisabled` or native-owner cases and refreshes the saved user
+context, and the restore trampoline writes that saved `sstatus` immediately
+before `sret`. The low-level FS helpers use the same `csrc` / `csrs sstatus`
+shape as upstream seL4's RISC-V FPU helpers, and the saved-TCB FS-state helper
+matches upstream by clearing FS bits before conditionally setting `FS=Clean`.
+The audit now keeps the local FPU access toggles shadow-only like upstream
+RISC-V seL4's `enableFpu()` / `disableFpu()`: `enable_access()` and
+`disable_access()` update only `FPU_ACCESS_ENABLED[]`. Separate boot and trap
+entry boundaries clear S-mode FS before ordinary Rust dispatch, and the selected
+TCB's saved `sstatus` is still written at restore.
+It also keeps the Rust helper surface and constants to the FS states used by
+the seL4 RISC-V lifecycle here: Off/mask for disabled kernel dispatch and Clean
+for boot/save/load and user restore, with no local Dirty/Initial helper path.
+The audit now also anchors
+upstream boot clearing `ksCurFPUOwner`, upstream RISC-V's BSS-backed
+`isFPUEnabled[]` default, upstream's affinity-core `nativeThreadUsingFPU`
+check, and the local explicit `FPU_OWNER = 0` /
+`FPU_ACCESS_ENABLED = false` startup state plus per-core owner lookup.
+SMP FPU owner handoff is checked against upstream RISC-V's
+`IpiRemoteCall_switchFpuOwner` path and `migrateTCB`'s `fpuRelease` before
+affinity updates. Ordinary remote TCB stall remains a separate path and does
+not eagerly save or clear the FPU owner, matching upstream's split between
+`IpiRemoteCall_Stall` and `IpiRemoteCall_switchFpuOwner`. `fpuRelease` is
+also audited through the Thread finalisation path:
+upstream `finaliseCap(Thread)` calls `Arch_prepareThreadDelete()`, and RISC-V
+uses that arch hook to run `fpuRelease()` before TCB memory can be reused.
+It is also checked as an owner-only operation:
+upstream only clears native FPU owners, and the Rust release path returns
+without side effects when the target TCB is not the recorded owner. The current
+Rust kernel has no separate seL4 IPC fastpath
+module, so upstream fastpath-only guards such as the notification signal
+`nativeThreadUsingFPU(dest)` slowpath fallback do not have a local fastpath
+counterpart yet. The lifecycle audit now checks both the upstream guard and the
+absence of a local fastpath module; if a fastpath is added, that guard must be
+mirrored there.
+`TCB_ReadRegisters` and `TCB_WriteRegisters` expose only the upstream frame and
+general-purpose register sets, not SSTATUS, so this is an implementation detail
+rather than an ABI-visible difference.
+The domain-handoff audit matches the currently enabled single-domain build:
+upstream releases the FPU owner from `prepareSetDomain` / `prepareNextDomain`,
+while this kernel has `NUM_DOMAINS = 1`, accepts only domain 0 in `DomainSet`,
+and has no active domain-rotation path. These single-domain preconditions are
+now source-audited so the upstream release point cannot be treated as covered if
+a live domain scheduler is later added without adding the corresponding FPU
+owner release.
 
 Focused SMP MCS slices:
 focused `SMP=ON NUM_NODES=2` runs pass for SCHED0022,
@@ -284,6 +428,7 @@ history belongs in git history rather than this status document.
 | SchedContext layout/refills | `SchedContext` uses the 128-byte seL4 core layout, a two-refill minimum, extra refill slots from larger SC objects, head/tail circular refill queues, and finalisation unregisters dead SCs from release scans. |
 | Consumed accounting | `SchedContext_Consumed`, timeout fault consumed values, and `YieldTo` consumed reporting use update-and-clear microsecond semantics with one-word success replies for direct SC invocations. |
 | Broader single-core ABI | CNode operations, endpoint cleanup, VSpace/untyped/fault paths, syscall register preservation, TLS/sync helpers, and serial-server IPC pass in focused slices. |
+| RISC-V FPU alignment | The kernel builds for `riscv64gc-unknown-none-elf`, and the image packer pins upstream sel4test to `KernelRiscvExtD=ON` / `KernelRiscvExtF=ON`, tracks a seL4-style per-core FPU owner, matches seL4 boot by starting each core with no current FPU owner and FPU access disabled, saves/restores FPU state lazily, releases owners on `TCB_SetFlags`, finalisation, affinity moves, and remote-owner handoff, keeps ordinary remote TCB stall separate from remote FPU-owner release, handles `TCB_SetFlags` with the upstream two-word clear/set decode boundary for both Call replies and Send/NBSend no-reply invocations, and stalls a target TCB running on another hart before Thread cap invocations can mutate its FPU-visible flags or saved context. Idle handoff follows upstream seL4 by leaving any live per-core FPU owner intact until the next owner switch or explicit release. User-return paths refresh FPU state through `prepare_for_user_restore` / `lazy_restore`, ordinary TCB flags default to 0 like upstream seL4, the boot-only rootserver TCB starts from an explicit zeroed FPU context before first `lazy_restore`, and the enabled single-domain build has no live domain-handoff FPU release path beyond the documented future multi-domain hook. FPU-disabled user faults are delivered as `UserException`, and fault replies restore only the registers covered by the reply length, matching seL4's `copyMRsFaultReply` rule. It passes the focused `FPU000[0-4]` sel4test slice. Release ELF audit confines all emitted FPU instructions to `arch/riscv64/fpu.rs` context helpers. |
 | SMP scheduler first pass | Per-core `SchedControl` BootInfo exposure, per-hart boot stacks/current-thread/timer slots, per-core ready queues, SBI IPI/RFENCE wrappers, remote current-TCB wakeup/preemption for TCB and SC unbind/finalise paths, idle switchback to the published kernel `satp`, runqueue affinity/priority/SC snapshots under BKL coverage, stale-priority ready-queue dequeue fallback, stale ready-head filtering, SchedContext tracked list, ASID table with all-hart TLB flush on ASID deletion, boot page-table pool, VSpace user PTE mutation, IRQ handler table, fixed-layout Endpoint/Notification wait queues, pending CNode_Revoke continuation state, locked restore trampoline handoff, Delete/Revoke finalise-before-empty CTE snapshots, CSpace lookup walks and cap snapshots, and CSpace/CDT CTE/MDB updates under the seL4-style BKL. Object-state storage uses `BklCell` and marker guards rather than external object locks or object lock-ordering rules. Focused `NUM_NODES=2` SMP MCS runs now pass `SCHED0022`, `SCHED_CONTEXT_0014`, `MULTICORE0001..0005`, `BIND0001..0004`, `BIND005..006`, `INTERRUPT0002..0006`, `IPC0001..0004`, `IPC0025..0026`, and `IPC1001..1004`. |
 
 ## Historical Notes
@@ -292,8 +437,8 @@ The recorded non-MCS line is retained only as background:
 
 ```text
 121/125 enabled RV64 single-core non-MCS tests passed after the
-no-kernel-floating-point cleanup. FPU0000, FPU0002, FPU0003, and FPU0004 fail
-because kernel floating-point/FPU flag support is intentionally absent.
+former no-kernel-floating-point cleanup. Its FPU failures were part of that old
+checkpoint and no longer describe the active MCS FPU baseline.
 ```
 
 Earlier bring-up milestones such as standalone UART boot, initial cap creation,
@@ -323,5 +468,6 @@ test slices:
    harden Delete/Revoke's current `finaliseCap` -> Zombie/remainder ->
    `reduceZombie` -> `emptySlot` path with stricter exposed/remainder
    continuation and cross-object ordering audits.
-5. Multi-domain scheduling beyond the currently enabled single-domain cases.
+5. Multi-domain scheduling beyond the currently enabled single-domain cases,
+   including upstream-style FPU owner release on domain handoff.
 6. Broader IPC cap-transfer and endpoint-unwrapping edge cases.

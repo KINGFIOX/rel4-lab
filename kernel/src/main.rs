@@ -13,9 +13,6 @@
 //!                          init_kernel(a0..a7)
 //! ```
 
-#[cfg(any(target_feature = "f", target_feature = "d"))]
-compile_error!("kernel must be built for RV64 without F/D floating-point extensions");
-
 extern crate core;
 
 #[macro_use]

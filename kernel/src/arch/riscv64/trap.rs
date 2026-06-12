@@ -15,11 +15,34 @@ use crate::abi::types::MessageInfo;
 use crate::arch::riscv64::{csr, sbi};
 use crate::object::cap::CapTag;
 
+/// RISC-V D-extension FPU state shape used by the current `riscv64gc` build.
+pub const RISCV_NUM_FP_REGS: usize = 32;
+pub const RISCV_FP_REG_BYTES: usize = 8;
+pub const RISCV_FPU_STATE_BYTES: usize = (RISCV_NUM_FP_REGS * RISCV_FP_REG_BYTES) + 8;
+
 /// User-mode register snapshot, exactly the layout consumed by `trap.S`.
 ///
 /// Field order is load-bearing: `regs[i]` lives at offset `i * 8`, with
 /// `regs[0]` ignored (x0 is hardwired zero), then `pc`, `sstatus`,
-/// and one reserved slot.
+/// restart PC, and the RISC-V FPU state.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct FpuState {
+    pub regs: [u64; RISCV_NUM_FP_REGS],
+    pub fcsr: u32,
+    pub _pad: u32,
+}
+
+impl FpuState {
+    pub const fn zero() -> Self {
+        Self {
+            regs: [0; RISCV_NUM_FP_REGS],
+            fcsr: 0,
+            _pad: 0,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Default)]
 pub struct UserContext {
@@ -31,12 +54,34 @@ pub struct UserContext {
     pub sstatus: u64,
     /// seL4 FaultIP/restart PC saved at kernel entry.
     pub restart_pc: u64,
+    /// Saved RISC-V FPU registers and fcsr.
+    pub fpu: FpuState,
 }
 
 const _: () = {
-    // 32 GPRs + pc + sstatus + reserved = 35 words.
-    assert!(core::mem::size_of::<UserContext>() == 35 * 8);
+    // 32 GPRs + pc + sstatus + restart_pc + 32 FPRs + fcsr/pad.
+    assert!(core::mem::size_of::<UserContext>() == 68 * 8);
+    assert!(core::mem::size_of::<FpuState>() == RISCV_FPU_STATE_BYTES);
+    assert!(core::mem::offset_of!(UserContext, regs) == 0);
+    assert!(core::mem::offset_of!(UserContext, pc) == 32 * 8);
+    assert!(core::mem::offset_of!(UserContext, sstatus) == 33 * 8);
+    assert!(core::mem::offset_of!(UserContext, restart_pc) == 34 * 8);
+    assert!(core::mem::offset_of!(UserContext, fpu) == 35 * 8);
+    assert!(core::mem::offset_of!(FpuState, regs) == 0);
+    assert!(core::mem::offset_of!(FpuState, fcsr) == RISCV_NUM_FP_REGS * RISCV_FP_REG_BYTES);
 };
+
+impl UserContext {
+    pub const fn zero() -> Self {
+        Self {
+            regs: [0; 32],
+            pc: 0,
+            sstatus: 0,
+            restart_pc: 0,
+            fpu: FpuState::zero(),
+        }
+    }
+}
 
 /// Register name -> index in `UserContext.regs`.
 #[repr(usize)]
@@ -63,8 +108,98 @@ impl UserRegister {
     }
 }
 
+/// RISC-V frame registers copied by seL4 TCB register operations.
+///
+/// Matches upstream `frameRegisters[]`: `FaultIP, ra, sp, gp, s0..s11`.
+/// Index 0 is a PC sentinel; the saved value lives in `UserContext.restart_pc`.
+pub const SEL4_TCB_FRAME_REGS: [usize; 16] = [
+    0,
+    UserRegister::Ra.index(),
+    UserRegister::Sp.index(),
+    UserRegister::Gp.index(),
+    8,
+    9,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+];
+
+/// RISC-V general-purpose registers copied by seL4 TCB register operations.
+///
+/// Matches upstream `gpRegisters[]`: `a0..a7, t0..t6, tp`.
+pub const SEL4_TCB_GP_REGS: [usize; 16] = [
+    UserRegister::A0.index(),
+    UserRegister::A1.index(),
+    UserRegister::A2.index(),
+    UserRegister::A3.index(),
+    UserRegister::A4.index(),
+    UserRegister::A5.index(),
+    UserRegister::A6.index(),
+    UserRegister::A7.index(),
+    UserRegister::T0.index(),
+    6,
+    7,
+    28,
+    29,
+    30,
+    31,
+    UserRegister::Tp.index(),
+];
+
+/// Word count of libsel4's RISC-V `seL4_UserContext`.
+pub const SEL4_USER_CONTEXT_WORDS: usize = SEL4_TCB_FRAME_REGS.len() + SEL4_TCB_GP_REGS.len();
+
+/// RISC-V `seL4_UserContext` word index to local GPR index.
+///
+/// Matches libsel4 order:
+/// `pc, ra, sp, gp, s0..s11, a0..a7, t0..t6, tp`.
+/// Index 0 is a PC sentinel; all other entries are `UserContext.regs[]`
+/// indexes.
+pub const SEL4_USER_CONTEXT_REGS: [usize; SEL4_USER_CONTEXT_WORDS] = [
+    0,
+    UserRegister::Ra.index(),
+    UserRegister::Sp.index(),
+    UserRegister::Gp.index(),
+    8,
+    9,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    UserRegister::A0.index(),
+    UserRegister::A1.index(),
+    UserRegister::A2.index(),
+    UserRegister::A3.index(),
+    UserRegister::A4.index(),
+    UserRegister::A5.index(),
+    UserRegister::A6.index(),
+    UserRegister::A7.index(),
+    UserRegister::T0.index(),
+    6,
+    7,
+    28,
+    29,
+    30,
+    31,
+    UserRegister::Tp.index(),
+];
+
 pub const SSTATUS_SPIE: u64 = 1 << 5;
 pub const SSTATUS_FS_MASK: u64 = 0b11 << 13;
+pub const SSTATUS_FS_CLEAN: u64 = 0b10 << 13;
 pub const SSTATUS_SUM: u64 = 1 << 18;
 pub const USER_SSTATUS: u64 = SSTATUS_SPIE;
 pub const ROOTSERVER_SSTATUS: u64 = USER_SSTATUS | SSTATUS_SUM;
@@ -92,6 +227,7 @@ pub unsafe fn restore_user_context_with_kernel_lock(
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ExceptionCode {
     InstructionAccessFault = 1,
+    IllegalInstruction = 2,
     LoadAccessFault = 5,
     StoreAccessFault = 7,
     EnvironmentCallFromUser = 8,
@@ -104,6 +240,7 @@ impl ExceptionCode {
     const fn from_raw(value: usize) -> Option<Self> {
         match value {
             1 => Some(Self::InstructionAccessFault),
+            2 => Some(Self::IllegalInstruction),
             5 => Some(Self::LoadAccessFault),
             7 => Some(Self::StoreAccessFault),
             8 => Some(Self::EnvironmentCallFromUser),
@@ -151,11 +288,6 @@ pub fn init_timer() {
     csr::set_sie(csr::sie() | SIE_SSIE | SIE_STIE | SIE_SEIE);
     crate::kernel::smp::set_last_budget_account_ticks(csr::time() as u64);
     program_next_timer();
-}
-
-#[inline]
-pub fn disable_fpu_access() {
-    csr::set_sstatus(csr::sstatus() & !(SSTATUS_FS_MASK as usize));
 }
 
 fn program_next_timer() {

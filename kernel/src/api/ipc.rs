@@ -43,7 +43,7 @@ use crate::abi::fault::FaultLabel;
 use crate::abi::types::MessageInfo;
 use crate::api::cspace::{self, lookup_cap};
 use crate::api::thread;
-use crate::arch::riscv64::trap::{UserContext, UserRegister};
+use crate::arch::riscv64::trap::{SEL4_USER_CONTEXT_REGS, UserContext, UserRegister};
 use crate::object::cap::{Cap, CapTag};
 use crate::object::cnode::Cte;
 use crate::object::endpoint::{self, EpState};
@@ -904,16 +904,10 @@ pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb) {
             if info.label() == 0 {
                 match fault_label {
                     label if label == FaultLabel::UnknownSyscall.raw() => {
-                        apply_unknown_syscall_reply(cur, uc, caller)
+                        apply_unknown_syscall_reply(cur, uc, caller, info.length())
                     }
                     label if label == FaultLabel::UserException.raw() => {
-                        let pc = reply_mr(cur, uc, 0);
-                        let sp = reply_mr(cur, uc, 1);
-                        tcb::write_user_context(
-                            caller,
-                            Some(pc),
-                            &[(UserRegister::Sp.index(), sp)],
-                        );
+                        apply_user_exception_reply(cur, uc, caller, info.length())
                     }
                     label if label == FaultLabel::Timeout.raw() => {
                         apply_timeout_reply(cur, uc, caller, info.length())
@@ -956,47 +950,35 @@ pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb) {
         }
     }
 }
+
+unsafe fn apply_user_exception_reply(
+    sender: *mut tcb::Tcb,
+    uc: &UserContext,
+    caller: *mut tcb::Tcb,
+    length: u64,
+) {
+    let n = (length as usize).min(2);
+    let mut pc = None;
+    let mut regs = [(0usize, 0u64); 1];
+    let mut reg_count = 0;
+    unsafe {
+        if n >= 1 {
+            pc = Some(reply_mr(sender, uc, 0));
+        }
+        if n >= 2 {
+            regs[reg_count] = (UserRegister::Sp.index(), reply_mr(sender, uc, 1));
+            reg_count += 1;
+        }
+        tcb::write_user_context(caller, pc, &regs[..reg_count]);
+    }
+}
+
 unsafe fn apply_timeout_reply(
     sender: *mut tcb::Tcb,
     uc: &UserContext,
     caller: *mut tcb::Tcb,
     length: u64,
 ) {
-    const X_INDEX: [usize; 32] = [
-        0,
-        UserRegister::Ra.index(),
-        UserRegister::Sp.index(),
-        UserRegister::Gp.index(),
-        8,
-        9,
-        18,
-        19,
-        20,
-        21,
-        22,
-        23,
-        24,
-        25,
-        26,
-        27,
-        UserRegister::A0.index(),
-        UserRegister::A1.index(),
-        UserRegister::A2.index(),
-        UserRegister::A3.index(),
-        UserRegister::A4.index(),
-        UserRegister::A5.index(),
-        UserRegister::A6.index(),
-        UserRegister::A7.index(),
-        UserRegister::T0.index(),
-        6,
-        7,
-        28,
-        29,
-        30,
-        31,
-        UserRegister::Tp.index(),
-    ];
-
     let n = (length as usize).min(32);
     let mut values = [0u64; 32];
     unsafe {
@@ -1011,7 +993,7 @@ unsafe fn apply_timeout_reply(
             if i == 0 {
                 pc = Some(v);
             } else {
-                let reg = X_INDEX[i];
+                let reg = SEL4_USER_CONTEXT_REGS[i];
                 if reg != 0 {
                     regs[reg_count] = (reg, v);
                     reg_count += 1;
@@ -1043,35 +1025,36 @@ unsafe fn apply_unknown_syscall_reply(
     sender: *mut tcb::Tcb,
     uc: &UserContext,
     caller: *mut tcb::Tcb,
+    length: u64,
 ) {
-    let pc = unsafe { reply_mr(sender, uc, 0) };
-    let sp = unsafe { reply_mr(sender, uc, 1) };
-    let ra = unsafe { reply_mr(sender, uc, 2) };
-    let a0 = unsafe { reply_mr(sender, uc, 3) };
-    let a1 = unsafe { reply_mr(sender, uc, 4) };
-    let a2 = unsafe { reply_mr(sender, uc, 5) };
-    let a3 = unsafe { reply_mr(sender, uc, 6) };
-    let a4 = unsafe { reply_mr(sender, uc, 7) };
-    let a5 = unsafe { reply_mr(sender, uc, 8) };
-    let a6 = unsafe { reply_mr(sender, uc, 9) };
-    let a7 = unsafe { reply_mr(sender, uc, 10) };
+    const SYSCALL_REPLY_REGS: [usize; 10] = [
+        0,
+        UserRegister::Sp.index(),
+        UserRegister::Ra.index(),
+        UserRegister::A0.index(),
+        UserRegister::A1.index(),
+        UserRegister::A2.index(),
+        UserRegister::A3.index(),
+        UserRegister::A4.index(),
+        UserRegister::A5.index(),
+        UserRegister::A6.index(),
+    ];
+
+    let n = (length as usize).min(SYSCALL_REPLY_REGS.len());
+    let mut pc = None;
+    let mut regs = [(0usize, 0u64); SYSCALL_REPLY_REGS.len() - 1];
+    let mut reg_count = 0;
     unsafe {
-        tcb::write_user_context(
-            caller,
-            Some(pc),
-            &[
-                (UserRegister::Sp.index(), sp),
-                (UserRegister::Ra.index(), ra),
-                (UserRegister::A0.index(), a0),
-                (UserRegister::A1.index(), a1),
-                (UserRegister::A2.index(), a2),
-                (UserRegister::A3.index(), a3),
-                (UserRegister::A4.index(), a4),
-                (UserRegister::A5.index(), a5),
-                (UserRegister::A6.index(), a6),
-                (UserRegister::A7.index(), a7),
-            ],
-        );
+        for (i, reg) in SYSCALL_REPLY_REGS.iter().copied().enumerate().take(n) {
+            let value = reply_mr(sender, uc, i);
+            if i == 0 {
+                pc = Some(value);
+            } else if reg != 0 {
+                regs[reg_count] = (reg, value);
+                reg_count += 1;
+            }
+        }
+        tcb::write_user_context(caller, pc, &regs[..reg_count]);
     }
 }
 

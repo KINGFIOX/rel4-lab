@@ -18,7 +18,7 @@
 use core::ptr::null_mut;
 
 use crate::abi::constants::MAX_NUM_NODES;
-use crate::arch::riscv64::trap::UserContext;
+use crate::arch::riscv64::trap::{SSTATUS_FS_CLEAN, SSTATUS_FS_MASK, UserContext};
 use crate::kernel::smp::{BklCell, BklObjectGuard};
 use crate::object::cap::Cap;
 use crate::object::cnode::Cte;
@@ -63,6 +63,8 @@ pub const TCB_BUFFER_SLOT: usize = 2;
 pub const TCB_FAULT_HANDLER_SLOT: usize = 3;
 pub const TCB_TIMEOUT_HANDLER_SLOT: usize = 4;
 pub(crate) const TCB_SENDER_EXTRA_CAPS: usize = 3;
+pub const TCB_FLAG_FPU_DISABLED: u64 = 0x1;
+pub const TCB_FLAG_MASK: u64 = TCB_FLAG_FPU_DISABLED;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -932,13 +934,15 @@ pub(crate) unsafe fn prepare_for_user_restore(tcb: *mut Tcb) -> *mut UserContext
     if tcb.is_null() {
         return null_mut();
     }
-    unsafe {
+    let ctx = unsafe {
         let _guard = lock_state(tcb);
         if (*tcb).state == ThreadState::Restart as u8 {
             (*tcb).state = ThreadState::Running as u8;
         }
         &raw mut (*tcb).context
-    }
+    };
+    crate::arch::riscv64::fpu::lazy_restore(tcb);
+    ctx
 }
 
 pub(crate) unsafe fn set_running_with_reply_regs(tcb: *mut Tcb, badge: u64, info_word: u64) {
@@ -1981,6 +1985,8 @@ pub struct Tcb {
 
     /// MCS scheduling context currently bound to this TCB, or 0 for passive.
     pub sched_context: u64,
+    /// seL4_TCBFlag bits. RISC-V currently uses bit 0 for fpuDisabled.
+    pub flags: u64,
     /// MCS `SchedContext_YieldTo` bookkeeping. `yield_to_sc` is set on
     /// the yielding TCB; `yield_from_tcb` is set on the target TCB.
     pub yield_to_sc: u64,
@@ -2045,12 +2051,7 @@ impl Tcb {
     pub const fn zero() -> Self {
         Tcb {
             ctes: [Cte::null(); TCB_CNODE_ENTRIES],
-            context: UserContext {
-                regs: [0; 32],
-                pc: 0,
-                sstatus: 0,
-                restart_pc: 0,
-            },
+            context: UserContext::zero(),
             state: 0,
             priority: 0,
             mcp: 0,
@@ -2061,6 +2062,7 @@ impl Tcb {
             ipc_buffer_uva: 0,
             ipc_buffer_kva: 0,
             sched_context: 0,
+            flags: 0,
             yield_to_sc: 0,
             yield_to_consumed_start: 0,
             yield_from_tcb: 0,
@@ -2266,6 +2268,13 @@ pub unsafe fn set_affinity(tcb: *mut Tcb, affinity: u8) {
             let _guard = lock_state(tcb);
             (*tcb).state
         };
+        let old_affinity = {
+            let _guard = lock_state(tcb);
+            (*tcb).affinity
+        };
+        if core_for_affinity(old_affinity) != core_for_affinity(affinity) {
+            crate::arch::riscv64::fpu::release(tcb);
+        }
         let was_runnable =
             state == ThreadState::Running as u8 || state == ThreadState::Restart as u8;
         let running_core = crate::kernel::smp::current_core_of_tcb(tcb);
@@ -2294,6 +2303,53 @@ pub unsafe fn set_tls_base(tcb: *mut Tcb, tls_base: u64) {
         let _guard = lock_state(tcb);
         (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::Tp.index()] = tls_base;
     }
+}
+
+pub(crate) fn fpu_disabled_snapshot(tcb: *const Tcb) -> bool {
+    if tcb.is_null() {
+        return true;
+    }
+    unsafe {
+        let _guard = lock_state(tcb);
+        (*tcb).flags & TCB_FLAG_FPU_DISABLED != 0
+    }
+}
+
+pub(crate) unsafe fn set_fpu_context_enabled(tcb: *mut Tcb, enabled: bool) {
+    if tcb.is_null() {
+        return;
+    }
+    unsafe {
+        let sstatus = (*tcb).context.sstatus & !SSTATUS_FS_MASK;
+        (*tcb).context.sstatus = if enabled {
+            sstatus | SSTATUS_FS_CLEAN
+        } else {
+            sstatus
+        };
+    }
+}
+
+pub unsafe fn set_flags(tcb: *mut Tcb, clear: u64, set: u64) -> u64 {
+    if tcb.is_null() {
+        return 0;
+    }
+    let flags = unsafe {
+        let _guard = lock_state(tcb);
+        let mut flags = (*tcb).flags;
+        flags &= !clear;
+        flags |= set & TCB_FLAG_MASK;
+        (*tcb).flags = flags;
+        flags
+    };
+
+    if flags & TCB_FLAG_FPU_DISABLED != 0 {
+        crate::arch::riscv64::fpu::release(tcb);
+        unsafe { set_fpu_context_enabled(tcb, false) };
+    } else if current() == tcb {
+        crate::arch::riscv64::fpu::lazy_restore(tcb);
+    }
+
+    flags
 }
 
 pub unsafe fn set_debug_name(tcb: *mut Tcb, name: *const u8, len: usize) {
@@ -2398,6 +2454,7 @@ pub unsafe fn finalize(tcb: *mut Tcb) {
         // detach the bound sched context and complete any yield-to yielder,
         // then run the normal suspend path before clearing Rust-local state.
         unbind_notification(tcb);
+        crate::arch::riscv64::fpu::release(tcb);
         let sched_context = {
             let _guard = lock_state(tcb);
             (*tcb).sched_context
@@ -2421,6 +2478,7 @@ unsafe fn clear_finalized_state(tcb: *mut Tcb) {
         (*tcb).reply_object = 0;
         clear_endpoint_ipc_state_locked(tcb);
         (*tcb).sched_context = 0;
+        (*tcb).flags = 0;
         (*tcb).yield_to_sc = 0;
         (*tcb).yield_to_consumed_start = 0;
         (*tcb).yield_from_tcb = 0;

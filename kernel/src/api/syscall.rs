@@ -184,10 +184,19 @@ fn write_error_reply(uc: &mut UserContext, e: SyscallError) {
 ///
 /// For Notification caps this becomes a `sendSignal` call. For
 /// Endpoint caps we walk the EP state machine in `api::ipc::send`.
-/// Other cap kinds (the test suite Sends to CNodes / Untyped during
-/// SYSCALL0001/0002/0004) are silently dropped to match the C kernel.
+/// Thread caps support the FPU-related `TCB_SetFlags` send-only
+/// invocation. Other cap kinds (the test suite Sends to CNodes / Untyped
+/// during SYSCALL0001/0002/0004) are silently dropped to match the local
+/// compatibility baseline.
 pub fn do_send(uc: &mut UserContext, nb: bool) {
     let cptr = uc.regs[UserRegister::A0.index()];
+    let raw_info = uc.regs[UserRegister::A1.index()];
+    let info = MessageInfo(raw_info);
+    let label = info.label();
+    let mut length = info.length();
+    if length > N_MSG_REGISTERS as u64 && !thread::current_has_ipc_buffer() {
+        length = N_MSG_REGISTERS as u64;
+    }
     let (cap, slot) = match unsafe { thread::with_current(|t| lookup_cap(t, cptr)) } {
         Ok(v) => v,
         Err(_) => return,
@@ -220,6 +229,11 @@ pub fn do_send(uc: &mut UserContext, nb: bool) {
                     crate::object::tcb::clear_reply_slot_if(caller, slot as u64);
                 }
             }
+        },
+        Some(CapTag::Thread) => unsafe {
+            thread::with_current(|t| {
+                let _ = invocation::handle_thread_send(t, slot, cap, label, length, uc);
+            });
         },
         _ => {}
     }

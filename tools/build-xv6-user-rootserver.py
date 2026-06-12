@@ -80,9 +80,9 @@ def main(argv: list[str]) -> int:
     xv6_dir = Path(getenv("XV6_DIR", str(ROOT_DIR / "third_party" / "xv6-riscv")))
     out_dir = Path(getenv("OUT_DIR", str(ROOT_DIR / "target" / "xv6compat")))
     user_base = getenv("XV6_USER_BASE", "0x10000")
-    march = getenv("XV6_USER_MARCH", "rv64imac")
+    march = getenv("XV6_USER_MARCH", "rv64gc")
     mabi = getenv("XV6_USER_MABI", "lp64")
-    rust_target = getenv("RUST_TARGET", "riscv64imac-unknown-none-elf")
+    rust_target = getenv("RUST_TARGET", "riscv64gc-unknown-none-elf")
 
     program = argv[0].removeprefix("_")
     program_args = argv[1:]

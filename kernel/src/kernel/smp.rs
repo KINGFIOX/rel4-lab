@@ -121,8 +121,11 @@ static KERNEL_SATP: AtomicU64 = AtomicU64::new(0);
 static REMOTE_STALL_PENDING_MASK: AtomicUsize = AtomicUsize::new(0);
 static REMOTE_STALL_DONE_MASK: AtomicUsize = AtomicUsize::new(0);
 static REMOTE_STALL_TARGET_TCB: AtomicUsize = AtomicUsize::new(0);
+static REMOTE_STALL_OP: AtomicUsize = AtomicUsize::new(REMOTE_OP_STALL_TCB);
 
 const NO_KERNEL_LOCK_OWNER: usize = usize::MAX;
+const REMOTE_OP_STALL_TCB: usize = 1;
+const REMOTE_OP_RELEASE_FPU_OWNER: usize = 2;
 pub const SECONDARY_BOOT_WAIT_MAGIC: usize = 0x534d_5057_4149_5421;
 pub const SECONDARY_BOOT_READY_MAGIC: usize = 0x534d_5052_4541_4459;
 
@@ -393,11 +396,24 @@ pub fn remote_tcb_stall(tcb: *const Tcb) {
     if core == current_core_id() {
         return;
     }
+    remote_core_op(core, tcb, REMOTE_OP_STALL_TCB);
+}
+
+pub fn remote_fpu_owner_release(core: usize, tcb: *const Tcb) {
+    debug_assert_kernel_lock_held();
+    if tcb.is_null() || core >= MAX_NUM_NODES || core == current_core_id() {
+        return;
+    }
+    remote_core_op(core, tcb, REMOTE_OP_RELEASE_FPU_OWNER);
+}
+
+fn remote_core_op(core: usize, tcb: *const Tcb, op: usize) {
     let Some(bit) = core_bit(core) else {
         return;
     };
 
     REMOTE_STALL_TARGET_TCB.store(tcb as usize, Ordering::Release);
+    REMOTE_STALL_OP.store(op, Ordering::Release);
     REMOTE_STALL_DONE_MASK.store(0, Ordering::Release);
     REMOTE_STALL_PENDING_MASK.store(bit, Ordering::Release);
     wake_core(core);
@@ -408,6 +424,7 @@ pub fn remote_tcb_stall(tcb: *const Tcb) {
 
     REMOTE_STALL_PENDING_MASK.store(0, Ordering::Release);
     REMOTE_STALL_TARGET_TCB.store(0, Ordering::Release);
+    REMOTE_STALL_OP.store(REMOTE_OP_STALL_TCB, Ordering::Release);
 }
 
 #[inline]
@@ -431,6 +448,17 @@ fn handle_remote_stall_while_waiting_for_kernel_lock() -> bool {
     }
 
     let target = REMOTE_STALL_TARGET_TCB.load(Ordering::Acquire);
+    let op = REMOTE_STALL_OP.load(Ordering::Acquire);
+    // seL4 keeps ordinary remote TCB stall separate from the remote FPU
+    // owner switch; the latter saves and clears the FPU owner without
+    // descheduling the target TCB.
+    if op == REMOTE_OP_RELEASE_FPU_OWNER {
+        if target != 0 {
+            crate::arch::riscv64::fpu::release_on_current_core(target as *mut Tcb);
+        }
+        REMOTE_STALL_DONE_MASK.fetch_or(bit, Ordering::AcqRel);
+        return false;
+    }
     let hart = current_hart();
     let stalled_current = target != 0 && hart.current_tcb.load(Ordering::Acquire) == target;
     if stalled_current {

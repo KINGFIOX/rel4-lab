@@ -13,7 +13,10 @@ use crate::abi::types::MessageInfo;
 use crate::api::cspace;
 use crate::api::syscall::SyscallError;
 use crate::api::thread::Thread;
-use crate::arch::riscv64::trap::{UserContext, UserRegister};
+use crate::arch::riscv64::trap::{
+    SEL4_TCB_FRAME_REGS, SEL4_TCB_GP_REGS, SEL4_USER_CONTEXT_REGS, SEL4_USER_CONTEXT_WORDS,
+    UserContext, UserRegister,
+};
 use crate::kernel::smp::{BklCell, debug_assert_kernel_lock_held};
 use crate::object::cap::{
     Cap, CapTag, FRAME_RIGHTS_KERNEL_ONLY, FRAME_RIGHTS_READ_ONLY, FRAME_RIGHTS_READ_WRITE,
@@ -27,46 +30,6 @@ const TCB_COPY_SUSPEND_SOURCE: u64 = 1 << 0;
 const TCB_COPY_RESUME_TARGET: u64 = 1 << 1;
 const TCB_COPY_TRANSFER_FRAME: u64 = 1 << 2;
 const TCB_COPY_TRANSFER_INTEGER: u64 = 1 << 3;
-
-const TCB_FRAME_REGS: [usize; 16] = [
-    0,
-    UserRegister::Ra.index(),
-    UserRegister::Sp.index(),
-    UserRegister::Gp.index(),
-    8,
-    9,
-    18,
-    19,
-    20,
-    21,
-    22,
-    23,
-    24,
-    25,
-    26,
-    27,
-];
-
-const TCB_GP_REGS: [usize; 16] = [
-    UserRegister::A0.index(),
-    UserRegister::A1.index(),
-    UserRegister::A2.index(),
-    UserRegister::A3.index(),
-    UserRegister::A4.index(),
-    UserRegister::A5.index(),
-    UserRegister::A6.index(),
-    UserRegister::A7.index(),
-    UserRegister::T0.index(),
-    6,
-    7,
-    28,
-    29,
-    30,
-    31,
-    UserRegister::Tp.index(),
-];
-
-const TCB_USER_CONTEXT_WORDS: u64 = (TCB_FRAME_REGS.len() + TCB_GP_REGS.len()) as u64;
 const SEL4_IPC_BUFFER_SIZE_BITS: u64 = 10;
 
 /// Object type IDs as defined by `seL4_ObjectType` (`api_object` +
@@ -172,6 +135,7 @@ fn invocation_label_matches(label_id: u64, label: InvocationLabel) -> bool {
 
 pub fn success_reply_length(tag: Option<CapTag>, label_id: u64) -> u64 {
     match tag {
+        Some(CapTag::Thread) if label_id == InvocationLabel::TcbSetFlags.raw() => 1,
         Some(CapTag::Frame) if label_id == InvocationLabel::RiscvPageGetAddress.raw() => 1,
         Some(CapTag::SchedContext)
             if label_id == InvocationLabel::SchedContextConsumed.raw()
@@ -1311,9 +1275,7 @@ pub fn handle_sched_context(
 /// without actually starting/resuming the thread. The test driver's
 /// expectation in the 116-test set is that these calls succeed; once we
 /// land a real context-switch path the same code will gain real
-/// behaviour without changing the parse/validate logic. `TCBSetFlags`
-/// is intentionally unsupported: on RISC-V this is the FPU flag surface,
-/// and this kernel does not own or expose floating-point context.
+/// behaviour without changing the parse/validate logic.
 pub fn handle_thread(
     thread: &Thread,
     slot: *mut Cte,
@@ -1322,12 +1284,39 @@ pub fn handle_thread(
     length: u64,
     uc: &mut UserContext,
 ) -> Result<(), SyscallError> {
+    handle_thread_inner(thread, slot, cap, label_id, length, uc, true)
+}
+
+pub fn handle_thread_send(
+    thread: &Thread,
+    slot: *mut Cte,
+    cap: Cap,
+    label_id: u64,
+    length: u64,
+    uc: &mut UserContext,
+) -> Result<(), SyscallError> {
+    if !invocation_label_matches(label_id, InvocationLabel::TcbSetFlags) {
+        return Ok(());
+    }
+    handle_thread_inner(thread, slot, cap, label_id, length, uc, false)
+}
+
+fn handle_thread_inner(
+    thread: &Thread,
+    slot: *mut Cte,
+    cap: Cap,
+    label_id: u64,
+    length: u64,
+    uc: &mut UserContext,
+    reply: bool,
+) -> Result<(), SyscallError> {
     use crate::object::tcb;
 
     let tcb_ptr = tcb::from_cap(cap);
     if tcb_ptr.is_null() {
         return Err(SyscallError::InvalidCapability);
     }
+    crate::kernel::smp::remote_tcb_stall(tcb_ptr);
 
     match label_id {
         id if id == InvocationLabel::TcbConfigure.raw() => {
@@ -1589,7 +1578,7 @@ pub fn handle_thread(
             // libsel4: tag = MessageInfo(TCBWriteRegisters, 0, 0, 34)
             //   mr0 = (resume_target & 1) | ((arch_flags & 0xff) << 8)
             //   mr1 = count, mr2 = pc, mr3 = ra
-            //   mr4.. = sp, gp, tp, s0..s11, a0..a7, t0..t6  (in that order)
+            //   mr4.. = sp, gp, s0..s11, a0..a7, t0..t6, tp  (in that order)
             if length < 2 {
                 return Err(SyscallError::TruncatedMessage);
             }
@@ -1613,49 +1602,8 @@ pub fn handle_thread(
             //   24..30:t0..t6, 31:tp
             // Note `tp` sits at the END of the struct on RISC-V, *not*
             // at position 4 — a layout quirk vs. the standard ABI
-            // ordering. Slots 0/1 are 0-marked because pc/ra are
-            // handled above.
-            const X_INDEX: [usize; 32] = [
-                // 0 pc, 1 ra (handled above).
-                0,
-                0,
-                // 2 sp.
-                UserRegister::Sp.index(),
-                // 3 gp.
-                UserRegister::Gp.index(),
-                // 4..15 s0..s11.
-                8,
-                9,
-                18,
-                19,
-                20,
-                21,
-                22,
-                23,
-                24,
-                25,
-                26,
-                27,
-                // 16..23 a0..a7.
-                UserRegister::A0.index(),
-                UserRegister::A1.index(),
-                UserRegister::A2.index(),
-                UserRegister::A3.index(),
-                UserRegister::A4.index(),
-                UserRegister::A5.index(),
-                UserRegister::A6.index(),
-                UserRegister::A7.index(),
-                // 24..30 t0..t6.
-                UserRegister::T0.index(),
-                6,
-                7,
-                28,
-                29,
-                30,
-                31,
-                // 31 tp.
-                UserRegister::Tp.index(),
-            ];
+            // ordering. Slots 0/1 are not read from the IPC buffer because
+            // pc/ra are handled above.
             let mut reg_updates = [0u64; 32];
             let mut reg_update_valid = [false; 32];
             if length >= 5 && count >= 3 {
@@ -1668,7 +1616,7 @@ pub fn handle_thread(
                     for i in 4..mr_count {
                         let mr_val = crate::api::thread::current_ipc_buffer_word(1 + i);
                         let ctx_idx = i - 2;
-                        let target_idx = X_INDEX[ctx_idx];
+                        let target_idx = SEL4_USER_CONTEXT_REGS[ctx_idx];
                         if target_idx != 0 {
                             reg_updates[target_idx] = mr_val;
                             reg_update_valid[target_idx] = true;
@@ -1715,13 +1663,13 @@ pub fn handle_thread(
             //   mr4.. = s0..s11, a0..a7, t0..t6, tp  (in that order)
             //
             // Same RISC-V `seL4_UserContext` layout as TCB_WriteRegisters
-            // — share the same `X_INDEX` table.
+            // — share the same architecture ABI table.
             if length < 2 {
                 return Err(SyscallError::TruncatedMessage);
             }
             let flag_word = uc.regs[UserRegister::A2.index()];
             let count = uc.regs[UserRegister::A3.index()] as usize;
-            if count == 0 || count as u64 > TCB_USER_CONTEXT_WORDS {
+            if count == 0 || count > SEL4_USER_CONTEXT_WORDS {
                 return Err(SyscallError::RangeError);
             }
             if tcb::current() == tcb_ptr {
@@ -1729,52 +1677,10 @@ pub fn handle_thread(
             }
             let suspend_source = (flag_word & 1) != 0;
 
-            const X_INDEX: [usize; 32] = [
-                // 0 pc, 1 ra (handled below).
-                0,
-                0,
-                // 2 sp.
-                UserRegister::Sp.index(),
-                // 3 gp.
-                UserRegister::Gp.index(),
-                // 4..15 s0..s11.
-                8,
-                9,
-                18,
-                19,
-                20,
-                21,
-                22,
-                23,
-                24,
-                25,
-                26,
-                27,
-                // 16..23 a0..a7.
-                UserRegister::A0.index(),
-                UserRegister::A1.index(),
-                UserRegister::A2.index(),
-                UserRegister::A3.index(),
-                UserRegister::A4.index(),
-                UserRegister::A5.index(),
-                UserRegister::A6.index(),
-                UserRegister::A7.index(),
-                // 24..30 t0..t6.
-                UserRegister::T0.index(),
-                6,
-                7,
-                28,
-                29,
-                30,
-                31,
-                // 31 tp.
-                UserRegister::Tp.index(),
-            ];
-
             // Read register at seL4_UserContext field index `i`.
             let read_reg = |i: usize| -> u64 {
                 if i < 32 {
-                    let idx = X_INDEX[i];
+                    let idx = SEL4_USER_CONTEXT_REGS[i];
                     tcb::user_context_word_snapshot(tcb_ptr, i, idx)
                 } else {
                     0
@@ -1860,7 +1766,18 @@ pub fn handle_thread(
             Ok(())
         }
 
-        id if id == InvocationLabel::TcbSetFlags.raw() => Err(SyscallError::IllegalOperation),
+        id if id == InvocationLabel::TcbSetFlags.raw() => {
+            if length < 2 {
+                return Err(SyscallError::TruncatedMessage);
+            }
+            let clear = uc.regs[UserRegister::A2.index()];
+            let set = uc.regs[UserRegister::A3.index()];
+            let flags = unsafe { tcb::set_flags(tcb_ptr, clear, set) };
+            if reply {
+                write_reply_mr0(uc, flags);
+            }
+            Ok(())
+        }
 
         _ => Err(SyscallError::IllegalOperation),
     }
@@ -1920,7 +1837,7 @@ fn snapshot_tcb_copy_registers(
 
     if transfer_frame {
         copied.pc = Some(tcb::user_context_word_snapshot(src, 0, 0));
-        for &reg in &TCB_FRAME_REGS[1..] {
+        for &reg in &SEL4_TCB_FRAME_REGS[1..] {
             copied.regs[copied.reg_count] =
                 (reg, tcb::user_context_word_snapshot(src, usize::MAX, reg));
             copied.reg_count += 1;
@@ -1928,7 +1845,7 @@ fn snapshot_tcb_copy_registers(
     }
 
     if transfer_integer {
-        for &reg in &TCB_GP_REGS {
+        for &reg in &SEL4_TCB_GP_REGS {
             copied.regs[copied.reg_count] =
                 (reg, tcb::user_context_word_snapshot(src, usize::MAX, reg));
             copied.reg_count += 1;
