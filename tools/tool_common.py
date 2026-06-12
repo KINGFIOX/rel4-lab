@@ -235,9 +235,15 @@ def infer_toolprefix() -> str | None:
     return None
 
 
-def xv6_user_cflags(xv6_dir: Path, march: str, mabi: str, include_dot: bool = False) -> list[str]:
+def xv6_user_cflags(
+    xv6_dir: Path,
+    march: str,
+    mabi: str,
+    include_dot: bool = False,
+    code_model: str | None = "medany",
+) -> list[str]:
     include = "." if include_dot else str(xv6_dir)
-    return [
+    flags = [
         "-Wall",
         "-Werror",
         "-Wno-unknown-attributes",
@@ -249,7 +255,6 @@ def xv6_user_cflags(xv6_dir: Path, march: str, mabi: str, include_dot: bool = Fa
         f"-mabi={mabi}",
         "-std=gnu99",
         "-MD",
-        "-mcmodel=medany",
         "-ffreestanding",
         "-fno-common",
         "-nostdlib",
@@ -276,6 +281,9 @@ def xv6_user_cflags(xv6_dir: Path, march: str, mabi: str, include_dot: bool = Fa
         "-fno-pie",
         "-no-pie",
     ]
+    if code_model is not None:
+        flags.insert(12, f"-mcmodel={code_model}")
+    return flags
 
 
 def c_string_literal(value: str) -> str:

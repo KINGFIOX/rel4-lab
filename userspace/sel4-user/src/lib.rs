@@ -2,6 +2,11 @@
 #![deny(unsafe_attr_outside_unsafe)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+#[cfg(not(target_arch = "riscv64"))]
+compile_error!(
+    "sel4-user currently implements only the RISC-V libsel4 syscall ABI; add the LoongArch64 syscall register ABI before building this target"
+);
+
 use core::arch::asm;
 use core::cmp::min;
 use core::fmt::{self, Write};

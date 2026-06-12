@@ -16,38 +16,45 @@ from tool_common import (
     bare_metal_tool_env,
     die,
     getenv,
-    infer_toolprefix,
     install_file,
     log,
     require_dir,
     run,
     xv6_user_cflags,
 )
+from target_config import infer_toolprefix_for, target_from_env
 
 
 PREFIX = "build-xv6-fs-img"
 
 
 def main() -> int:
-    xv6_dir = Path(getenv("XV6_DIR", str(ROOT_DIR / "third_party" / "xv6-riscv")))
+    target = target_from_env(PREFIX)
+    xv6_dir = Path(getenv("XV6_DIR", str(ROOT_DIR / "third_party" / target.xv6_dir_name)))
     out_dir = Path(getenv("OUT_DIR", str(ROOT_DIR / "target" / "xv6compat")))
     xv6_fs_img = Path(getenv("XV6_FS_IMG", str(out_dir / "fs.img")))
-    march = getenv("XV6_USER_MARCH", "rv64gc")
-    mabi = getenv("XV6_USER_MABI", "lp64")
+    march = getenv("XV6_USER_MARCH", target.xv6_march)
+    mabi = getenv("XV6_USER_MABI", target.xv6_mabi)
 
     require_dir(PREFIX, xv6_dir, f"XV6_DIR not found: {xv6_dir}")
 
     lock = BuildLock(ROOT_DIR)
     lock.acquire()
     try:
-        toolprefix = os.environ.get("TOOLPREFIX") or infer_toolprefix()
+        toolprefix = os.environ.get("TOOLPREFIX") or infer_toolprefix_for(target)
         if not toolprefix:
-            die(PREFIX, "could not find a RISC-V ELF toolchain")
+            die(PREFIX, f"could not find a {target.name} ELF toolchain")
         host_cc = os.environ.get("HOST_CC") or shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
         if not host_cc:
             die(PREFIX, "could not find a host C compiler for mkfs")
 
-        cflags = xv6_user_cflags(xv6_dir, march, mabi, include_dot=True)
+        cflags = xv6_user_cflags(
+            xv6_dir,
+            march,
+            mabi,
+            include_dot=True,
+            code_model="medany" if target.name == "riscv64" else None,
+        )
         cross_env = bare_metal_tool_env()
 
         log(PREFIX, "building host mkfs")

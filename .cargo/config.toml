@@ -7,3 +7,9 @@ rustflags = [
     "-C", "relocation-model=static",
     "-C", "force-frame-pointers=yes",
 ]
+
+[target.loongarch64-unknown-none]
+rustflags = [
+    "-C", "relocation-model=static",
+    "-C", "force-frame-pointers=yes",
+]

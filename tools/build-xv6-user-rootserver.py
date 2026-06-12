@@ -16,7 +16,6 @@ from tool_common import (
     c_string_literal,
     die,
     getenv,
-    infer_toolprefix,
     install_file,
     log,
     require_dir,
@@ -24,6 +23,7 @@ from tool_common import (
     run,
     xv6_user_cflags,
 )
+from target_config import infer_toolprefix_for, rust_target_from_env, target_from_env
 
 
 PREFIX = "build-xv6-user"
@@ -77,12 +77,13 @@ def main(argv: list[str]) -> int:
         usage()
         return 2
 
-    xv6_dir = Path(getenv("XV6_DIR", str(ROOT_DIR / "third_party" / "xv6-riscv")))
+    target = target_from_env(PREFIX)
+    xv6_dir = Path(getenv("XV6_DIR", str(ROOT_DIR / "third_party" / target.xv6_dir_name)))
     out_dir = Path(getenv("OUT_DIR", str(ROOT_DIR / "target" / "xv6compat")))
     user_base = getenv("XV6_USER_BASE", "0x10000")
-    march = getenv("XV6_USER_MARCH", "rv64gc")
-    mabi = getenv("XV6_USER_MABI", "lp64")
-    rust_target = getenv("RUST_TARGET", "riscv64gc-unknown-none-elf")
+    march = getenv("XV6_USER_MARCH", target.xv6_march)
+    mabi = getenv("XV6_USER_MABI", target.xv6_mabi)
+    rust_target = rust_target_from_env(target)
 
     program = argv[0].removeprefix("_")
     program_args = argv[1:]
@@ -93,15 +94,20 @@ def main(argv: list[str]) -> int:
     lock = BuildLock(ROOT_DIR)
     lock.acquire()
     try:
-        toolprefix = os.environ.get("TOOLPREFIX") or infer_toolprefix()
+        toolprefix = os.environ.get("TOOLPREFIX") or infer_toolprefix_for(target)
         if not toolprefix:
-            die(PREFIX, "could not find a RISC-V ELF toolchain")
+            die(PREFIX, f"could not find a {target.name} ELF toolchain")
         cc = f"{toolprefix}gcc"
         ld = f"{toolprefix}ld"
         cross_env = bare_metal_tool_env()
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        cflags = xv6_user_cflags(xv6_dir, march, mabi)
+        cflags = xv6_user_cflags(
+            xv6_dir,
+            march,
+            mabi,
+            code_model="medany" if target.name == "riscv64" else None,
+        )
 
         log(PREFIX, f"building xv6 objects for {program}")
         make_targets = [f"user/{program}.o", "user/ulib.o", "user/usys.o", "user/printf.o", "user/umalloc.o"]

@@ -9,15 +9,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tool_common import ROOT_DIR, getenv, qemu_smp_arg, run
-
-
-IMAGE_NAME = "sel4test-driver-image-riscv-qemu-riscv-virt"
+from target_config import image_name_from_env, rust_target_from_env, target_from_env
 
 
 def main(argv: list[str]) -> int:
-    rust_target = getenv("RUST_TARGET", "riscv64gc-unknown-none-elf")
+    target = target_from_env("simulate")
+    rust_target = rust_target_from_env(target)
     kernel_elf = ROOT_DIR / "target" / rust_target / "release" / "kernel"
-    packed_image = ROOT_DIR / "images" / IMAGE_NAME
+    packed_image = Path(getenv("OUT_IMAGE", str(ROOT_DIR / "images" / image_name_from_env(target))))
     smp = qemu_smp_arg("1")
 
     mode = os.environ.get("MODE", "")
@@ -27,20 +26,9 @@ def main(argv: list[str]) -> int:
     if mode == "standalone":
         if not kernel_elf.is_file():
             print("kernel ELF not found, building...", file=sys.stderr)
-            run(["cargo", "build", "--release"], cwd=ROOT_DIR)
+            run(["cargo", "build", "--release", "--target", rust_target, "-p", "kernel"], cwd=ROOT_DIR)
         cmd = [
-            "qemu-system-riscv64",
-            "-machine",
-            "virt",
-            "-cpu",
-            "rv64",
-            "-smp",
-            smp,
-            "-m",
-            "128M",
-            "-nographic",
-            "-bios",
-            "none",
+            *target.qemu_base_cmd(smp, "128M"),
             "-kernel",
             str(kernel_elf),
             *argv,
@@ -51,18 +39,7 @@ def main(argv: list[str]) -> int:
             print("run tools/pack-image.py first", file=sys.stderr)
             return 1
         cmd = [
-            "qemu-system-riscv64",
-            "-machine",
-            "virt",
-            "-cpu",
-            "rv64",
-            "-smp",
-            smp,
-            "-m",
-            "3072",
-            "-nographic",
-            "-bios",
-            "none",
+            *target.qemu_base_cmd(smp, "3072"),
             "-kernel",
             str(packed_image),
             *argv,

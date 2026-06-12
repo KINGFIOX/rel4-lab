@@ -15,7 +15,6 @@ from tool_common import (
     ROOT_DIR,
     BuildLock,
     LoggedProcess,
-    command_exists,
     die,
     ensure_rust_log_at_least_info,
     env_flag,
@@ -26,6 +25,7 @@ from tool_common import (
     qemu_smp_arg,
     tail_lines,
 )
+from target_config import target_from_env
 
 
 PREFIX = "run-xv6-user"
@@ -118,6 +118,7 @@ def check_output_text(cmd: list[str], env: dict[str, str] | None = None) -> str:
 
 def main(argv: list[str]) -> int:
     ensure_rust_log_at_least_info()
+    target = target_from_env(PREFIX)
     verbose, expect_timeout, qemu_stdin_text, qemu_stdin_file, program_args = parse_args(argv)
     program = program_args[0].removeprefix("_")
     timeout = int(getenv("TIMEOUT", "30"))
@@ -137,14 +138,18 @@ def main(argv: list[str]) -> int:
         run_qemu_stdin_file.write_text(qemu_stdin_text)
         qemu_stdin_file = str(run_qemu_stdin_file)
 
-    if not command_exists("qemu-system-riscv64"):
-        die(PREFIX, "qemu-system-riscv64 not on PATH; run via nix develop")
+    target.require_qemu(PREFIX)
 
     lock = BuildLock(ROOT_DIR)
     lock.acquire()
     try:
         rootserver_elf = Path(check_output_text([str(ROOT_DIR / "tools" / "build-xv6-user-rootserver.py"), *program_args]))
-        packed_image = Path(getenv("OUT_IMAGE", str(ROOT_DIR / "images" / f"xv6-{run_id}-image-riscv-qemu-riscv-virt")))
+        image_suffix = (
+            "image-riscv-qemu-riscv-virt"
+            if target.name == "riscv64"
+            else f"image-{target.name}-qemu-virt"
+        )
+        packed_image = Path(getenv("OUT_IMAGE", str(ROOT_DIR / "images" / f"xv6-{run_id}-{image_suffix}")))
         log_file = Path(getenv("LOG_FILE", str(ROOT_DIR / "target" / f"xv6-{run_id}-last-run.log")))
         kernel_debug_log_file = Path(
             getenv("KERNEL_DEBUG_LOG_FILE", str(ROOT_DIR / "target" / f"xv6-{run_id}-kernel-debug.log"))
@@ -177,18 +182,7 @@ def main(argv: list[str]) -> int:
         raise
 
     qemu_cmd = [
-        "qemu-system-riscv64",
-        "-machine",
-        "virt",
-        "-cpu",
-        "rv64",
-        "-smp",
-        smp,
-        "-m",
-        "3072",
-        "-nographic",
-        "-bios",
-        "none",
+        *target.qemu_base_cmd(smp, "3072"),
         "-kernel",
         str(packed_image),
         "-chardev",

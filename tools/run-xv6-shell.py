@@ -14,7 +14,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tool_common import (
     ROOT_DIR,
     BuildLock,
-    command_exists,
     die,
     ensure_rust_log_at_least_info,
     getenv,
@@ -22,6 +21,7 @@ from tool_common import (
     output,
     qemu_smp_arg,
 )
+from target_config import target_from_env
 
 
 PREFIX = "run-xv6-shell"
@@ -69,7 +69,7 @@ def check_output_text(cmd: list[str], env: dict[str, str] | None = None) -> str:
     return output(cmd, env=env).strip()
 
 
-def build_image(run_id: str) -> tuple[Path, Path | None, bool]:
+def build_image(run_id: str, target) -> tuple[Path, Path | None, bool]:
     attach_fs_img = getenv("XV6_ATTACH_FS_IMG", "1") == "1"
     build_fs_img = getenv("XV6_BUILD_FS_IMG", "1") == "1"
     fs_img_explicit = "XV6_FS_IMG" in os.environ
@@ -83,9 +83,12 @@ def build_image(run_id: str) -> tuple[Path, Path | None, bool]:
         rootserver_elf = Path(
             check_output_text([str(ROOT_DIR / "tools" / "build-xv6-user-rootserver.py"), "sh"])
         )
-        packed_image = Path(
-            getenv("OUT_IMAGE", str(ROOT_DIR / "images" / f"xv6-{run_id}-image-riscv-qemu-riscv-virt"))
+        image_suffix = (
+            "image-riscv-qemu-riscv-virt"
+            if target.name == "riscv64"
+            else f"image-{target.name}-qemu-virt"
         )
+        packed_image = Path(getenv("OUT_IMAGE", str(ROOT_DIR / "images" / f"xv6-{run_id}-{image_suffix}")))
 
         if attach_fs_img and build_fs_img:
             env = os.environ.copy()
@@ -113,20 +116,9 @@ def build_image(run_id: str) -> tuple[Path, Path | None, bool]:
         lock.release()
 
 
-def qemu_command(packed_image: Path, xv6_fs_img: Path | None, kernel_debug_log_file: Path) -> list[str]:
+def qemu_command(packed_image: Path, xv6_fs_img: Path | None, kernel_debug_log_file: Path, target) -> list[str]:
     cmd = [
-        "qemu-system-riscv64",
-        "-machine",
-        "virt",
-        "-cpu",
-        "rv64",
-        "-smp",
-        qemu_smp_arg("2"),
-        "-m",
-        "3072",
-        "-nographic",
-        "-bios",
-        "none",
+        *target.qemu_base_cmd(qemu_smp_arg("2"), "3072"),
         "-kernel",
         str(packed_image),
         "-chardev",
@@ -167,10 +159,10 @@ def run_interactive(qemu_cmd: list[str]) -> int:
 
 def main(argv: list[str]) -> int:
     ensure_rust_log_at_least_info()
+    target = target_from_env(PREFIX)
     no_tty_check = parse_args(argv)
 
-    if not command_exists("qemu-system-riscv64"):
-        die(PREFIX, "qemu-system-riscv64 not on PATH; run via nix develop")
+    target.require_qemu(PREFIX)
     if not no_tty_check and (not sys.stdin.isatty() or not sys.stdout.isatty()):
         die(PREFIX, "interactive shell needs a terminal; rerun from a real tty or pass --no-tty-check")
 
@@ -184,8 +176,8 @@ def main(argv: list[str]) -> int:
     xv6_fs_img: Path | None = None
     keep_run_fs_img = True
     try:
-        packed_image, xv6_fs_img, keep_run_fs_img = build_image(run_id)
-        qemu_cmd = qemu_command(packed_image, xv6_fs_img, kernel_debug_log_file)
+        packed_image, xv6_fs_img, keep_run_fs_img = build_image(run_id, target)
+        qemu_cmd = qemu_command(packed_image, xv6_fs_img, kernel_debug_log_file, target)
 
         log(PREFIX, "booting interactive xv6 shell")
         log(PREFIX, "QEMU serial0 is attached to this terminal")

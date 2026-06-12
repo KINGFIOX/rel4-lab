@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tool_common import (
     ROOT_DIR,
     LoggedProcess,
-    command_exists,
     count_regex_lines,
     ensure_rust_log_at_least_info,
     file_has_regex,
@@ -20,10 +19,11 @@ from tool_common import (
     qemu_smp_arg,
     tail_lines,
 )
+from target_config import image_name_from_env, target_from_env
 
 
-IMAGE_NAME = "sel4test-driver-image-riscv-qemu-riscv-virt"
 DEFAULT_EXPECTED_BASELINE = ""
+PREFIX = "run-tests"
 
 
 def usage_error(arg: str) -> int:
@@ -33,6 +33,8 @@ def usage_error(arg: str) -> int:
 
 def main(argv: list[str]) -> int:
     ensure_rust_log_at_least_info()
+    target = target_from_env(PREFIX)
+    image_name = image_name_from_env(target)
     verbose = False
     for arg in argv:
         if arg in ("--verbose", "-v"):
@@ -40,7 +42,7 @@ def main(argv: list[str]) -> int:
         else:
             return usage_error(arg)
 
-    packed_image = ROOT_DIR / "images" / IMAGE_NAME
+    packed_image = Path(getenv("OUT_IMAGE", str(ROOT_DIR / "images" / image_name)))
     log_file = Path(getenv("LOG_FILE", str(ROOT_DIR / "target" / "sel4test-last-run.log")))
     kernel_debug_log_file = Path(
         getenv("KERNEL_DEBUG_LOG_FILE", str(ROOT_DIR / "target" / "sel4test-kernel-debug.log"))
@@ -53,23 +55,10 @@ def main(argv: list[str]) -> int:
         print(f"packed image not found at {packed_image}", file=sys.stderr)
         print("run tools/pack-image.py first", file=sys.stderr)
         return 3
-    if not command_exists("qemu-system-riscv64"):
-        print("qemu-system-riscv64 not on PATH - run via 'nix develop' or activate direnv", file=sys.stderr)
-        return 3
+    target.require_qemu(PREFIX)
 
     cmd = [
-        "qemu-system-riscv64",
-        "-machine",
-        "virt",
-        "-cpu",
-        "rv64",
-        "-smp",
-        smp,
-        "-m",
-        "3072",
-        "-nographic",
-        "-bios",
-        "none",
+        *target.qemu_base_cmd(smp, "3072"),
         "-kernel",
         str(packed_image),
         "-chardev",
