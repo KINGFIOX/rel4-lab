@@ -7,7 +7,7 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
-use crate::arch::riscv64::vspace::paddr_to_pptr;
+use crate::arch::current::vspace::paddr_to_pptr;
 
 const PCI_ECAM_BASE_PA: usize = 0x3000_0000;
 const PCI_IO_BASE_PA: usize = 0x0300_0000;

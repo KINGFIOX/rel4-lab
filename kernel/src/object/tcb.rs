@@ -18,7 +18,7 @@
 use core::ptr::null_mut;
 
 use crate::abi::constants::MAX_NUM_NODES;
-use crate::arch::riscv64::trap::{SSTATUS_FS_CLEAN, SSTATUS_FS_MASK, UserContext};
+use crate::arch::current::trap::{SSTATUS_FS_CLEAN, SSTATUS_FS_MASK, UserContext};
 use crate::kernel::smp::{BklCell, BklObjectGuard};
 use crate::object::cap::Cap;
 use crate::object::cnode::Cte;
@@ -556,7 +556,7 @@ pub(crate) unsafe fn finish_yield_to(yielder: *mut Tcb, sched_context: u64, cons
         }
         (*yielder).yield_to_sc = 0;
         (*yielder).yield_to_consumed_start = 0;
-        (*yielder).context.regs[crate::arch::riscv64::trap::UserRegister::A2.index()] = consumed;
+        (*yielder).context.regs[crate::arch::current::trap::UserRegister::A2.index()] = consumed;
         (*yielder).state = ThreadState::Running as u8;
         true
     }
@@ -580,7 +580,7 @@ pub(crate) unsafe fn finish_yield_to_pair(
             (*target).yield_from_tcb = 0;
             (*yielder).yield_to_sc = 0;
             (*yielder).yield_to_consumed_start = 0;
-            (*yielder).context.regs[crate::arch::riscv64::trap::UserRegister::A2.index()] =
+            (*yielder).context.regs[crate::arch::current::trap::UserRegister::A2.index()] =
                 consumed;
             (*yielder).state = ThreadState::Running as u8;
             true
@@ -941,7 +941,7 @@ pub(crate) unsafe fn prepare_for_user_restore(tcb: *mut Tcb) -> *mut UserContext
         }
         &raw mut (*tcb).context
     };
-    crate::arch::riscv64::fpu::lazy_restore(tcb);
+    crate::arch::current::fpu::lazy_restore(tcb);
     ctx
 }
 
@@ -951,8 +951,8 @@ pub(crate) unsafe fn set_running_with_reply_regs(tcb: *mut Tcb, badge: u64, info
     }
     unsafe {
         let _guard = lock_state(tcb);
-        (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A0.index()] = badge;
-        (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A1.index()] = info_word;
+        (*tcb).context.regs[crate::arch::current::trap::UserRegister::A0.index()] = badge;
+        (*tcb).context.regs[crate::arch::current::trap::UserRegister::A1.index()] = info_word;
         (*tcb).state = ThreadState::Running as u8;
     }
 }
@@ -998,12 +998,12 @@ pub(crate) unsafe fn complete_bound_endpoint_notification_wait(tcb: *mut Tcb, ba
 
 unsafe fn write_notification_badge_regs_locked(tcb: *mut Tcb, badge: u64) {
     unsafe {
-        (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A0.index()] = badge;
-        (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A1.index()] = 0;
-        (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A2.index()] = 0;
-        (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A3.index()] = 0;
-        (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A4.index()] = 0;
-        (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A5.index()] = 0;
+        (*tcb).context.regs[crate::arch::current::trap::UserRegister::A0.index()] = badge;
+        (*tcb).context.regs[crate::arch::current::trap::UserRegister::A1.index()] = 0;
+        (*tcb).context.regs[crate::arch::current::trap::UserRegister::A2.index()] = 0;
+        (*tcb).context.regs[crate::arch::current::trap::UserRegister::A3.index()] = 0;
+        (*tcb).context.regs[crate::arch::current::trap::UserRegister::A4.index()] = 0;
+        (*tcb).context.regs[crate::arch::current::trap::UserRegister::A5.index()] = 0;
     }
 }
 
@@ -1096,14 +1096,14 @@ pub(crate) unsafe fn cancel_endpoint_waiter(
         }
 
         if let Some(info_word) = call_error_info {
-            (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A0.index()] = 0;
+            (*tcb).context.regs[crate::arch::current::trap::UserRegister::A0.index()] = 0;
             if was_call {
-                (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A1.index()] =
+                (*tcb).context.regs[crate::arch::current::trap::UserRegister::A1.index()] =
                     info_word;
-                (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A2.index()] = 0;
-                (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A3.index()] = 0;
-                (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A4.index()] = 0;
-                (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A5.index()] = 0;
+                (*tcb).context.regs[crate::arch::current::trap::UserRegister::A2.index()] = 0;
+                (*tcb).context.regs[crate::arch::current::trap::UserRegister::A3.index()] = 0;
+                (*tcb).context.regs[crate::arch::current::trap::UserRegister::A4.index()] = 0;
+                (*tcb).context.regs[crate::arch::current::trap::UserRegister::A5.index()] = 0;
             }
         }
 
@@ -1147,7 +1147,7 @@ pub(crate) fn ipc_message_regs_snapshot(tcb: *const Tcb, length: u64) -> [u64; 4
         let mr_reg_n = length.min(4) as usize;
         for i in 0..mr_reg_n {
             mr_regs[i] =
-                (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A2.index() + i];
+                (*tcb).context.regs[crate::arch::current::trap::UserRegister::A2.index() + i];
         }
         mr_regs
     }
@@ -1164,10 +1164,10 @@ pub(crate) unsafe fn write_ipc_message_regs(
     }
     unsafe {
         let _guard = lock_state(tcb);
-        (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A0.index()] = badge;
+        (*tcb).context.regs[crate::arch::current::trap::UserRegister::A0.index()] = badge;
         let mr_reg_n = length.min(4) as usize;
         for i in 0..mr_reg_n {
-            (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A2.index() + i] =
+            (*tcb).context.regs[crate::arch::current::trap::UserRegister::A2.index() + i] =
                 mr_regs[i];
         }
     }
@@ -1185,11 +1185,11 @@ pub(crate) unsafe fn write_fault_ipc_message_regs(
     }
     unsafe {
         let _guard = lock_state(tcb);
-        (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A0.index()] = badge;
-        (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A1.index()] = info_word;
+        (*tcb).context.regs[crate::arch::current::trap::UserRegister::A0.index()] = badge;
+        (*tcb).context.regs[crate::arch::current::trap::UserRegister::A1.index()] = info_word;
         let mr_reg_n = length.min(4).min(mrs.len() as u64) as usize;
         for i in 0..mr_reg_n {
-            (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A2.index() + i] = mrs[i];
+            (*tcb).context.regs[crate::arch::current::trap::UserRegister::A2.index() + i] = mrs[i];
         }
     }
 }
@@ -1316,7 +1316,7 @@ pub(crate) unsafe fn write_message_info(tcb: *mut Tcb, info_word: u64) {
     }
     unsafe {
         let _guard = lock_state(tcb);
-        (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A1.index()] = info_word;
+        (*tcb).context.regs[crate::arch::current::trap::UserRegister::A1.index()] = info_word;
     }
 }
 
@@ -1351,7 +1351,7 @@ pub(crate) fn user_context_word_snapshot(
         let _guard = lock_state(tcb);
         match context_index {
             0 => (*tcb).context.restart_pc,
-            1 => (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::Ra.index()],
+            1 => (*tcb).context.regs[crate::arch::current::trap::UserRegister::Ra.index()],
             _ if reg_index != 0 && reg_index < (*tcb).context.regs.len() => {
                 (*tcb).context.regs[reg_index]
             }
@@ -1391,7 +1391,7 @@ pub(crate) fn queued_sender_snapshot(tcb: *const Tcb) -> QueuedSenderSnapshot {
         let _guard = lock_state(tcb);
         let is_fault = (*tcb).sender_is_fault != 0;
         QueuedSenderSnapshot {
-            info_word: (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::A1.index()],
+            info_word: (*tcb).context.regs[crate::arch::current::trap::UserRegister::A1.index()],
             badge: (*tcb).sender_badge,
             is_call: (*tcb).sender_is_call != 0,
             can_grant: (*tcb).sender_can_grant != 0,
@@ -2113,7 +2113,7 @@ pub unsafe fn init(tcb_kva: u64) {
         let _guard = lock_state(t);
         (*t).state = ThreadState::Inactive as u8;
         (*t).time_slice_ticks = DEFAULT_TIME_SLICE_TICKS;
-        (*t).context.sstatus = crate::arch::riscv64::trap::USER_SSTATUS;
+        (*t).context.sstatus = crate::arch::current::trap::USER_SSTATUS;
     }
 }
 
@@ -2273,7 +2273,7 @@ pub unsafe fn set_affinity(tcb: *mut Tcb, affinity: u8) {
             (*tcb).affinity
         };
         if core_for_affinity(old_affinity) != core_for_affinity(affinity) {
-            crate::arch::riscv64::fpu::release(tcb);
+            crate::arch::current::fpu::release(tcb);
         }
         let was_runnable =
             state == ThreadState::Running as u8 || state == ThreadState::Restart as u8;
@@ -2301,7 +2301,7 @@ pub unsafe fn set_tls_base(tcb: *mut Tcb, tls_base: u64) {
     }
     unsafe {
         let _guard = lock_state(tcb);
-        (*tcb).context.regs[crate::arch::riscv64::trap::UserRegister::Tp.index()] = tls_base;
+        (*tcb).context.regs[crate::arch::current::trap::UserRegister::Tp.index()] = tls_base;
     }
 }
 
@@ -2343,10 +2343,10 @@ pub unsafe fn set_flags(tcb: *mut Tcb, clear: u64, set: u64) -> u64 {
     };
 
     if flags & TCB_FLAG_FPU_DISABLED != 0 {
-        crate::arch::riscv64::fpu::release(tcb);
+        crate::arch::current::fpu::release(tcb);
         unsafe { set_fpu_context_enabled(tcb, false) };
     } else if current() == tcb {
-        crate::arch::riscv64::fpu::lazy_restore(tcb);
+        crate::arch::current::fpu::lazy_restore(tcb);
     }
 
     flags
@@ -2454,7 +2454,7 @@ pub unsafe fn finalize(tcb: *mut Tcb) {
         // detach the bound sched context and complete any yield-to yielder,
         // then run the normal suspend path before clearing Rust-local state.
         unbind_notification(tcb);
-        crate::arch::riscv64::fpu::release(tcb);
+        crate::arch::current::fpu::release(tcb);
         let sched_context = {
             let _guard = lock_state(tcb);
             (*tcb).sched_context

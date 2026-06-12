@@ -191,7 +191,7 @@ pub fn delete_pool(base: u16, pool_kva: u64) {
         true
     });
     if deleted {
-        crate::arch::riscv64::vspace::set_current_vspace_root();
+        crate::arch::current::vspace::set_current_vspace_root();
     }
 }
 
@@ -213,7 +213,7 @@ pub fn delete(asid: u16, root_pt_kva: u64) {
         true
     });
     if deleted {
-        crate::arch::riscv64::vspace::set_current_vspace_root();
+        crate::arch::current::vspace::set_current_vspace_root();
     }
 }
 

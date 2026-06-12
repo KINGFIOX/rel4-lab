@@ -230,7 +230,7 @@ fn is_kernel_pspace_kva(kva: u64) -> bool {
 
 #[inline]
 fn now_ticks() -> u64 {
-    crate::arch::riscv64::csr::time() as u64
+    crate::arch::current::csr::time() as u64
 }
 
 #[inline]

@@ -12,11 +12,11 @@ use crate::abi::constants::{
     KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, MAX_NUM_NODES, PT_INDEX_BITS, RISCV_PG_SHIFT,
     ROOT_CNODE_SIZE_BITS, SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
 };
-use crate::arch::riscv64::sv39::{PAGE_SIZE, PageTable, Pte, pt_index};
-use crate::arch::riscv64::trap::{
+use crate::arch::current::sv39::{PAGE_SIZE, PageTable, Pte, pt_index};
+use crate::arch::current::trap::{
     UserContext, init_timer, install_trap_vector, restore_user_context_with_kernel_lock,
 };
-use crate::arch::riscv64::vspace::{
+use crate::arch::current::vspace::{
     alloc_pt_page, kpptr_to_paddr, make_boot_root_pt, paddr_to_kpptr, satp_for, switch_satp,
     user_flags,
 };
@@ -154,7 +154,7 @@ impl BootUserPaging {
             vaddr
         );
         *slot = Pte::leaf(paddr as u64, flags);
-        crate::arch::riscv64::csr::sfence_vma_va(vaddr);
+        crate::arch::current::csr::sfence_vma_va(vaddr);
         crate::kernel::smp::remote_sfence_vma_all();
     }
 
@@ -255,7 +255,7 @@ fn pa_to_pspace_va(pa: u64) -> u64 {
 /// Bootstrap the user environment and drop into U-mode.
 pub fn bringup_rootserver(args: &BootArgs) -> ! {
     crate::kernel::smp::init_current_hart(args.hart_id, args.core_id);
-    crate::arch::riscv64::fpu::init_current_core();
+    crate::arch::current::fpu::init_current_core();
     install_trap_vector();
     init_timer();
 
@@ -744,7 +744,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         //          SPP=0  (sret enters U-mode).
         t.context.pc = args.user_ventry as u64;
         t.context.restart_pc = args.user_ventry as u64;
-        t.context.sstatus = crate::arch::riscv64::trap::ROOTSERVER_SSTATUS;
+        t.context.sstatus = crate::arch::current::trap::ROOTSERVER_SSTATUS;
         t.context.regs[10] = USER_BOOTINFO_VA as u64; // a0 = bootinfo
         t.context.regs[11] = 0;
         t.context.regs[2] = USER_STACK_TOP as u64; // sp
@@ -756,7 +756,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         t as *mut Tcb
     });
     tcb::set_current(t);
-    crate::arch::riscv64::fpu::lazy_restore(t);
+    crate::arch::current::fpu::lazy_restore(t);
     // Seed the scheduler's runqueue with the rootserver, so
     // `schedule()` always has a runnable TCB to return.
     unsafe {

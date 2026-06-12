@@ -177,21 +177,21 @@ impl Drop for SpinLockGuard<'_> {
 
 #[inline]
 fn local_irq_save() -> bool {
-    let sstatus = crate::arch::riscv64::csr::sstatus();
+    let sstatus = crate::arch::current::csr::sstatus();
     let irq_was_enabled = (sstatus & SSTATUS_SIE) != 0;
     if irq_was_enabled {
-        crate::arch::riscv64::csr::set_sstatus(sstatus & !SSTATUS_SIE);
+        crate::arch::current::csr::set_sstatus(sstatus & !SSTATUS_SIE);
     }
     irq_was_enabled
 }
 
 #[inline]
 fn local_irq_restore(irq_was_enabled: bool) {
-    let sstatus = crate::arch::riscv64::csr::sstatus();
+    let sstatus = crate::arch::current::csr::sstatus();
     if irq_was_enabled {
-        crate::arch::riscv64::csr::set_sstatus(sstatus | SSTATUS_SIE);
+        crate::arch::current::csr::set_sstatus(sstatus | SSTATUS_SIE);
     } else {
-        crate::arch::riscv64::csr::set_sstatus(sstatus & !SSTATUS_SIE);
+        crate::arch::current::csr::set_sstatus(sstatus & !SSTATUS_SIE);
     }
 }
 
@@ -293,7 +293,7 @@ fn kernel_stack_top_for_core(core_id: usize) -> usize {
 
 #[inline]
 pub fn current_core_id() -> usize {
-    let scratch = crate::arch::riscv64::csr::sscratch() as *const TrapScratch;
+    let scratch = crate::arch::current::csr::sscratch() as *const TrapScratch;
     if scratch.is_null() {
         return 0;
     }
@@ -323,7 +323,7 @@ pub fn init_current_hart(hart_id: usize, core_id: usize) {
         scratch.saved_user_t2 = 0;
         scratch.core_id = core_id;
         scratch.hart_id = hart_id;
-        crate::arch::riscv64::csr::set_sscratch(scratch as *mut TrapScratch as usize);
+        crate::arch::current::csr::set_sscratch(scratch as *mut TrapScratch as usize);
     }
 
     hart.online.store(true, Ordering::Release);
@@ -356,7 +356,7 @@ pub fn wake_core(core_id: usize) {
     if hart_id == usize::MAX {
         return;
     }
-    let _ = crate::arch::riscv64::sbi::send_ipi(1, hart_id);
+    let _ = crate::arch::current::sbi::send_ipi(1, hart_id);
 }
 
 pub fn current_core_of_tcb(tcb: *const Tcb) -> Option<usize> {
@@ -454,7 +454,7 @@ fn handle_remote_stall_while_waiting_for_kernel_lock() -> bool {
     // descheduling the target TCB.
     if op == REMOTE_OP_RELEASE_FPU_OWNER {
         if target != 0 {
-            crate::arch::riscv64::fpu::release_on_current_core(target as *mut Tcb);
+            crate::arch::current::fpu::release_on_current_core(target as *mut Tcb);
         }
         REMOTE_STALL_DONE_MASK.fetch_or(bit, Ordering::AcqRel);
         return false;
@@ -481,7 +481,7 @@ pub fn remote_sfence_vma_all() {
             if hart.online.load(Ordering::Acquire) {
                 let hart_id = hart.hart_id.load(Ordering::Acquire);
                 if hart_id != usize::MAX {
-                    let _ = crate::arch::riscv64::sbi::remote_sfence_vma(1, hart_id, 0, 0);
+                    let _ = crate::arch::current::sbi::remote_sfence_vma(1, hart_id, 0, 0);
                 }
             }
         }
@@ -499,7 +499,7 @@ pub fn remote_sfence_vma_asid_all(asid: usize) {
                 let hart_id = hart.hart_id.load(Ordering::Acquire);
                 if hart_id != usize::MAX {
                     let _ =
-                        crate::arch::riscv64::sbi::remote_sfence_vma_asid(1, hart_id, 0, 0, asid);
+                        crate::arch::current::sbi::remote_sfence_vma_asid(1, hart_id, 0, 0, asid);
                 }
             }
         }
@@ -508,12 +508,12 @@ pub fn remote_sfence_vma_asid_all(asid: usize) {
 }
 
 pub fn sfence_vma_all_harts() {
-    crate::arch::riscv64::csr::sfence_vma_all();
+    crate::arch::current::csr::sfence_vma_all();
     remote_sfence_vma_all();
 }
 
 pub fn sfence_vma_asid_all_harts(asid: usize) {
-    crate::arch::riscv64::csr::sfence_vma_asid(asid);
+    crate::arch::current::csr::sfence_vma_asid(asid);
     remote_sfence_vma_asid_all(asid);
 }
 

@@ -12,7 +12,7 @@ use crate::abi::types::MessageInfo;
 use crate::api::cspace::lookup_cap;
 use crate::api::invocation;
 use crate::api::thread;
-use crate::arch::riscv64::trap::{UserContext, UserRegister};
+use crate::arch::current::trap::{UserContext, UserRegister};
 use crate::object::cap::CapTag;
 
 #[derive(Copy, Clone, Debug)]
@@ -371,7 +371,7 @@ fn read_t0(uc: &UserContext) -> u64 {
 }
 
 fn write_recv_cap_fault_or_empty(uc: &mut UserContext, cptr: u64) {
-    if !crate::arch::riscv64::trap::send_cap_fault_ipc(uc, cptr, true) {
+    if !crate::arch::current::trap::send_cap_fault_ipc(uc, cptr, true) {
         write_empty(uc);
     }
 }

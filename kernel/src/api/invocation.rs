@@ -13,7 +13,7 @@ use crate::abi::types::MessageInfo;
 use crate::api::cspace;
 use crate::api::syscall::SyscallError;
 use crate::api::thread::Thread;
-use crate::arch::riscv64::trap::{
+use crate::arch::current::trap::{
     SEL4_TCB_FRAME_REGS, SEL4_TCB_GP_REGS, SEL4_USER_CONTEXT_REGS, SEL4_USER_CONTEXT_WORDS,
     UserContext, UserRegister,
 };
@@ -490,21 +490,21 @@ fn reset_untyped_cap_for_retype(
     Ok(())
 }
 
-fn user_map_error(err: crate::arch::riscv64::vspace::UserMapError) -> SyscallError {
+fn user_map_error(err: crate::arch::current::vspace::UserMapError) -> SyscallError {
     match err {
-        crate::arch::riscv64::vspace::UserMapError::InvalidArgument => {
+        crate::arch::current::vspace::UserMapError::InvalidArgument => {
             SyscallError::InvalidArgument
         }
-        crate::arch::riscv64::vspace::UserMapError::FailedLookup(_) => SyscallError::FailedLookup,
-        crate::arch::riscv64::vspace::UserMapError::DeleteFirst => SyscallError::DeleteFirst,
+        crate::arch::current::vspace::UserMapError::FailedLookup(_) => SyscallError::FailedLookup,
+        crate::arch::current::vspace::UserMapError::DeleteFirst => SyscallError::DeleteFirst,
     }
 }
 
 fn user_map_error_reply(
     uc: &mut UserContext,
-    err: crate::arch::riscv64::vspace::UserMapError,
+    err: crate::arch::current::vspace::UserMapError,
 ) -> SyscallError {
-    if let crate::arch::riscv64::vspace::UserMapError::FailedLookup(bits_left) = err {
+    if let crate::arch::current::vspace::UserMapError::FailedLookup(bits_left) = err {
         uc.regs[UserRegister::A4.index()] = bits_left as u64;
         crate::api::thread::write_current_ipc_buffer_word(3, bits_left as u64);
     }
@@ -525,7 +525,7 @@ pub fn handle_frame(
     length: u64,
     uc: &mut UserContext,
 ) -> Result<(), SyscallError> {
-    use crate::arch::riscv64::vspace;
+    use crate::arch::current::vspace;
 
     let page_map = InvocationLabel::RiscvPageMap.raw();
     let page_unmap = InvocationLabel::RiscvPageUnmap.raw();
@@ -588,7 +588,7 @@ pub fn handle_frame(
                 if !same_object_as(current_cap, cap) {
                     return Err(SyscallError::InvalidCapability);
                 }
-                let root_pt = root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable;
+                let root_pt = root_pt_kva as *mut crate::arch::current::sv39::PageTable;
                 let flags = vspace::user_flags(can_read, can_write, !exec_never);
                 let prepared_map = if current_cap.frame_is_mapped() {
                     if current_cap.frame_mapped_asid() != asid {
@@ -642,7 +642,7 @@ pub fn handle_frame(
                     return Ok(());
                 }
                 let _ = vspace::unmap_user_frame(
-                    root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
+                    root_pt_kva as *mut crate::arch::current::sv39::PageTable,
                     frame_va as usize,
                     cap.frame_size(),
                     kva_to_pa(cap.frame_base_ptr()) as usize,
@@ -674,7 +674,7 @@ pub fn handle_page_table(
     length: u64,
     uc: &mut UserContext,
 ) -> Result<(), SyscallError> {
-    use crate::arch::riscv64::vspace;
+    use crate::arch::current::vspace;
 
     let page_table_map = InvocationLabel::RiscvPageTableMap.raw();
     let page_table_unmap = InvocationLabel::RiscvPageTableUnmap.raw();
@@ -722,9 +722,9 @@ pub fn handle_page_table(
                     return Err(SyscallError::InvalidCapability);
                 }
                 let prepared_map = vspace::prepare_user_page_table_map(
-                    root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
+                    root_pt_kva as *mut crate::arch::current::sv39::PageTable,
                     vaddr as usize,
-                    current_cap.page_table_base_ptr() as *mut crate::arch::riscv64::sv39::PageTable,
+                    current_cap.page_table_base_ptr() as *mut crate::arch::current::sv39::PageTable,
                 )
                 .map_err(user_map_error)?;
                 let mapped_addr = prepared_map.mapped_addr();
@@ -747,18 +747,18 @@ pub fn handle_page_table(
                     let asid = current_cap.page_table_mapped_asid();
                     let root_pt_kva = crate::object::asid::lookup(asid);
                     let pt = current_cap.page_table_base_ptr()
-                        as *mut crate::arch::riscv64::sv39::PageTable;
+                        as *mut crate::arch::current::sv39::PageTable;
                     if root_pt_kva == pt as u64 {
                         return Err(SyscallError::RevokeFirst);
                     }
                     if root_pt_kva != 0 {
                         let _ = vspace::unmap_user_page_table(
-                            root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
+                            root_pt_kva as *mut crate::arch::current::sv39::PageTable,
                             current_cap.page_table_mapped_addr() as usize,
                             pt,
                         );
                     }
-                    ptr::write_bytes(pt as *mut u8, 0, crate::arch::riscv64::sv39::PAGE_SIZE);
+                    ptr::write_bytes(pt as *mut u8, 0, crate::arch::current::sv39::PAGE_SIZE);
                 }
                 (*slot).cap.clear_page_table_is_mapped();
             }
@@ -895,8 +895,8 @@ pub fn handle_asid_pool(
         // Match `performASIDPoolInvocation`: make the vspace cap mapped,
         // initialise global kernel mappings, then publish the ASID pool entry.
         (*vspace_slot).cap.set_page_table_mapping(asid, 0);
-        crate::arch::riscv64::vspace::copy_kernel_mappings_to(
-            root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
+        crate::arch::current::vspace::copy_kernel_mappings_to(
+            root_pt_kva as *mut crate::arch::current::sv39::PageTable,
         );
         if !crate::object::asid::publish_pool_assignment(
             cap.asid_pool_base(),
@@ -2289,7 +2289,7 @@ fn cnode_preemption_point() -> Result<(), SyscallError> {
     if !should_poll {
         return Ok(());
     }
-    if crate::arch::riscv64::trap::service_due_timer_interrupts() {
+    if crate::arch::current::trap::service_due_timer_interrupts() {
         return Err(SyscallError::Preempted);
     }
     Ok(())
@@ -3106,8 +3106,8 @@ fn finalize_cap(
                 let root_pt_kva = crate::object::asid::lookup(asid);
                 if root_pt_kva != 0 {
                     unsafe {
-                        let _ = crate::arch::riscv64::vspace::unmap_user_frame(
-                            root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
+                        let _ = crate::arch::current::vspace::unmap_user_frame(
+                            root_pt_kva as *mut crate::arch::current::sv39::PageTable,
                             va as usize,
                             cap.frame_size(),
                             pa as usize,
@@ -3128,10 +3128,10 @@ fn finalize_cap(
                     crate::object::asid::delete(asid, pt_kva);
                 } else {
                     unsafe {
-                        let _ = crate::arch::riscv64::vspace::unmap_user_page_table(
-                            root_pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
+                        let _ = crate::arch::current::vspace::unmap_user_page_table(
+                            root_pt_kva as *mut crate::arch::current::sv39::PageTable,
                             cap.page_table_mapped_addr() as usize,
-                            pt_kva as *mut crate::arch::riscv64::sv39::PageTable,
+                            pt_kva as *mut crate::arch::current::sv39::PageTable,
                         );
                     }
                 }

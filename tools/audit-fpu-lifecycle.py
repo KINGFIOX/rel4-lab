@@ -46,7 +46,7 @@ CHECKS: tuple[Check, ...] = (
     Check(
         name="Rust toolchain includes the RISC-V FPU-capable target",
         path="rust-toolchain.toml",
-        patterns=(r'targets\s*=\s*\["riscv64gc-unknown-none-elf"\]',),
+        patterns=(r'targets\s*=\s*\[[^\]]*"riscv64gc-unknown-none-elf"',),
         forbidden_patterns=(r"riscv64imac-unknown-none-elf",),
     ),
     Check(
@@ -61,22 +61,32 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="kernel packer defaults to the RISC-V FPU-capable target",
-        path="tools/pack-image.py",
+        path="tools/target_config.py",
         patterns=(
-            r'rust_target\s*=\s*getenv\("RUST_TARGET",\s*"riscv64gc-unknown-none-elf"\)',
-            r'"cargo",\s*"build",\s*"--release",\s*"--target",\s*rust_target,\s*"-p",\s*"kernel"',
+            r'"riscv64":\s*TargetConfig\(',
+            r'rust_target="riscv64gc-unknown-none-elf"',
         ),
         ordered=True,
         forbidden_patterns=(r"riscv64imac-unknown-none-elf",),
     ),
     Check(
+        name="kernel packer builds the selected Rust target",
+        path="tools/pack-image.py",
+        patterns=(
+            r"rust_target\s*=\s*rust_target_from_env\(target\)",
+            r'"cargo",\s*"build",\s*"--release",\s*"--target",\s*rust_target,\s*"-p",\s*"kernel"',
+        ),
+        ordered=True,
+    ),
+    Check(
         name="kernel packer pins upstream sel4test RISC-V D/F extensions",
         path="tools/pack-image.py",
         patterns=(
-            r'"KernelRiscvExtD":\s*"ON"',
-            r'"KernelRiscvExtF":\s*"ON"',
+            r'if\s+target\.name\s*==\s*"riscv64"',
+            r'values\["KernelRiscvExtD"\]\s*=\s*"ON"',
+            r'values\["KernelRiscvExtF"\]\s*=\s*"ON"',
             r'for\s+key\s+in\s+\("KernelRiscvExtD",\s*"KernelRiscvExtF"\)',
-            r"cache\.get\(key\)\s*!=\s*DEFAULT_CMAKE_DEFS\[key\]",
+            r"key\s+in\s+defaults\s+and\s+cache\.get\(key\)\s*!=\s*defaults\[key\]",
         ),
         ordered=True,
     ),
@@ -658,7 +668,7 @@ CHECKS: tuple[Check, ...] = (
         ordered=True,
         forbidden_patterns=(
             r"pub\s+fn\s+handle_domain(?:(?!\npub\s+fn\s+handle_sched_control).)*"
-            r"(?:arch::riscv64::fpu|fpu::release|prepare_next_domain|prepare_set_domain)",
+            r"(?:arch::current::fpu|arch::riscv64::fpu|fpu::release|prepare_next_domain|prepare_set_domain)",
         ),
     ),
     Check(
@@ -1181,7 +1191,7 @@ CHECKS: tuple[Check, ...] = (
             r"pub\s+unsafe\s+fn\s+init\(tcb_kva:\s*u64\)",
             r"\(\*t\)\.state\s*=\s*ThreadState::Inactive as u8",
             r"\(\*t\)\.time_slice_ticks\s*=\s*DEFAULT_TIME_SLICE_TICKS",
-            r"\(\*t\)\.context\.sstatus\s*=\s*crate::arch::riscv64::trap::USER_SSTATUS",
+            r"\(\*t\)\.context\.sstatus\s*=\s*crate::arch::current::trap::USER_SSTATUS",
         ),
         ordered=True,
         forbidden_patterns=(

@@ -43,7 +43,7 @@ use crate::abi::fault::FaultLabel;
 use crate::abi::types::MessageInfo;
 use crate::api::cspace::{self, lookup_cap};
 use crate::api::thread;
-use crate::arch::riscv64::trap::{SEL4_USER_CONTEXT_REGS, UserContext, UserRegister};
+use crate::arch::current::trap::{SEL4_USER_CONTEXT_REGS, UserContext, UserRegister};
 use crate::object::cap::{Cap, CapTag};
 use crate::object::cnode::Cte;
 use crate::object::endpoint::{self, EpState};
@@ -648,7 +648,7 @@ pub fn send(uc: &mut UserContext, blocking: bool, can_donate: bool) {
         Ok(slots) => slots,
         Err(bad_cptr) => {
             if blocking {
-                let _ = crate::arch::riscv64::trap::send_cap_fault_ipc(uc, bad_cptr, false);
+                let _ = crate::arch::current::trap::send_cap_fault_ipc(uc, bad_cptr, false);
             }
             return;
         }
@@ -710,7 +710,7 @@ fn recv_with_reply(uc: &mut UserContext, blocking: bool, reply_cptr: u64) {
         }
     };
     if !cap.endpoint_can_receive() {
-        if !crate::arch::riscv64::trap::send_cap_fault_ipc(uc, cptr, true) {
+        if !crate::arch::current::trap::send_cap_fault_ipc(uc, cptr, true) {
             write_empty_reply(uc);
         }
         return;
@@ -812,7 +812,7 @@ pub fn call(uc: &mut UserContext) {
     let extra_cap_slots = match snapshot_extra_cap_slots(cur, info, cap.endpoint_can_grant()) {
         Ok(slots) => slots,
         Err(bad_cptr) => {
-            let _ = crate::arch::riscv64::trap::send_cap_fault_ipc(uc, bad_cptr, false);
+            let _ = crate::arch::current::trap::send_cap_fault_ipc(uc, bad_cptr, false);
             return;
         }
     };
@@ -938,7 +938,7 @@ pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb) {
                 crate::object::sched_context::replenish(replenish_sc);
             }
             if budget_check_sc != 0 && !crate::object::sched_context::has_budget(budget_check_sc) {
-                if crate::arch::riscv64::trap::send_timeout_fault_ipc_for(caller) {
+                if crate::arch::current::trap::send_timeout_fault_ipc_for(caller) {
                     return;
                 }
                 // This scaffold has no timed refill queue yet. If no

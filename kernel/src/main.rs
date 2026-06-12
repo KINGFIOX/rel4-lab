@@ -46,9 +46,9 @@ mod machine;
 mod object;
 
 #[cfg(target_arch = "riscv64")]
-pub use arch::riscv64::boot::_start;
+pub use arch::current::boot::_start;
 #[cfg(target_arch = "riscv64")]
-pub use arch::riscv64::boot::init_kernel;
+pub use arch::current::boot::init_kernel;
 #[cfg(target_arch = "riscv64")]
 pub use log_crate::{debug, error, info, trace, warn};
 
@@ -61,5 +61,5 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         println!("at {}:{}", loc.file(), loc.line());
     }
     println!("{}", info.message());
-    arch::riscv64::boot::halt()
+    arch::current::boot::halt()
 }
