@@ -26,8 +26,9 @@
           ];
         };
 
-        riscvToolchain = [
+        crossToolchains = [
           pkgs.pkgsCross.riscv64-embedded.buildPackages.gcc
+          pkgs.pkgsCross.loongarch64-linux-embedded.buildPackages.gcc
         ];
 
         rustToolchain = [
@@ -38,6 +39,7 @@
             ];
             targets = [
               "riscv64gc-unknown-none-elf"
+              "loongarch64-unknown-none"
             ];
           })
         ];
@@ -62,7 +64,7 @@
 
           packages =
             pkgs.lib.concatLists [
-              riscvToolchain
+              crossToolchains
               rustToolchain
             ]
             ++ (with pkgs; [
