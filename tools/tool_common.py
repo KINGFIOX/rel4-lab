@@ -369,19 +369,6 @@ class BuildLock:
         self.release()
 
 
-def infer_toolprefix() -> str | None:
-    for prefix in (
-        "riscv64-none-elf-",
-        "riscv64-unknown-elf-",
-        "riscv64-elf-",
-        "riscv64-linux-gnu-",
-        "riscv64-unknown-linux-gnu-",
-    ):
-        if command_exists(f"{prefix}gcc"):
-            return prefix
-    return None
-
-
 def xv6_user_cflags(
     xv6_dir: Path,
     march: str,

@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tool_common import ROOT_DIR, die, getenv, infer_toolprefix, log, output, run
+from tool_common import ROOT_DIR, command_exists, die, getenv, log, output, run
 
 
 PREFIX = "audit-kernel-fpu"
@@ -90,10 +90,23 @@ def tool_name(env_name: str, suffix: str) -> str:
     explicit = os.environ.get(env_name)
     if explicit:
         return explicit
-    prefix = infer_toolprefix()
+    prefix = infer_riscv_toolprefix()
     if prefix is None:
         die(PREFIX, f"could not find a RISC-V toolchain for {suffix}")
     return f"{prefix}{suffix}"
+
+
+def infer_riscv_toolprefix() -> str | None:
+    for prefix in (
+        "riscv64-none-elf-",
+        "riscv64-unknown-elf-",
+        "riscv64-elf-",
+        "riscv64-linux-gnu-",
+        "riscv64-unknown-linux-gnu-",
+    ):
+        if command_exists(f"{prefix}gcc"):
+            return prefix
+    return None
 
 
 def is_fpu_mnemonic(mnemonic: str, operands: str = "") -> bool:
