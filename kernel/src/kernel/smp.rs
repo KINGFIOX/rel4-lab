@@ -40,6 +40,13 @@ pub struct TrapScratch {
 
 const _: () = {
     assert!(size_of::<TrapScratch>() == 7 * size_of::<usize>());
+    assert!(core::mem::offset_of!(TrapScratch, kernel_stack_top) == 0);
+    assert!(core::mem::offset_of!(TrapScratch, user_context) == 1 * size_of::<usize>());
+    assert!(core::mem::offset_of!(TrapScratch, saved_user_sp) == 2 * size_of::<usize>());
+    assert!(core::mem::offset_of!(TrapScratch, saved_user_t1) == 3 * size_of::<usize>());
+    assert!(core::mem::offset_of!(TrapScratch, saved_user_t2) == 4 * size_of::<usize>());
+    assert!(core::mem::offset_of!(TrapScratch, core_id) == 5 * size_of::<usize>());
+    assert!(core::mem::offset_of!(TrapScratch, hart_id) == 6 * size_of::<usize>());
 };
 
 impl TrapScratch {
