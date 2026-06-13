@@ -3,13 +3,12 @@ use core::cmp::min;
 use core::sync::atomic::{AtomicU64, Ordering, fence};
 
 use crate::arch::current as arch;
-use sel4_user::{
-    IpcMessage, call_checked, msg_info, msg_label, msg_len, sel4_call, sel4_send, sel4_yield,
-};
+use sel4_user::{IpcMessage, msg_info, msg_label, msg_len, sel4_call, sel4_send, sel4_yield};
 
 use crate::allocator::Allocator;
 use crate::child::{copy_from_child, copy_to_child, elf_image_valid};
 use crate::consts::*;
+use crate::reply_caps;
 use crate::types::TaskStruct;
 use crate::util::{halt_loop, warn, write_i32, write_u16, write_u32, write_u64_bytes};
 
@@ -397,7 +396,7 @@ pub(crate) fn start_vfs_write_request(
 }
 
 fn start_vfs_async_request(
-    alloc: &mut Allocator,
+    _alloc: &mut Allocator,
     child: &mut TaskStruct,
     syscall_mrs: &[u64; 64],
     label: u64,
@@ -418,7 +417,7 @@ fn start_vfs_async_request(
         return crate::types::SyscallResult::Reply(-1);
     };
     let request_id = next_vfs_request_id();
-    let (reply_slot, reply_mrs) = save_child_reply(alloc, syscall_mrs);
+    let (reply_slot, reply_mrs) = save_child_reply(syscall_mrs);
     VFS_CLIENT.set_async_request(
         slot,
         VfsAsyncRequest {
@@ -551,14 +550,11 @@ pub(crate) fn complete_vfs_async_reply(
     if let Some(ret) = completion.ret {
         let mut reply_mrs = request.reply_mrs;
         arch::set_syscall_return_value(&mut reply_mrs, ret as u64);
-        unsafe {
-            sel4_send(
-                request.reply_slot,
-                msg_info(0, 0, 0, arch::FAULT_REPLY_WORDS as u64),
-                &reply_mrs,
-            );
-        }
-        alloc.delete_cap_slot(request.reply_slot);
+        reply_caps::send_and_release(
+            request.reply_slot,
+            msg_info(0, 0, 0, arch::FAULT_REPLY_WORDS as u64),
+            &reply_mrs,
+        );
     }
     Some(completion.pump_waiters)
 }
@@ -782,18 +778,12 @@ fn complete_pipe(
     0
 }
 
-fn save_child_reply(alloc: &mut Allocator, mrs: &[u64; 64]) -> (u64, arch::FaultReplyFrame) {
+fn save_child_reply(mrs: &[u64; 64]) -> (u64, arch::FaultReplyFrame) {
     let override_slot = DEFERRED_REPLY_OVERRIDE.swap(0, Ordering::Relaxed);
     if override_slot != 0 {
         return (override_slot, arch::syscall_reply_frame(mrs));
     }
-    let reply_slot = alloc.alloc_slot();
-    call_checked(
-        ROOT_CNODE,
-        LABEL_CNODE_SAVE_CALLER,
-        &[],
-        &[reply_slot, ROOT_CNODE_DEPTH],
-    );
+    let reply_slot = reply_caps::take_current();
     (reply_slot, arch::syscall_reply_frame(mrs))
 }
 

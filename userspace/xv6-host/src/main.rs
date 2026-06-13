@@ -18,6 +18,7 @@ mod fs_syscalls;
 mod io_syscalls;
 mod memory_syscalls;
 mod process_syscalls;
+mod reply_caps;
 mod types;
 mod util;
 mod vfs;
@@ -26,9 +27,9 @@ mod xv6;
 use crate::arch::current as host_arch;
 use allocator::Allocator;
 use child::{
-    create_child, create_child_from_untyped, frame_paddr, load_elf, load_payload,
-    map_existing_child_frame, map_stack, map_stack_pages, mint_cap_to_child, start_child,
-    start_child_with_a0_a1,
+    create_child, create_child_from_untyped, ensure_host_page_table_path, frame_paddr, load_elf,
+    load_payload, map_existing_child_frame, map_stack, map_stack_pages, mint_cap_to_child,
+    start_child, start_child_with_a0_a1,
 };
 use consts::{
     DISK_SERVER_ELF, DISK_SERVER_PID, FAULT_UNKNOWN_SYSCALL, FAULT_VM_FAULT,
@@ -44,14 +45,14 @@ use consts::{
     INIT_TCB, INIT_VSPACE, IRQ_CONTROL, KERNEL_TIMER_IRQ, MAX_PROCS, OBJ_4K, OBJ_ENDPOINT,
     OBJ_NOTIFICATION, OBJ_REPLY, OBJ_UNTYPED,
 };
-use consts::{LABEL_CNODE_SAVE_CALLER, LABEL_TCB_BIND_NOTIFICATION, PAGE_SIZE, ROOT_CNODE_DEPTH};
+use consts::{LABEL_TCB_BIND_NOTIFICATION, PAGE_SIZE, ROOT_CNODE_DEPTH};
 use consts::{
     PROC_RUNNABLE, PROC_UNUSED, PROC_VFS_DEFERRED, ROOT_CNODE, SERVICE_UNTYPED_BITS,
     XV6_SERVER_RECV_REPLY_CPTR, XV6_SERVICE_ENDPOINT_CPTR,
 };
 use sel4_user::{
     call_checked, cap_rights, cnode_cap_data, init_ipc_buffer, msg_info, msg_label, sel4_call,
-    sel4_recv, sel4_reply_recv,
+    sel4_recv_with_reply, sel4_reply_recv_with_reply,
 };
 use types::{BootInfo, SyscallResult, TaskStruct};
 use util::{error, halt_loop, info, init_logger, warn};
@@ -115,28 +116,34 @@ fn run(bi_ptr: *const BootInfo) -> ! {
     procs[0] = create_child(&mut alloc, 0, 1, 0, fault_ep);
     xv6::init_vfs_process(&mut procs[0]);
     setup_timer_notification(&mut alloc);
+    reply_caps::init(&mut alloc);
     load_payload(&mut alloc, &mut procs[0]);
     map_stack(&mut alloc, &mut procs[0]);
     start_child(&procs[0]);
 
     info!("xv6-host: waiting for fault IPC");
-    let mut reply_pending = false;
-    let mut reply_info = msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64);
-    let mut reply_mrs = [0u64; host_arch::FAULT_REPLY_WORDS];
+    let mut pending_reply: Option<(u64, [u64; host_arch::FAULT_REPLY_WORDS])> = None;
     loop {
-        let msg = if reply_pending {
-            reply_pending = false;
-            unsafe { sel4_reply_recv(fault_ep, reply_info, &reply_mrs) }
+        let msg = if let Some((reply_info, reply_mrs)) = pending_reply.take() {
+            let reply_slot = reply_caps::take_current();
+            let msg =
+                unsafe { sel4_reply_recv_with_reply(fault_ep, reply_info, &reply_mrs, reply_slot) };
+            reply_caps::set_current(reply_slot);
+            msg
         } else {
-            unsafe { sel4_recv(fault_ep) }
+            let reply_slot = reply_caps::acquire();
+            let msg = unsafe { sel4_recv_with_reply(fault_ep, reply_slot) };
+            reply_caps::set_current(reply_slot);
+            msg
         };
 
         if (msg.badge & Xv6Badge::VfsReply.raw()) != 0 {
             if let Some(pump_waiters) = xv6::complete_vfs_async_reply(&mut alloc, procs, &msg) {
+                reply_caps::release_current();
                 if pump_waiters {
                     xv6::pump_vfs_waiters(&mut alloc, procs);
                 }
-                xv6::pump_sleep_waiters(&mut alloc, procs);
+                xv6::pump_sleep_waiters(procs);
                 pump_deferred_vfs_syscalls(&mut alloc, procs);
                 continue;
             }
@@ -144,9 +151,10 @@ fn run(bi_ptr: *const BootInfo) -> ! {
 
         let label = msg_label(msg.info);
         if label == 0 {
+            reply_caps::release_current();
             xv6::tick();
             xv6::pump_vfs_waiters(&mut alloc, procs);
-            xv6::pump_sleep_waiters(&mut alloc, procs);
+            xv6::pump_sleep_waiters(procs);
             continue;
         }
         let Some(proc_idx) = find_proc_by_pid(&procs, msg.badge) else {
@@ -158,7 +166,7 @@ fn run(bi_ptr: *const BootInfo) -> ! {
             && xv6::has_active_vfs_async_requests()
             && xv6::should_defer_vfs_syscall(&procs[proc_idx], &msg.mrs)
         {
-            defer_vfs_syscall(&mut alloc, &mut procs[proc_idx], &msg.mrs);
+            defer_vfs_syscall(&mut procs[proc_idx], &msg.mrs);
             continue;
         }
 
@@ -174,41 +182,40 @@ fn run(bi_ptr: *const BootInfo) -> ! {
             handle_xv6_fault(&mut alloc, procs, proc_idx, label, &msg.mrs)
         };
         xv6::pump_vfs_waiters(&mut alloc, procs);
-        xv6::pump_sleep_waiters(&mut alloc, procs);
+        xv6::pump_sleep_waiters(procs);
 
         match result {
             SyscallResult::Reply(ret) => {
-                reply_info = msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64);
-                reply_mrs = host_arch::syscall_reply_frame(&msg.mrs);
+                let mut reply_mrs = host_arch::syscall_reply_frame(&msg.mrs);
                 host_arch::set_syscall_return_value(&mut reply_mrs, ret as u64);
-                reply_pending = true;
+                pending_reply = Some((
+                    msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64),
+                    reply_mrs,
+                ));
             }
             SyscallResult::ReplyFrame(frame) => {
-                reply_info = msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64);
-                reply_mrs = frame;
-                reply_pending = true;
+                pending_reply = Some((
+                    msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64),
+                    frame,
+                ));
             }
             SyscallResult::Block => {
-                reply_pending = false;
+                if reply_caps::has_current() {
+                    warn!("xv6-host: blocked syscall did not save its reply cap");
+                    halt_loop();
+                }
             }
             SyscallResult::Stop => {
-                reply_info = msg_info(1, 0, 0, 0);
-                reply_mrs = [0; host_arch::FAULT_REPLY_WORDS];
-                reply_pending = true;
+                let reply_slot = reply_caps::take_current();
+                reply_caps::stop_and_release(reply_slot);
             }
         }
         pump_deferred_vfs_syscalls(&mut alloc, procs);
     }
 }
 
-fn defer_vfs_syscall(alloc: &mut Allocator, child: &mut TaskStruct, mrs: &[u64; 64]) {
-    let reply_slot = alloc.alloc_slot();
-    call_checked(
-        ROOT_CNODE,
-        LABEL_CNODE_SAVE_CALLER,
-        &[],
-        &[reply_slot, ROOT_CNODE_DEPTH],
-    );
+fn defer_vfs_syscall(child: &mut TaskStruct, mrs: &[u64; 64]) {
+    let reply_slot = reply_caps::take_current();
     child.deferred_reply_slot = reply_slot;
     child.deferred_mrs = *mrs;
     child.state = PROC_VFS_DEFERRED;
@@ -233,33 +240,24 @@ fn pump_deferred_vfs_syscalls(alloc: &mut Allocator, procs: &mut [TaskStruct; MA
                     xv6::use_deferred_reply_slot(0);
                     let mut reply_mrs = host_arch::syscall_reply_frame(&mrs);
                     host_arch::set_syscall_return_value(&mut reply_mrs, ret as u64);
-                    unsafe {
-                        sel4_user::sel4_send(
-                            reply_slot,
-                            msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64),
-                            &reply_mrs,
-                        );
-                    }
-                    alloc.delete_cap_slot(reply_slot);
+                    reply_caps::send_and_release(
+                        reply_slot,
+                        msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64),
+                        &reply_mrs,
+                    );
                 }
                 SyscallResult::ReplyFrame(frame) => {
                     xv6::use_deferred_reply_slot(0);
-                    unsafe {
-                        sel4_user::sel4_send(
-                            reply_slot,
-                            msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64),
-                            &frame,
-                        );
-                    }
-                    alloc.delete_cap_slot(reply_slot);
+                    reply_caps::send_and_release(
+                        reply_slot,
+                        msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64),
+                        &frame,
+                    );
                 }
                 SyscallResult::Block => {}
                 SyscallResult::Stop => {
                     xv6::use_deferred_reply_slot(0);
-                    unsafe {
-                        sel4_user::sel4_send(reply_slot, msg_info(1, 0, 0, 0), &[]);
-                    }
-                    alloc.delete_cap_slot(reply_slot);
+                    reply_caps::stop_and_release(reply_slot);
                 }
             }
             return;
@@ -298,7 +296,7 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
     let mut page = 0usize;
     while page < XV6_DISK_SHARED_BUFFER_PAGES {
         disk_shared_frames[page] = alloc.retype_one(OBJ_4K, 0);
-        map_shared_frame_into_host(disk_shared_frames[page], page);
+        map_shared_frame_into_host(alloc, disk_shared_frames[page], page);
         page += 1;
     }
     let disk_completion_ntfn = alloc.retype_one(OBJ_NOTIFICATION, 0);
@@ -501,16 +499,14 @@ fn push_disk_map(
     *len += 1;
 }
 
-fn map_shared_frame_into_host(frame_slot: u64, page: usize) {
+fn map_shared_frame_into_host(alloc: &mut Allocator, frame_slot: u64, page: usize) {
+    let vaddr = XV6_DISK_SHARED_BUFFER_VADDR + page as u64 * PAGE_SIZE;
+    ensure_host_page_table_path(alloc, vaddr);
     call_checked(
         frame_slot,
         LABEL_PAGE_MAP,
         &[INIT_VSPACE],
-        &[
-            XV6_DISK_SHARED_BUFFER_VADDR + page as u64 * PAGE_SIZE,
-            cap_rights(false, false, true, true),
-            1,
-        ],
+        &[vaddr, cap_rights(false, false, true, true), 1],
     );
 }
 

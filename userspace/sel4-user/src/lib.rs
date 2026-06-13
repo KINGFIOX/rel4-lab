@@ -88,10 +88,14 @@ pub const LABEL_IRQ_ISSUE_IRQ_HANDLER: u64 = 26;
 pub const LABEL_IRQ_ACK: u64 = 27;
 pub const LABEL_IRQ_SET_NOTIFICATION: u64 = 28;
 pub const LABEL_SCHED_CONTROL_CONFIGURE_FLAGS: u64 = 33;
+pub const LABEL_RISCV_PAGE_TABLE_MAP: u64 = 39;
+pub const LABEL_RISCV_PAGE_TABLE_UNMAP: u64 = 40;
 pub const LABEL_RISCV_PAGE_MAP: u64 = 41;
 pub const LABEL_RISCV_PAGE_UNMAP: u64 = 42;
 pub const LABEL_RISCV_PAGE_GET_ADDRESS: u64 = 43;
 pub const LABEL_RISCV_ASID_POOL_ASSIGN: u64 = 45;
+pub const LABEL_PAGE_TABLE_MAP: u64 = LABEL_RISCV_PAGE_TABLE_MAP;
+pub const LABEL_PAGE_TABLE_UNMAP: u64 = LABEL_RISCV_PAGE_TABLE_UNMAP;
 pub const LABEL_PAGE_MAP: u64 = LABEL_RISCV_PAGE_MAP;
 pub const LABEL_PAGE_UNMAP: u64 = LABEL_RISCV_PAGE_UNMAP;
 pub const LABEL_PAGE_GET_ADDRESS: u64 = LABEL_RISCV_PAGE_GET_ADDRESS;
@@ -327,7 +331,15 @@ pub fn call_checked(service: u64, label: u64, extra_caps: &[u64], mrs: &[u64]) {
         );
         let err = msg_label(reply.info);
         if err != 0 {
-            log_crate::error!("sel4-user: seL4 call failed label={} err={}", label, err);
+            log_crate::error!(
+                "sel4-user: seL4 call failed label={} err={} mr0={:#x} mr1={:#x} mr2={:#x} mr3={:#x}",
+                label,
+                err,
+                reply.mrs[0],
+                reply.mrs[1],
+                reply.mrs[2],
+                reply.mrs[3]
+            );
             halt_loop();
         }
     }

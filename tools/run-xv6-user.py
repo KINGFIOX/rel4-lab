@@ -25,7 +25,12 @@ from tool_common import (
     qemu_smp_arg,
     tail_lines,
 )
-from target_config import image_suffix_from_env, target_from_env
+from target_config import (
+    image_suffix_from_env,
+    sel4_build_dir_from_env,
+    sel4_tree_dir_from_env,
+    target_from_env,
+)
 
 
 PREFIX = "run-xv6-user"
@@ -139,6 +144,8 @@ def main(argv: list[str]) -> int:
         qemu_stdin_file = str(run_qemu_stdin_file)
 
     target.require_qemu(PREFIX)
+    sel4_build_dir = sel4_build_dir_from_env(target)
+    target.require_sel4_arch_source(PREFIX, sel4_tree_dir_from_env(sel4_build_dir))
 
     lock = BuildLock(ROOT_DIR)
     lock.acquire()
@@ -169,6 +176,13 @@ def main(argv: list[str]) -> int:
         env["OUT_IMAGE"] = str(packed_image)
         subprocess.run([str(ROOT_DIR / "tools" / "pack-image.py")], env=env, check=True)
         lock.release()
+    except subprocess.CalledProcessError as exc:
+        lock.release()
+        if run_fs_img is not None and not keep_run_fs_img:
+            run_fs_img.unlink(missing_ok=True)
+        if run_qemu_stdin_file is not None:
+            run_qemu_stdin_file.unlink(missing_ok=True)
+        return exc.returncode
     except Exception:
         lock.release()
         if run_fs_img is not None and not keep_run_fs_img:

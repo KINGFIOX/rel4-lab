@@ -50,8 +50,8 @@ pub(crate) fn tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(crate) fn pump_sleep_waiters(alloc: &mut Allocator, procs: &mut [TaskStruct; MAX_PROCS]) {
-    io_syscalls::pump_sleep_waiters(alloc, procs, ticks_now());
+pub(crate) fn pump_sleep_waiters(procs: &mut [TaskStruct; MAX_PROCS]) {
+    io_syscalls::pump_sleep_waiters(procs, ticks_now());
 }
 
 pub(crate) fn handle_xv6_syscall(
@@ -107,7 +107,7 @@ pub(crate) fn handle_xv6_syscall(
         Some(Xv6Syscall::GetPid) => procs[proc_idx].pid as i64,
         Some(Xv6Syscall::Uptime) => ticks_now() as i64,
         Some(Xv6Syscall::Pause) => {
-            return sys_pause(alloc, &mut procs[proc_idx], a0 as i64, ticks_now(), mrs);
+            return sys_pause(&mut procs[proc_idx], a0 as i64, ticks_now(), mrs);
         }
         Some(Xv6Syscall::Kill) => sys_kill(alloc, procs, a0 as i64),
         Some(Xv6Syscall::Chdir) => return sys_chdir(alloc, &mut procs[proc_idx], a0, mrs),

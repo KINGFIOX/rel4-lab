@@ -12,11 +12,12 @@ use crate::io_syscalls::{
 use crate::memory_syscalls::{
     release_all_sparse_eager, reserve_sparse_eager, sparse_eager_can_clone,
 };
+use crate::reply_caps;
 use crate::types::{SyscallResult, TaskStruct};
 use crate::util::{halt_loop, info, warn, write_i32};
 use crate::vfs::{close_all_fds, release_cwd_ref, retain_fd_refs, vfs_release_cwd, vfs_retain_cwd};
 use core::sync::atomic::{AtomicU64, Ordering};
-use sel4_user::{call_checked, msg_info, sel4_send, sel4_yield};
+use sel4_user::{call_checked, msg_info, sel4_yield};
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(2);
 const SYNTHETIC_INIT_CHILD_PRIORITY: u64 = 255;
@@ -138,7 +139,7 @@ pub(crate) fn sys_wait(
         return SyscallResult::Reply(-1);
     }
 
-    let (reply_slot, reply_mrs) = save_blocked_reply(alloc, mrs);
+    let (reply_slot, reply_mrs) = save_blocked_reply(mrs);
     procs[proc_idx].state = PROC_WAITING;
     procs[proc_idx].wait_status_ptr = status_ptr;
     procs[proc_idx].wait_reply_slot = reply_slot;
@@ -190,7 +191,7 @@ fn make_zombie_process(
     release_all_sparse_eager(&mut procs[proc_idx]);
     close_all_fds(&mut procs[proc_idx]);
     release_cwd_ref(&mut procs[proc_idx]);
-    drop_blocked_reply_caps(alloc, &mut procs[proc_idx]);
+    drop_blocked_reply_caps(&mut procs[proc_idx]);
     procs[proc_idx].state = PROC_ZOMBIE;
     procs[proc_idx].exit_status = status;
     pump_vfs_waiters(alloc, procs);
@@ -234,14 +235,11 @@ fn reply_waiting_parent(
             reap_process(alloc, &mut procs[child_idx]);
             yield_synthetic_init_child(procs);
         }
-        unsafe {
-            sel4_send(
-                parent.wait_reply_slot,
-                msg_info(0, 0, 0, arch::FAULT_REPLY_WORDS as u64),
-                &reply_mrs,
-            );
-        }
-        alloc.delete_cap_slot(parent.wait_reply_slot);
+        reply_caps::send_and_release(
+            parent.wait_reply_slot,
+            msg_info(0, 0, 0, arch::FAULT_REPLY_WORDS as u64),
+            &reply_mrs,
+        );
         procs[i].state = PROC_RUNNABLE;
         clear_wait_block(&mut procs[i]);
         return;

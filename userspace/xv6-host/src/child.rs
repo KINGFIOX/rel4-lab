@@ -149,6 +149,119 @@ impl ChildMemory {
 
 static CHILD_MEMORY: ChildMemory = ChildMemory::new();
 
+const ROOTSERVER_PAGE_TABLE_PID: u64 = u64::MAX;
+const ROOT_PAGE_TABLE_RANGE: u64 = 1 << 30;
+const LEAF_PAGE_TABLE_RANGE: u64 = 1 << 21;
+
+#[derive(Copy, Clone)]
+struct PageTableEntry {
+    pid: u64,
+    range_base: u64,
+    slot: u64,
+}
+
+const EMPTY_PAGE_TABLE_ENTRY: PageTableEntry = PageTableEntry {
+    pid: 0,
+    range_base: 0,
+    slot: 0,
+};
+
+struct PageTableState {
+    root_tables: [PageTableEntry; MAX_PROCS * 4],
+    leaf_tables: [PageTableEntry; MAX_PAGE_TABLE_MAPPINGS],
+}
+
+impl PageTableState {
+    const fn new() -> Self {
+        Self {
+            root_tables: [EMPTY_PAGE_TABLE_ENTRY; MAX_PROCS * 4],
+            leaf_tables: [EMPTY_PAGE_TABLE_ENTRY; MAX_PAGE_TABLE_MAPPINGS],
+        }
+    }
+}
+
+struct ChildPageTables {
+    state: UnsafeCell<PageTableState>,
+}
+
+// Page-table cap tracking is only mutated by the single xv6-host rootserver
+// fault loop.
+unsafe impl Sync for ChildPageTables {}
+
+impl ChildPageTables {
+    const fn new() -> Self {
+        Self {
+            state: UnsafeCell::new(PageTableState::new()),
+        }
+    }
+
+    fn has_root_table(&self, pid: u64, range_base: u64) -> bool {
+        let state = unsafe { &*self.state.get() };
+        state
+            .root_tables
+            .iter()
+            .any(|entry| entry.pid == pid && entry.range_base == range_base)
+    }
+
+    fn has_leaf_table(&self, pid: u64, range_base: u64) -> bool {
+        let state = unsafe { &*self.state.get() };
+        state
+            .leaf_tables
+            .iter()
+            .any(|entry| entry.pid == pid && entry.range_base == range_base)
+    }
+
+    fn insert_root_table(&self, pid: u64, range_base: u64, slot: u64) {
+        insert_page_table_entry(
+            unsafe { &mut (*self.state.get()).root_tables },
+            pid,
+            range_base,
+            slot,
+        );
+    }
+
+    fn insert_leaf_table(&self, pid: u64, range_base: u64, slot: u64) {
+        insert_page_table_entry(
+            unsafe { &mut (*self.state.get()).leaf_tables },
+            pid,
+            range_base,
+            slot,
+        );
+    }
+
+    fn clear_pid(&self, alloc: &mut Allocator, pid: u64) {
+        let state = unsafe { &mut *self.state.get() };
+        clear_page_table_entries(alloc, &mut state.leaf_tables, pid);
+        clear_page_table_entries(alloc, &mut state.root_tables, pid);
+    }
+}
+
+static CHILD_PAGE_TABLES: ChildPageTables = ChildPageTables::new();
+
+fn insert_page_table_entry(entries: &mut [PageTableEntry], pid: u64, range_base: u64, slot: u64) {
+    for entry in entries {
+        if entry.pid == 0 {
+            *entry = PageTableEntry {
+                pid,
+                range_base,
+                slot,
+            };
+            return;
+        }
+    }
+    warn!("xv6-host: page table registry full");
+    halt_loop();
+}
+
+fn clear_page_table_entries(alloc: &mut Allocator, entries: &mut [PageTableEntry], pid: u64) {
+    for entry in entries {
+        if entry.pid == pid {
+            alloc.delete_cap_slot(entry.slot);
+            *entry = EMPTY_PAGE_TABLE_ENTRY;
+        }
+    }
+}
+
 pub(crate) fn create_child(
     alloc: &mut Allocator,
     proc_slot: usize,
@@ -171,10 +284,11 @@ pub(crate) fn create_child_from_untyped(
     let cnode = alloc.retype_one_from(untyped, OBJ_CAP_TABLE, CHILD_CNODE_BITS);
     let vspace = alloc.retype_one_from(untyped, OBJ_PAGE_TABLE, 0);
     let ipc_frame = alloc.retype_one_from(untyped, OBJ_4K, 0);
-    let sched_context = alloc.retype_one_from(untyped, OBJ_SCHED_CONTEXT, 0);
+    let sched_context = alloc.retype_one_from(untyped, OBJ_SCHED_CONTEXT, SCHED_CONTEXT_BITS);
     let fault_ep_cap = alloc.mint_cap(fault_ep, cap_rights(true, true, true, true), pid);
 
     call_checked(INIT_ASID_POOL, LABEL_ASID_POOL_ASSIGN, &[vspace], &[]);
+    ensure_page_table_path(alloc, pid, vspace, CHILD_IPC_BUFFER);
     page_map(ipc_frame, vspace, CHILD_IPC_BUFFER, true, false);
 
     let mrs = [
@@ -252,6 +366,7 @@ pub(crate) fn destroy_child_objects(alloc: &mut Allocator, child: &TaskStruct) {
     }
     alloc.delete_cap_slot(child.tcb);
     alloc.delete_cap_slot(child.ipc_frame);
+    CHILD_PAGE_TABLES.clear_pid(alloc, child.pid);
     alloc.delete_cap_slot(child.sched_context);
     alloc.delete_cap_slot(child.fault_ep_cap);
     alloc.delete_cap_slot(child.cnode);
@@ -503,10 +618,11 @@ pub(crate) fn map_existing_child_frame(
     writable: bool,
     executable: bool,
 ) -> u64 {
+    let mapping_slot = alloc.copy_cap(frame_slot, cap_rights(false, false, true, writable));
     map_existing_frame(
         alloc,
         child.pid,
-        frame_slot,
+        mapping_slot,
         child.vspace,
         child_va,
         writable,
@@ -539,6 +655,7 @@ fn map_existing_frame(
     pool_frame: bool,
     zero_frame: bool,
 ) -> u64 {
+    ensure_page_table_path(alloc, pid, vspace, child_va);
     let (mapping_slot, alias_va) =
         register_mapping(pid, child_va, frame_slot, writable, executable, pool_frame);
     if with_alias {
@@ -557,6 +674,46 @@ fn page_map(frame_slot: u64, vspace: u64, va: u64, writable: bool, executable: b
     let rights = cap_rights(false, false, true, writable);
     let attrs = if executable { 0 } else { 1 };
     call_checked(frame_slot, LABEL_PAGE_MAP, &[vspace], &[va, rights, attrs]);
+}
+
+pub(crate) fn ensure_host_page_table_path(alloc: &mut Allocator, va: u64) {
+    ensure_leaf_page_table(
+        alloc,
+        ROOTSERVER_PAGE_TABLE_PID,
+        INIT_VSPACE,
+        align_down_to(va, LEAF_PAGE_TABLE_RANGE),
+    );
+}
+
+fn ensure_page_table_path(alloc: &mut Allocator, pid: u64, vspace: u64, va: u64) {
+    ensure_root_page_table(alloc, pid, vspace, align_down_to(va, ROOT_PAGE_TABLE_RANGE));
+    ensure_leaf_page_table(alloc, pid, vspace, align_down_to(va, LEAF_PAGE_TABLE_RANGE));
+}
+
+fn ensure_root_page_table(alloc: &mut Allocator, pid: u64, vspace: u64, range_base: u64) {
+    if CHILD_PAGE_TABLES.has_root_table(pid, range_base) {
+        return;
+    }
+    let slot = alloc.retype_one(OBJ_PAGE_TABLE, 0);
+    page_table_map(slot, vspace, range_base);
+    CHILD_PAGE_TABLES.insert_root_table(pid, range_base, slot);
+}
+
+fn ensure_leaf_page_table(alloc: &mut Allocator, pid: u64, vspace: u64, range_base: u64) {
+    if CHILD_PAGE_TABLES.has_leaf_table(pid, range_base) {
+        return;
+    }
+    let slot = alloc.retype_one(OBJ_PAGE_TABLE, 0);
+    page_table_map(slot, vspace, range_base);
+    CHILD_PAGE_TABLES.insert_leaf_table(pid, range_base, slot);
+}
+
+fn page_table_map(page_table_slot: u64, vspace: u64, va: u64) {
+    call_checked(page_table_slot, LABEL_PAGE_TABLE_MAP, &[vspace], &[va, 0]);
+}
+
+fn align_down_to(value: u64, align: u64) -> u64 {
+    value & !(align - 1)
 }
 
 fn register_mapping(
@@ -860,6 +1017,7 @@ fn ensure_alias_for_index(alloc: &mut Allocator, slot: usize) -> u64 {
     }
     if mapping.alias_slot == 0 {
         let alias_slot = alloc.copy_cap(mapping.frame_slot, cap_rights(false, false, true, true));
+        ensure_host_page_table_path(alloc, mapping.alias_page);
         page_map(alias_slot, INIT_VSPACE, mapping.alias_page, true, false);
         CHILD_MEMORY.set_mapping_alias_slot(slot, alias_slot);
     }
@@ -868,6 +1026,7 @@ fn ensure_alias_for_index(alloc: &mut Allocator, slot: usize) -> u64 {
 
 fn zero_frame_with_temporary_alias(alloc: &mut Allocator, frame_slot: u64, alias_va: u64) {
     let alias_slot = alloc.copy_cap(frame_slot, cap_rights(false, false, true, true));
+    ensure_host_page_table_path(alloc, alias_va);
     page_map(alias_slot, INIT_VSPACE, alias_va, true, false);
     zero_page(alias_va);
     page_unmap(alias_slot);

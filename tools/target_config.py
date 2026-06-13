@@ -110,6 +110,16 @@ class TargetConfig:
 
 DEFAULT_SEL4_TREE_DIR = ROOT_DIR / "third_party" / "sel4-lab" / "sel4test"
 
+
+def sel4_tree_dir_from_env(build_dir: Path) -> Path:
+    explicit = os.environ.get("SEL4_TREE_DIR") or os.environ.get("SEL4_ROOT")
+    if explicit:
+        return Path(explicit)
+    if (build_dir.parent / "init-build.sh").is_file():
+        return build_dir.parent
+    return DEFAULT_SEL4_TREE_DIR
+
+
 TARGETS: dict[str, TargetConfig] = {
     "riscv64": TargetConfig(
         name="riscv64",

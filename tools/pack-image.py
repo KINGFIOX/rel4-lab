@@ -26,12 +26,12 @@ from tool_common import (
     touch,
 )
 from target_config import (
-    DEFAULT_SEL4_TREE_DIR,
     image_name_from_env,
     platform_from_env,
     rust_target_from_env,
     sel4_arch_from_env,
     sel4_build_dir_from_env,
+    sel4_tree_dir_from_env,
     strip_from_env,
     target_from_env,
 )
@@ -121,15 +121,6 @@ def read_cmake_cache(cache_path: Path) -> dict[str, str]:
     except FileNotFoundError:
         pass
     return values
-
-
-def sel4_tree_dir_for(build_dir: Path) -> Path:
-    explicit = os.environ.get("SEL4_TREE_DIR") or os.environ.get("SEL4_ROOT")
-    if explicit:
-        return Path(explicit)
-    if (build_dir.parent / "init-build.sh").is_file():
-        return build_dir.parent
-    return DEFAULT_SEL4_TREE_DIR
 
 
 def cache_needs_reconfigure(build_dir: Path, source_dir: Path, cache: dict[str, str]) -> bool:
@@ -248,7 +239,7 @@ def rust_kernel_env(build_dir: Path, target) -> dict[str, str]:
 
 
 def ensure_sel4_configured(build_dir: Path, target) -> None:
-    tree_dir = sel4_tree_dir_for(build_dir)
+    tree_dir = sel4_tree_dir_from_env(build_dir)
     source_dir = tree_dir / "projects" / "sel4test"
     init_build = tree_dir / "init-build.sh"
     cache_path = build_dir / "CMakeCache.txt"
@@ -271,7 +262,7 @@ def ensure_sel4_configured(build_dir: Path, target) -> None:
 
 
 def ensure_sel4_arch_available(build_dir: Path, target) -> None:
-    tree_dir = sel4_tree_dir_for(build_dir)
+    tree_dir = sel4_tree_dir_from_env(build_dir)
     source_dir = tree_dir / "projects" / "sel4test"
     init_build = tree_dir / "init-build.sh"
     require_dir(PREFIX, tree_dir, f"SEL4_TREE_DIR not found: {tree_dir}")
