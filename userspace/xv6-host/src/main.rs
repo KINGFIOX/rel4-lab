@@ -12,6 +12,7 @@ mod allocator;
 mod arch;
 mod child;
 mod consts;
+mod disk_transport;
 mod exec_syscalls;
 mod fs_syscalls;
 mod io_syscalls;
@@ -36,8 +37,8 @@ use consts::{
     XV6_ABI_VERSION, XV6_DISK_COMPLETION_NTFN_CPTR, XV6_DISK_COMPLETION_RING_VADDR,
     XV6_DISK_ENDPOINT_CPTR, XV6_DISK_SHARED_BUFFER_PAGES, XV6_DISK_SHARED_BUFFER_VADDR,
     XV6_HOST_REPLY_ENDPOINT_CPTR, XV6_UART_ENDPOINT_CPTR, XV6_UART_MMIO_FRAME_VADDR,
-    XV6_UART_REPLY_ENDPOINT_CPTR, XV6_VIRTIO_DMA_VADDR, XV6_VIRTIO_MMIO_FRAME_VADDR,
-    XV6_XV6FS_ENDPOINT_CPTR, XV6FS_SERVER_ELF, XV6FS_SERVER_PID, Xv6Badge, Xv6Protocol, Xv6Status,
+    XV6_UART_REPLY_ENDPOINT_CPTR, XV6_VIRTIO_DMA_VADDR, XV6_XV6FS_ENDPOINT_CPTR, XV6FS_SERVER_ELF,
+    XV6FS_SERVER_PID, Xv6Badge, Xv6Protocol, Xv6Status,
 };
 use consts::{
     INIT_TCB, INIT_VSPACE, IRQ_CONTROL, KERNEL_TIMER_IRQ, MAX_PROCS, OBJ_4K, OBJ_ENDPOINT,
@@ -280,32 +281,16 @@ struct ServiceEndpoints {
     vfs: u64,
 }
 
+const MAX_DISK_MAPS: usize = 1 + 1 + XV6_DISK_SHARED_BUFFER_PAGES + 1;
+
 fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoints {
     let uart_ep = alloc.retype_one(OBJ_ENDPOINT, 0);
     let disk_ep = alloc.retype_one(OBJ_ENDPOINT, 0);
     let xv6fs_ep = alloc.retype_one(OBJ_ENDPOINT, 0);
     let vfs_ep = alloc.retype_one(OBJ_ENDPOINT, 0);
     let disk_irq_ntfn = alloc.retype_one(OBJ_NOTIFICATION, 0);
-    let disk_irq_handler = alloc.alloc_slot();
-    call_checked(
-        IRQ_CONTROL,
-        LABEL_IRQ_ISSUE_IRQ_HANDLER,
-        &[ROOT_CNODE],
-        &[consts::VIRTIO0_IRQ, disk_irq_handler, ROOT_CNODE_DEPTH],
-    );
-    let disk_irq_signal_cap = alloc.mint_cap(
-        disk_irq_ntfn,
-        cap_rights(false, false, false, true),
-        Xv6Badge::DiskIrq.raw(),
-    );
-    call_checked(
-        disk_irq_handler,
-        LABEL_IRQ_SET_NOTIFICATION,
-        &[disk_irq_signal_cap],
-        &[],
-    );
+    let disk_irq_handler = disk_transport::issue_irq_handler(alloc, disk_irq_ntfn);
     let uart_mmio_frame = alloc.retype_device_4k_at(consts::UART0_MMIO_FRAME_BASE);
-    let virtio_mmio_frame = alloc.retype_device_4k_at(consts::VIRTIO_MMIO_FRAME_BASE);
     let virtio_dma_frame = alloc.retype_one(OBJ_4K, 0);
     let virtio_dma_paddr = frame_paddr(virtio_dma_frame);
     let mut disk_shared_frames = [0u64; XV6_DISK_SHARED_BUFFER_PAGES];
@@ -318,20 +303,31 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
     let disk_completion_ntfn = alloc.retype_one(OBJ_NOTIFICATION, 0);
     let disk_completion_ring_frame = alloc.retype_one(OBJ_4K, 0);
     let shared_maps = shared_frame_maps(&disk_shared_frames);
-    let disk_maps = [
-        (virtio_mmio_frame, XV6_VIRTIO_MMIO_FRAME_VADDR, true, false),
+    let mut disk_maps: [disk_transport::FrameMap; MAX_DISK_MAPS] =
+        [(0, 0, false, false); MAX_DISK_MAPS];
+    let mut disk_maps_len = 0usize;
+    if let Some(device_map) = disk_transport::device_frame_map(alloc) {
+        push_disk_map(&mut disk_maps, &mut disk_maps_len, device_map);
+    }
+    push_disk_map(
+        &mut disk_maps,
+        &mut disk_maps_len,
         (virtio_dma_frame, XV6_VIRTIO_DMA_VADDR, true, false),
-        shared_maps[0],
-        shared_maps[1],
-        shared_maps[2],
-        shared_maps[3],
+    );
+    push_disk_map(&mut disk_maps, &mut disk_maps_len, shared_maps[0]);
+    push_disk_map(&mut disk_maps, &mut disk_maps_len, shared_maps[1]);
+    push_disk_map(&mut disk_maps, &mut disk_maps_len, shared_maps[2]);
+    push_disk_map(&mut disk_maps, &mut disk_maps_len, shared_maps[3]);
+    push_disk_map(
+        &mut disk_maps,
+        &mut disk_maps_len,
         (
             disk_completion_ring_frame,
             XV6_DISK_COMPLETION_RING_VADDR,
             true,
             false,
         ),
-    ];
+    );
     let xv6fs_maps = [
         shared_maps[0],
         shared_maps[1],
@@ -396,7 +392,7 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
                 Xv6Badge::DiskCompletion.raw(),
             ),
         ],
-        &disk_maps,
+        &disk_maps[..disk_maps_len],
         virtio_dma_paddr,
         disk_irq_ntfn,
     );
@@ -491,6 +487,19 @@ fn shared_frame_maps(
             false,
         ),
     ]
+}
+
+fn push_disk_map(
+    maps: &mut [disk_transport::FrameMap; MAX_DISK_MAPS],
+    len: &mut usize,
+    map: disk_transport::FrameMap,
+) {
+    if *len >= MAX_DISK_MAPS {
+        warn!("xv6-host: disk frame map table exhausted");
+        halt_loop();
+    }
+    maps[*len] = map;
+    *len += 1;
 }
 
 fn map_shared_frame_into_host(frame_slot: u64, page: usize) {
