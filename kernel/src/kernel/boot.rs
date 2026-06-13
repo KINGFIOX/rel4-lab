@@ -46,6 +46,11 @@ pub const USER_STACK_PAGES: usize = 16; // 64 KiB
 const ROOTSERVER_ASID: u16 = 1;
 const MAX_BOOT_USER_PAGING_CAPS: usize = 256;
 
+#[cfg(target_arch = "riscv64")]
+const KERNEL_BOOT_PROFILE: &str = "S-mode, Sv39";
+#[cfg(target_arch = "loongarch64")]
+const KERNEL_BOOT_PROFILE: &str = "LoongArch64 staging";
+
 #[repr(C)]
 pub struct BootArgs {
     pub user_pstart: usize,
@@ -268,7 +273,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     crate::machine::console::init();
     crate::arch::current::irq::init();
 
-    info!("microkernel: Rust kernel booted (S-mode, Sv39)");
+    info!("microkernel: Rust kernel booted ({})", KERNEL_BOOT_PROFILE);
     info!(
         "  hart_id={} core_id={} dtb=0x{:x} ({} bytes)",
         args.hart_id, args.core_id, args.dtb_pa, args.dtb_size

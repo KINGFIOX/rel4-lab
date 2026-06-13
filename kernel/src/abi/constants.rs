@@ -1,8 +1,9 @@
-//! Compile-time constants frozen against the upstream
-//! `qemu-riscv-virt` build of the official seL4 kernel.
+//! Compile-time ABI constants.
 //!
-//! Pulled from `build-riscv64/kernel/gen_config/kernel/gen_config.h` and
-//! `kernel/libsel4/sel4_arch_include/riscv64/sel4/sel4_arch/constants.h`.
+//! RISC-V values are frozen against the upstream `qemu-riscv-virt` build of
+//! the official seL4 kernel. LoongArch values are staging constants for the
+//! in-tree QEMU `virt` bring-up until a matching seL4 LoongArch port is
+//! available locally.
 
 #![allow(dead_code)]
 
@@ -81,14 +82,30 @@ pub const N_TOTAL_MSG_REGISTERS: usize = 120;
 
 // ---- Architecture ---------------------------------------------------------
 
-pub const PT_INDEX_BITS: usize = 9; // 512 entries per level (Sv39)
-pub const PT_LEVELS: usize = 3; // Sv39
+pub const PT_INDEX_BITS: usize = 9; // 512 entries per level
+pub const PT_LEVELS: usize = 3;
 pub const RISCV_PG_SHIFT: usize = 12;
 
+#[cfg(target_arch = "riscv64")]
 pub const PHYS_BASE_RAW: usize = 0x8020_0000;
+#[cfg(target_arch = "riscv64")]
 pub const PPTR_BASE: usize = 0xFFFFFFC0_00000000;
+#[cfg(target_arch = "riscv64")]
 pub const PPTR_TOP: usize = 0xFFFFFFFF_80000000;
+#[cfg(target_arch = "riscv64")]
 pub const KERNEL_ELF_BASE: usize = PPTR_TOP + (PHYS_BASE_RAW & ((1usize << 30) - 1));
 // PA = VA - (PPTR_TOP - PADDR_BASE) when kernel-window-mapped:
 //   PADDR_BASE = 0 ⇒ kernel window maps VA[PPTR_BASE..PPTR_TOP) → PA[0..2^38)
+#[cfg(target_arch = "riscv64")]
+pub const PADDR_BASE: usize = 0;
+
+#[cfg(target_arch = "loongarch64")]
+pub const PHYS_BASE_RAW: usize = 0x0020_0000;
+#[cfg(target_arch = "loongarch64")]
+pub const PPTR_BASE: usize = 0x0;
+#[cfg(target_arch = "loongarch64")]
+pub const PPTR_TOP: usize = 0x0000_0002_0000_0000;
+#[cfg(target_arch = "loongarch64")]
+pub const KERNEL_ELF_BASE: usize = PHYS_BASE_RAW;
+#[cfg(target_arch = "loongarch64")]
 pub const PADDR_BASE: usize = 0;

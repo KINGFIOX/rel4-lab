@@ -1,9 +1,8 @@
 //! LoongArch64 boot entry.
 //!
 //! This is the first executable LoongArch kernel stage. It mirrors the
-//! repository's current seL4 elfloader-style eight-argument handoff shape, but
-//! intentionally parks after recording the arguments until the full LoongArch
-//! rootserver bring-up path is enabled.
+//! repository's current seL4 elfloader-style eight-argument handoff shape and
+//! enters the shared rootserver bring-up path.
 
 use core::arch::naked_asm;
 
@@ -12,31 +11,6 @@ unsafe extern "C" {
     static __bss_end: u8;
     static __stack_top: u8;
 }
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub struct BootArgs {
-    pub user_pstart: usize,
-    pub user_pend: usize,
-    pub pv_offset: usize,
-    pub user_ventry: usize,
-    pub dtb_pa: usize,
-    pub dtb_size: usize,
-    pub hart_id: usize,
-    pub core_id: usize,
-}
-
-#[unsafe(link_section = ".boot.data")]
-static mut BOOT_ARGS: BootArgs = BootArgs {
-    user_pstart: 0,
-    user_pend: 0,
-    pv_offset: 0,
-    user_ventry: 0,
-    dtb_pa: 0,
-    dtb_size: 0,
-    hart_id: 0,
-    core_id: 0,
-};
 
 /// Kernel entry reached from the future LoongArch elfloader handoff.
 ///
@@ -87,20 +61,17 @@ pub extern "C" fn init_kernel(
     hart_id: usize,
     core_id: usize,
 ) -> ! {
-    unsafe {
-        BOOT_ARGS = BootArgs {
-            user_pstart,
-            user_pend,
-            pv_offset,
-            user_ventry,
-            dtb_pa,
-            dtb_size,
-            hart_id,
-            core_id,
-        };
-    }
-
-    halt()
+    let args = crate::kernel::boot::BootArgs {
+        user_pstart,
+        user_pend,
+        pv_offset,
+        user_ventry,
+        dtb_pa,
+        dtb_size,
+        hart_id,
+        core_id,
+    };
+    crate::kernel::boot::bringup_rootserver(&args)
 }
 
 pub fn halt() -> ! {
