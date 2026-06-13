@@ -14,10 +14,12 @@ from tool_common import (
     ROOT_DIR,
     BuildLock,
     bare_metal_tool_env,
+    default_xv6_dir_for_target,
     die,
     getenv,
     install_file,
     log,
+    prepare_xv6_dir_for_target,
     require_dir,
     run,
     xv6_user_cflags,
@@ -30,13 +32,14 @@ PREFIX = "build-xv6-fs-img"
 
 def main() -> int:
     target = target_from_env(PREFIX)
-    xv6_dir = Path(getenv("XV6_DIR", str(ROOT_DIR / "third_party" / target.xv6_dir_name)))
+    xv6_dir = Path(os.environ.get("XV6_DIR", str(default_xv6_dir_for_target(target))))
     out_dir = Path(getenv("OUT_DIR", str(ROOT_DIR / "target" / "xv6compat")))
     xv6_fs_img = Path(getenv("XV6_FS_IMG", str(out_dir / "fs.img")))
     march = getenv("XV6_USER_MARCH", target.xv6_march)
     mabi = getenv("XV6_USER_MABI", target.xv6_mabi)
 
     require_dir(PREFIX, xv6_dir, f"XV6_DIR not found: {xv6_dir}")
+    xv6_dir = prepare_xv6_dir_for_target(PREFIX, target, xv6_dir, out_dir)
 
     lock = BuildLock(ROOT_DIR)
     lock.acquire()
@@ -73,6 +76,7 @@ def main() -> int:
         run(
             [
                 "make",
+                "-B",
                 "-C",
                 str(xv6_dir),
                 f"TOOLPREFIX={toolprefix}",

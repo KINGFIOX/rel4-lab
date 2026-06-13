@@ -15,9 +15,11 @@ from tool_common import (
     bare_metal_tool_env,
     c_string_literal,
     die,
+    default_xv6_dir_for_target,
     getenv,
     install_file,
     log,
+    prepare_xv6_dir_for_target,
     require_dir,
     require_file,
     run,
@@ -78,7 +80,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     target = target_from_env(PREFIX)
-    xv6_dir = Path(getenv("XV6_DIR", str(ROOT_DIR / "third_party" / target.xv6_dir_name)))
+    xv6_dir = Path(os.environ.get("XV6_DIR", str(default_xv6_dir_for_target(target))))
     out_dir = Path(getenv("OUT_DIR", str(ROOT_DIR / "target" / "xv6compat")))
     user_base = getenv("XV6_USER_BASE", "0x10000")
     march = getenv("XV6_USER_MARCH", target.xv6_march)
@@ -89,6 +91,7 @@ def main(argv: list[str]) -> int:
     program_args = argv[1:]
 
     require_dir(PREFIX, xv6_dir, f"XV6_DIR not found: {xv6_dir}")
+    xv6_dir = prepare_xv6_dir_for_target(PREFIX, target, xv6_dir, out_dir)
     require_file(PREFIX, xv6_dir / "user" / f"{program}.c", f"xv6 user program not found: user/{program}.c")
 
     lock = BuildLock(ROOT_DIR)
