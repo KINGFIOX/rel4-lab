@@ -25,7 +25,12 @@ from tool_common import (
     run,
     xv6_user_cflags,
 )
-from target_config import infer_toolprefix_for, rust_target_from_env, target_from_env
+from target_config import (
+    infer_toolprefix_for,
+    require_supported_xv6_user_abi,
+    rust_target_from_env,
+    target_from_env,
+)
 
 
 PREFIX = "build-xv6-user"
@@ -85,6 +90,7 @@ def main(argv: list[str]) -> int:
     user_base = getenv("XV6_USER_BASE", "0x10000")
     march = getenv("XV6_USER_MARCH", target.xv6_march)
     mabi = getenv("XV6_USER_MABI", target.xv6_mabi)
+    require_supported_xv6_user_abi(PREFIX, target, mabi)
     rust_target = rust_target_from_env(target)
 
     program = argv[0].removeprefix("_")

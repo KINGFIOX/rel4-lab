@@ -268,3 +268,14 @@ def infer_toolprefix_for(target: TargetConfig, extra_prefixes: Sequence[str] = (
         if command_exists(f"{tool_prefix}gcc"):
             return tool_prefix
     return None
+
+
+def require_supported_xv6_user_abi(prefix: str, target: TargetConfig, mabi: str) -> None:
+    if target.name == "loongarch64" and mabi != target.xv6_mabi:
+        die(
+            prefix,
+            (
+                f"ARCH=loongarch64 currently requires XV6_USER_MABI={target.xv6_mabi}; "
+                "the LoongArch kernel UserContext does not preserve FPU state."
+            ),
+        )

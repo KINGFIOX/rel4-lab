@@ -24,7 +24,7 @@ from tool_common import (
     run,
     xv6_user_cflags,
 )
-from target_config import infer_toolprefix_for, target_from_env
+from target_config import infer_toolprefix_for, require_supported_xv6_user_abi, target_from_env
 
 
 PREFIX = "build-xv6-fs-img"
@@ -37,6 +37,7 @@ def main() -> int:
     xv6_fs_img = Path(getenv("XV6_FS_IMG", str(out_dir / "fs.img")))
     march = getenv("XV6_USER_MARCH", target.xv6_march)
     mabi = getenv("XV6_USER_MABI", target.xv6_mabi)
+    require_supported_xv6_user_abi(PREFIX, target, mabi)
 
     lock = BuildLock(ROOT_DIR)
     lock.acquire()
