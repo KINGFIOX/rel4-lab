@@ -21,7 +21,12 @@ from tool_common import (
     output,
     qemu_smp_arg,
 )
-from target_config import image_suffix_from_env, target_from_env
+from target_config import (
+    image_suffix_from_env,
+    sel4_build_dir_from_env,
+    sel4_tree_dir_from_env,
+    target_from_env,
+)
 
 
 PREFIX = "run-xv6-shell"
@@ -150,6 +155,10 @@ def main(argv: list[str]) -> int:
     no_tty_check = parse_args(argv)
 
     target.require_qemu(PREFIX)
+    target.require_sel4_arch_source(
+        PREFIX,
+        sel4_tree_dir_from_env(sel4_build_dir_from_env(target)),
+    )
     if not no_tty_check and (not sys.stdin.isatty() or not sys.stdout.isatty()):
         die(PREFIX, "interactive shell needs a terminal; rerun from a real tty or pass --no-tty-check")
 
