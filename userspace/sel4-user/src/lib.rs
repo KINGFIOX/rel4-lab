@@ -119,7 +119,7 @@ pub const USER_EXCEPTION_NUMBER: usize = 2;
 pub const USER_EXCEPTION_CODE: usize = 3;
 pub const USER_EXCEPTION_LENGTH: usize = 4;
 
-pub const KERNEL_TIMER_IRQ: u64 = 96;
+pub const KERNEL_TIMER_IRQ: u64 = arch::current::KERNEL_TIMER_IRQ;
 
 pub const TCB_FLAG_NO_FLAG: u64 = 0x0;
 pub const TCB_FLAG_FPU_DISABLED: u64 = 0x1;

@@ -734,7 +734,7 @@ fn handle_timer_interrupt() {
     program_next_timer();
     unsafe {
         crate::object::sched_context::release_due(now);
-        crate::object::irq::signal_irq(crate::object::irq::KERNEL_TIMER_IRQ as u64);
+        crate::object::irq::signal_irq(super::irq::KERNEL_TIMER_IRQ as u64);
         let cur = crate::object::tcb::current();
         let (cur_running, cur_sc) = crate::object::tcb::running_sched_context_snapshot(cur);
         if cur_running {
@@ -795,13 +795,12 @@ fn switch_to_kernel_vspace() {
 }
 
 fn service_pending_external_interrupt() -> bool {
-    let irq = crate::machine::plic::claim();
-    if irq == 0 {
+    let Some(irq) = super::irq::claim_external_irq() else {
         return false;
-    }
-    let delivered = unsafe { crate::object::irq::signal_irq(irq as u64) };
+    };
+    let delivered = unsafe { crate::object::irq::signal_irq(irq) };
     if !delivered {
-        crate::machine::plic::complete(irq);
+        super::irq::complete_external_irq(irq);
     }
     true
 }

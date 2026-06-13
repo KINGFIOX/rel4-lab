@@ -266,7 +266,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     crate::kernel::smp::publish_kernel_satp(satp);
     unsafe { switch_satp(satp) };
     crate::machine::console::init();
-    crate::machine::plic::init();
+    crate::arch::current::irq::init();
 
     info!("microkernel: Rust kernel booted (S-mode, Sv39)");
     info!(

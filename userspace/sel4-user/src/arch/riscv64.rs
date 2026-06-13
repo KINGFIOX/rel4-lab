@@ -2,6 +2,8 @@ use core::arch::asm;
 
 use crate::{SYS_CALL, SYS_DEBUG_HALT, SYS_DEBUG_PUT_CHAR, SYS_REPLY_RECV, SYS_SEND, SYS_YIELD};
 
+pub(crate) const KERNEL_TIMER_IRQ: u64 = 96;
+
 #[inline(always)]
 pub(crate) unsafe fn call(
     service: u64,

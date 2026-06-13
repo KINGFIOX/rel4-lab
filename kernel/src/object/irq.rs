@@ -12,9 +12,8 @@ use crate::object::cap::{Cap, CapTag};
 use crate::object::cnode::Cte;
 use crate::object::mdb::MdbNode;
 
-pub const PLIC_MAX_IRQ: usize = 95;
-pub const KERNEL_TIMER_IRQ: usize = PLIC_MAX_IRQ + 1;
-pub const MAX_IRQ: usize = KERNEL_TIMER_IRQ;
+pub const KERNEL_TIMER_IRQ: usize = crate::arch::current::irq::KERNEL_TIMER_IRQ;
+pub const MAX_IRQ: usize = crate::arch::current::irq::MAX_IRQ;
 const NUM_IRQS: usize = MAX_IRQ + 1;
 
 #[derive(Copy, Clone)]
@@ -57,9 +56,7 @@ pub unsafe fn try_issue_handler(irq: u64) -> bool {
                 return false;
             }
             e.active = true;
-            if irq as usize <= PLIC_MAX_IRQ {
-                crate::machine::plic::enable_irq(irq as usize);
-            }
+            crate::arch::current::irq::enable_external_irq(irq);
             return true;
         }
         false
@@ -80,9 +77,7 @@ pub unsafe fn deleted_handler(irq: u64) {
     IRQ_TABLE.with_mut(|table| {
         if let Some(e) = entry_mut(table, irq) {
             e.active = false;
-            if irq as usize <= PLIC_MAX_IRQ {
-                crate::machine::plic::disable_irq(irq as usize);
-            }
+            crate::arch::current::irq::disable_external_irq(irq);
         }
     });
 }
@@ -167,7 +162,5 @@ pub unsafe fn signal_irq(irq: u64) -> bool {
 }
 
 pub unsafe fn ack_irq(irq: u64) {
-    if irq as usize <= PLIC_MAX_IRQ {
-        crate::machine::plic::complete(irq as u32);
-    }
+    crate::arch::current::irq::complete_external_irq(irq);
 }
