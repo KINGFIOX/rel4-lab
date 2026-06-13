@@ -108,6 +108,8 @@ def require_dir(prefix: str, path: Path, message: str | None = None) -> None:
 RISCV_ELF_MACHINE = 243
 LOONGARCH64_ELF_MACHINE = 258
 ELF_TYPE_EXECUTABLE = 2
+RISCV_EFLAGS_FLOAT_ABI_MASK = 0x6
+RISCV_EFLAGS_FLOAT_ABI_SOFT = 0x0
 LOONGARCH64_EFLAGS_ABI_MASK = 0x7
 LOONGARCH64_EFLAGS_ABI_SOFT_FLOAT = 0x1
 
@@ -134,9 +136,20 @@ def require_xv6_user_elf(prefix: str, target, path: Path) -> None:
     ):
         die(prefix, f"expected a little-endian executable {target.name} xv6 user ELF: {path}")
 
+    flags = int.from_bytes(data[48:52], "little")
+    if target.name == "riscv64":
+        if (flags & RISCV_EFLAGS_FLOAT_ABI_MASK) != RISCV_EFLAGS_FLOAT_ABI_SOFT:
+            die(
+                prefix,
+                (
+                    f"RISC-V xv6 user ELF must use the soft-float ABI: {path} "
+                    f"has e_flags={flags:#x}"
+                ),
+            )
+        return
+
     if target.name != "loongarch64":
         return
-    flags = int.from_bytes(data[48:52], "little")
     if (flags & LOONGARCH64_EFLAGS_ABI_MASK) != LOONGARCH64_EFLAGS_ABI_SOFT_FLOAT:
         die(
             prefix,
