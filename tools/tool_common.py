@@ -105,24 +105,35 @@ def require_dir(prefix: str, path: Path, message: str | None = None) -> None:
         die(prefix, message or f"missing directory: {path}")
 
 
+RISCV_ELF_MACHINE = 243
 LOONGARCH64_ELF_MACHINE = 258
 LOONGARCH64_EFLAGS_ABI_MASK = 0x7
 LOONGARCH64_EFLAGS_ABI_SOFT_FLOAT = 0x1
 
 
-def require_loongarch64_soft_float_elf(prefix: str, path: Path) -> None:
+def require_xv6_user_elf(prefix: str, target, path: Path) -> None:
+    expected_machines = {
+        "riscv64": RISCV_ELF_MACHINE,
+        "loongarch64": LOONGARCH64_ELF_MACHINE,
+    }
+    expected_machine = expected_machines.get(target.name)
+    if expected_machine is None:
+        die(prefix, f"unsupported xv6 user ELF target: {target.name}")
     try:
         data = path.read_bytes()
     except FileNotFoundError:
-        die(prefix, f"LoongArch64 user ELF not found: {path}")
+        die(prefix, f"xv6 user ELF not found: {path}")
     if (
         len(data) < 64
         or data[0:4] != b"\x7fELF"
         or data[4] != 2
         or data[5] != 1
-        or int.from_bytes(data[18:20], "little") != LOONGARCH64_ELF_MACHINE
+        or int.from_bytes(data[18:20], "little") != expected_machine
     ):
-        die(prefix, f"expected a little-endian LoongArch64 ELF: {path}")
+        die(prefix, f"expected a little-endian {target.name} xv6 user ELF: {path}")
+
+    if target.name != "loongarch64":
+        return
     flags = int.from_bytes(data[48:52], "little")
     if (flags & LOONGARCH64_EFLAGS_ABI_MASK) != LOONGARCH64_EFLAGS_ABI_SOFT_FLOAT:
         die(

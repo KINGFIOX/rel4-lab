@@ -20,9 +20,9 @@ from tool_common import (
     install_file,
     log,
     prepare_xv6_dir_for_target,
-    require_loongarch64_soft_float_elf,
     require_dir,
     require_file,
+    require_xv6_user_elf,
     run,
     xv6_user_cflags,
 )
@@ -171,8 +171,7 @@ def main(argv: list[str]) -> int:
             ],
             env=cross_env,
         )
-        if target.name == "loongarch64":
-            require_loongarch64_soft_float_elf(PREFIX, payload_elf)
+        require_xv6_user_elf(PREFIX, target, payload_elf)
 
         log(PREFIX, f"building xv6-host rootserver {host_elf}")
         run(

@@ -20,8 +20,8 @@ from tool_common import (
     install_file,
     log,
     prepare_xv6_dir_for_target,
-    require_loongarch64_soft_float_elf,
     require_dir,
+    require_xv6_user_elf,
     run,
     xv6_user_cflags,
 )
@@ -88,9 +88,8 @@ def main() -> int:
             env=cross_env,
             stdout=subprocess.DEVNULL,
         )
-        if target.name == "loongarch64":
-            for user_elf in sorted((xv6_dir / "user").glob("_*")):
-                require_loongarch64_soft_float_elf(PREFIX, user_elf)
+        for user_elf in sorted((xv6_dir / "user").glob("_*")):
+            require_xv6_user_elf(PREFIX, target, user_elf)
 
         install_file(xv6_dir / "fs.img", xv6_fs_img)
         log(PREFIX, f"fs image ready: {xv6_fs_img}")
