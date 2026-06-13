@@ -31,7 +31,9 @@ pub const CSR_DMW2: usize = 0x182;
 pub const CSR_DMW3: usize = 0x183;
 
 const INVTLB_ALL: usize = 0x00;
-const INVTLB_ASID: usize = 0x01;
+const INVTLB_ASID: usize = 0x04;
+const INVTLB_ADDR_G_OR_ASID: usize = 0x06;
+pub const ASID_MASK: usize = 0x3ff;
 
 macro_rules! ro_csr {
     ($name:ident, $csr:ident) => {
@@ -152,8 +154,18 @@ pub fn sfence_vma_all() {
 }
 
 #[inline]
-pub fn sfence_vma_va(_vaddr: usize) {
-    sfence_vma_all();
+pub fn sfence_vma_va(vaddr: usize) {
+    let asid = asid() & ASID_MASK;
+    unsafe {
+        asm!(
+            "invtlb {op}, {asid}, {vaddr}",
+            op = const INVTLB_ADDR_G_OR_ASID,
+            asid = in(reg) asid,
+            vaddr = in(reg) vaddr,
+            options(nostack, nomem)
+        );
+    }
+    dbar();
 }
 
 #[inline]
@@ -162,7 +174,7 @@ pub fn sfence_vma_asid(asid: usize) {
         asm!(
             "invtlb {op}, {asid}, $zero",
             op = const INVTLB_ASID,
-            asid = in(reg) asid,
+            asid = in(reg) asid & ASID_MASK,
             options(nostack, nomem)
         );
     }

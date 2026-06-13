@@ -405,14 +405,14 @@ pub unsafe fn switch_satp(satp_val: u64) {
         return;
     }
     csr::set_pgdl((satp_val & !0xfffu64) as usize);
-    csr::set_asid((satp_val & 0x3ff) as usize);
+    csr::set_asid((satp_val & csr::ASID_MASK as u64) as usize);
     csr::sfence_vma_all();
     csr::fence_i();
 }
 
 #[inline]
 pub fn current_satp() -> u64 {
-    ((csr::pgdl() as u64) & !0xfffu64) | ((csr::asid() as u64) & 0x3ff)
+    ((csr::pgdl() as u64) & !0xfffu64) | ((csr::asid() & csr::ASID_MASK) as u64)
 }
 
 pub fn set_current_vspace_root() {
@@ -487,7 +487,7 @@ pub fn satp_from_kva(root_kva: u64, _asid: u64) -> u64 {
     let Some(root_pa) = kva_to_page_table_paddr(root_kva as usize) else {
         return 0;
     };
-    (root_pa as u64 & !0xfffu64) | (_asid & 0x3ff)
+    (root_pa as u64 & !0xfffu64) | (_asid & csr::ASID_MASK as u64)
 }
 
 const _: () = {
