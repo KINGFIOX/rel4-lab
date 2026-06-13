@@ -105,6 +105,35 @@ def require_dir(prefix: str, path: Path, message: str | None = None) -> None:
         die(prefix, message or f"missing directory: {path}")
 
 
+LOONGARCH64_ELF_MACHINE = 258
+LOONGARCH64_EFLAGS_ABI_MASK = 0x7
+LOONGARCH64_EFLAGS_ABI_SOFT_FLOAT = 0x1
+
+
+def require_loongarch64_soft_float_elf(prefix: str, path: Path) -> None:
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        die(prefix, f"LoongArch64 user ELF not found: {path}")
+    if (
+        len(data) < 64
+        or data[0:4] != b"\x7fELF"
+        or data[4] != 2
+        or data[5] != 1
+        or int.from_bytes(data[18:20], "little") != LOONGARCH64_ELF_MACHINE
+    ):
+        die(prefix, f"expected a little-endian LoongArch64 ELF: {path}")
+    flags = int.from_bytes(data[48:52], "little")
+    if (flags & LOONGARCH64_EFLAGS_ABI_MASK) != LOONGARCH64_EFLAGS_ABI_SOFT_FLOAT:
+        die(
+            prefix,
+            (
+                f"LoongArch64 xv6 user ELF must use the soft-float ABI: {path} "
+                f"has e_flags={flags:#x}"
+            ),
+        )
+
+
 def command_exists(command: str) -> bool:
     return shutil.which(command) is not None
 
