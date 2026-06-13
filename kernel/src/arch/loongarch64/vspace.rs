@@ -2,12 +2,13 @@
 //!
 //! User paging objects follow the same seL4-style explicit page-table model as
 //! the RISC-V backend. Page-table entries now use LoongArch EntryLo-compatible
-//! bits and root switching publishes `PGDL`/`ASID`, but the boot path still
-//! leaves full hardware paging/TLB refill bring-up as follow-up work.
+//! bits and root switching publishes the hardware page-walk context, but the
+//! boot path still leaves full TLB refill bring-up as follow-up work.
 
 use crate::abi::constants::{
     KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE, PPTR_TOP, PT_INDEX_BITS,
 };
+use crate::arch::loongarch64::csr;
 use crate::arch::loongarch64::paging::{
     PAGE_SHIFT, PAGE_SIZE, PTE_D, PTE_MAT_CC, PTE_NR, PTE_NX, PTE_PLV_USER, PTE_PRESENT, PTE_V,
     PTE_W, PageTable, Pte, pt_index,
@@ -45,6 +46,33 @@ pub const fn paddr_to_kpptr(paddr: usize) -> usize {
 }
 
 const BOOT_PT_POOL_PAGES: usize = 1024;
+
+const PWCL_PTBASE_SHIFT: usize = 0;
+const PWCL_PTWIDTH_SHIFT: usize = 5;
+const PWCL_DIR1_BASE_SHIFT: usize = 10;
+const PWCL_DIR1_WIDTH_SHIFT: usize = 15;
+const PWCL_DIR2_BASE_SHIFT: usize = 20;
+const PWCL_DIR2_WIDTH_SHIFT: usize = 25;
+const PWCL_PTEWIDTH_SHIFT: usize = 30;
+const PAGE_WALK_PTE_WIDTH_64: usize = 0;
+
+const PAGE_WALK_DIR1_BASE: usize = PAGE_SHIFT + PT_INDEX_BITS;
+const PAGE_WALK_DIR2_BASE: usize = PAGE_SHIFT + PT_INDEX_BITS * 2;
+const PAGE_WALK_CONTROL_LOW: usize = (PAGE_SHIFT << PWCL_PTBASE_SHIFT)
+    | (PT_INDEX_BITS << PWCL_PTWIDTH_SHIFT)
+    | (PAGE_WALK_DIR1_BASE << PWCL_DIR1_BASE_SHIFT)
+    | (PT_INDEX_BITS << PWCL_DIR1_WIDTH_SHIFT)
+    | (PAGE_WALK_DIR2_BASE << PWCL_DIR2_BASE_SHIFT)
+    | (PT_INDEX_BITS << PWCL_DIR2_WIDTH_SHIFT)
+    | (PAGE_WALK_PTE_WIDTH_64 << PWCL_PTEWIDTH_SHIFT);
+const PAGE_WALK_CONTROL_HIGH: usize = 0;
+
+#[inline]
+fn configure_page_walk() {
+    csr::set_pwcl(PAGE_WALK_CONTROL_LOW);
+    csr::set_pwch(PAGE_WALK_CONTROL_HIGH);
+    csr::set_stlbps(PAGE_SHIFT);
+}
 
 #[repr(C, align(4096))]
 struct BootPtPool {
@@ -372,10 +400,11 @@ pub unsafe fn switch_satp(satp_val: u64) {
     if satp_val == 0 {
         return;
     }
-    crate::arch::loongarch64::csr::set_pgdl((satp_val & !0xfffu64) as usize);
-    crate::arch::loongarch64::csr::set_asid((satp_val & 0x3ff) as usize);
-    crate::arch::loongarch64::csr::sfence_vma_all();
-    crate::arch::loongarch64::csr::fence_i();
+    configure_page_walk();
+    csr::set_pgdl((satp_val & !0xfffu64) as usize);
+    csr::set_asid((satp_val & 0x3ff) as usize);
+    csr::sfence_vma_all();
+    csr::fence_i();
 }
 
 pub fn set_current_vspace_root() {
@@ -455,4 +484,9 @@ pub fn satp_from_kva(root_kva: u64, _asid: u64) -> u64 {
 
 const _: () = {
     assert!(PAGE_SIZE == 4096);
+    assert!(PAGE_SHIFT < 32);
+    assert!(PT_INDEX_BITS < 32);
+    assert!(PAGE_WALK_DIR1_BASE < 32);
+    assert!(PAGE_WALK_DIR2_BASE < 32);
+    assert!(PAGE_WALK_PTE_WIDTH_64 < 4);
 };
