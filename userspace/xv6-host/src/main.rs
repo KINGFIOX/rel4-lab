@@ -281,7 +281,8 @@ struct ServiceEndpoints {
     vfs: u64,
 }
 
-const MAX_DISK_MAPS: usize = 1 + 1 + XV6_DISK_SHARED_BUFFER_PAGES + 1;
+const MAX_DISK_MAPS: usize =
+    disk_transport::MAX_DEVICE_FRAME_MAPS + 1 + XV6_DISK_SHARED_BUFFER_PAGES + 1;
 
 fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoints {
     let uart_ep = alloc.retype_one(OBJ_ENDPOINT, 0);
@@ -306,9 +307,7 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
     let mut disk_maps: [disk_transport::FrameMap; MAX_DISK_MAPS] =
         [(0, 0, false, false); MAX_DISK_MAPS];
     let mut disk_maps_len = 0usize;
-    if let Some(device_map) = disk_transport::device_frame_map(alloc) {
-        push_disk_map(&mut disk_maps, &mut disk_maps_len, device_map);
-    }
+    disk_transport::append_device_frame_maps(alloc, &mut disk_maps, &mut disk_maps_len);
     push_disk_map(
         &mut disk_maps,
         &mut disk_maps_len,

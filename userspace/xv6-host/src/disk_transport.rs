@@ -1,4 +1,14 @@
 pub(crate) type FrameMap = (u64, u64, bool, bool);
+pub(crate) const MAX_DEVICE_FRAME_MAPS: usize = 64;
+
+pub(crate) fn push_frame_map(maps: &mut [FrameMap], len: &mut usize, map: FrameMap) -> bool {
+    if *len >= maps.len() {
+        return false;
+    }
+    maps[*len] = map;
+    *len += 1;
+    true
+}
 
 #[cfg(target_arch = "riscv64")]
 mod mmio;
