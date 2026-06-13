@@ -2,17 +2,12 @@
 #![deny(unsafe_attr_outside_unsafe)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-#[cfg(not(target_arch = "riscv64"))]
-compile_error!(
-    "sel4-user currently implements only the RISC-V libsel4 syscall ABI; add the LoongArch64 syscall register ABI before building this target"
-);
-
-use core::arch::asm;
 use core::cmp::min;
 use core::fmt::{self, Write};
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
+mod arch;
 pub mod rt;
 
 #[doc(hidden)]
@@ -97,6 +92,10 @@ pub const LABEL_RISCV_PAGE_MAP: u64 = 41;
 pub const LABEL_RISCV_PAGE_UNMAP: u64 = 42;
 pub const LABEL_RISCV_PAGE_GET_ADDRESS: u64 = 43;
 pub const LABEL_RISCV_ASID_POOL_ASSIGN: u64 = 45;
+pub const LABEL_PAGE_MAP: u64 = LABEL_RISCV_PAGE_MAP;
+pub const LABEL_PAGE_UNMAP: u64 = LABEL_RISCV_PAGE_UNMAP;
+pub const LABEL_PAGE_GET_ADDRESS: u64 = LABEL_RISCV_PAGE_GET_ADDRESS;
+pub const LABEL_ASID_POOL_ASSIGN: u64 = LABEL_RISCV_ASID_POOL_ASSIGN;
 
 pub const OBJ_UNTYPED: u64 = 0;
 pub const OBJ_TCB: u64 = 1;
@@ -214,23 +213,13 @@ pub unsafe fn sel4_call(service: u64, info: u64, mrs: &[u64]) -> IpcMessage {
             ipc.msg[i] = mrs[i];
             i += 1;
         }
-        let mut a0 = service;
-        let mut a1 = info;
-        let mut a2 = mr(mrs, 0);
-        let mut a3 = mr(mrs, 1);
-        let mut a4 = mr(mrs, 2);
-        let mut a5 = mr(mrs, 3);
-        asm!(
-            "ecall",
-            inlateout("a0") a0,
-            inlateout("a1") a1,
-            inlateout("a2") a2,
-            inlateout("a3") a3,
-            inlateout("a4") a4,
-            inlateout("a5") a5,
-            inlateout("a7") SYS_CALL => _,
-            clobber_abi("C"),
-            options(nostack)
+        let (a0, a1, a2, a3, a4, a5) = arch::current::call(
+            service,
+            info,
+            mr(mrs, 0),
+            mr(mrs, 1),
+            mr(mrs, 2),
+            mr(mrs, 3),
         );
         read_ipc_message(a0, a1, a2, a3, a4, a5)
     }
@@ -242,25 +231,7 @@ pub unsafe fn sel4_recv(ep: u64) -> IpcMessage {
 
 pub unsafe fn sel4_recv_with_reply(ep: u64, reply: u64) -> IpcMessage {
     unsafe {
-        let mut a0 = ep;
-        let mut a1 = 0u64;
-        let mut a2 = 0u64;
-        let mut a3 = 0u64;
-        let mut a4 = 0u64;
-        let mut a5 = 0u64;
-        asm!(
-            "ecall",
-            inlateout("a0") a0,
-            inlateout("a1") a1,
-            inlateout("a2") a2,
-            inlateout("a3") a3,
-            inlateout("a4") a4,
-            inlateout("a5") a5,
-            inlateout("a6") reply => _,
-            inlateout("a7") SYS_RECV => _,
-            clobber_abi("C"),
-            options(nostack)
-        );
+        let (a0, a1, a2, a3, a4, a5) = arch::current::recv_with_reply(ep, reply, SYS_RECV);
         read_ipc_message(a0, a1, a2, a3, a4, a5)
     }
 }
@@ -271,73 +242,21 @@ pub unsafe fn sel4_nb_recv(ep: u64) -> IpcMessage {
 
 pub unsafe fn sel4_nb_recv_with_reply(ep: u64, reply: u64) -> IpcMessage {
     unsafe {
-        let mut a0 = ep;
-        let mut a1 = 0u64;
-        let mut a2 = 0u64;
-        let mut a3 = 0u64;
-        let mut a4 = 0u64;
-        let mut a5 = 0u64;
-        asm!(
-            "ecall",
-            inlateout("a0") a0,
-            inlateout("a1") a1,
-            inlateout("a2") a2,
-            inlateout("a3") a3,
-            inlateout("a4") a4,
-            inlateout("a5") a5,
-            inlateout("a6") reply => _,
-            inlateout("a7") SYS_NB_RECV => _,
-            clobber_abi("C"),
-            options(nostack)
-        );
+        let (a0, a1, a2, a3, a4, a5) = arch::current::recv_with_reply(ep, reply, SYS_NB_RECV);
         read_ipc_message(a0, a1, a2, a3, a4, a5)
     }
 }
 
 pub unsafe fn sel4_wait(ep: u64) -> IpcMessage {
     unsafe {
-        let mut a0 = ep;
-        let mut a1 = 0u64;
-        let mut a2 = 0u64;
-        let mut a3 = 0u64;
-        let mut a4 = 0u64;
-        let mut a5 = 0u64;
-        asm!(
-            "ecall",
-            inlateout("a0") a0,
-            inlateout("a1") a1,
-            inlateout("a2") a2,
-            inlateout("a3") a3,
-            inlateout("a4") a4,
-            inlateout("a5") a5,
-            inlateout("a7") SYS_WAIT => _,
-            clobber_abi("C"),
-            options(nostack)
-        );
+        let (a0, a1, a2, a3, a4, a5) = arch::current::wait(ep, SYS_WAIT);
         read_ipc_message(a0, a1, a2, a3, a4, a5)
     }
 }
 
 pub unsafe fn sel4_nb_wait(ep: u64) -> IpcMessage {
     unsafe {
-        let mut a0 = ep;
-        let mut a1 = 0u64;
-        let mut a2 = 0u64;
-        let mut a3 = 0u64;
-        let mut a4 = 0u64;
-        let mut a5 = 0u64;
-        asm!(
-            "ecall",
-            inlateout("a0") a0,
-            inlateout("a1") a1,
-            inlateout("a2") a2,
-            inlateout("a3") a3,
-            inlateout("a4") a4,
-            inlateout("a5") a5,
-            inlateout("a7") SYS_NB_WAIT => _,
-            clobber_abi("C"),
-            options(nostack)
-        );
+        let (a0, a1, a2, a3, a4, a5) = arch::current::wait(ep, SYS_NB_WAIT);
         read_ipc_message(a0, a1, a2, a3, a4, a5)
     }
 }
@@ -360,24 +279,14 @@ pub unsafe fn sel4_reply_recv_with_reply(
             ipc.msg[i] = reply_mrs[i];
             i += 1;
         }
-        let mut a0 = ep;
-        let mut a1 = info;
-        let mut a2 = mr(reply_mrs, 0);
-        let mut a3 = mr(reply_mrs, 1);
-        let mut a4 = mr(reply_mrs, 2);
-        let mut a5 = mr(reply_mrs, 3);
-        asm!(
-            "ecall",
-            inlateout("a0") a0,
-            inlateout("a1") a1,
-            inlateout("a2") a2,
-            inlateout("a3") a3,
-            inlateout("a4") a4,
-            inlateout("a5") a5,
-            inlateout("a6") reply => _,
-            inlateout("a7") SYS_REPLY_RECV => _,
-            clobber_abi("C"),
-            options(nostack)
+        let (a0, a1, a2, a3, a4, a5) = arch::current::reply_recv_with_reply(
+            ep,
+            info,
+            mr(reply_mrs, 0),
+            mr(reply_mrs, 1),
+            mr(reply_mrs, 2),
+            mr(reply_mrs, 3),
+            reply,
         );
         read_ipc_message(a0, a1, a2, a3, a4, a5)
     }
@@ -391,29 +300,13 @@ pub unsafe fn sel4_send(dest: u64, info: u64, mrs: &[u64]) {
             ipc.msg[i] = mrs[i];
             i += 1;
         }
-        asm!(
-            "ecall",
-            inlateout("a0") dest => _,
-            inlateout("a1") info => _,
-            inlateout("a2") mr(mrs, 0) => _,
-            inlateout("a3") mr(mrs, 1) => _,
-            inlateout("a4") mr(mrs, 2) => _,
-            inlateout("a5") mr(mrs, 3) => _,
-            inlateout("a7") SYS_SEND => _,
-            clobber_abi("C"),
-            options(nostack)
-        );
+        arch::current::send(dest, info, mr(mrs, 0), mr(mrs, 1), mr(mrs, 2), mr(mrs, 3));
     }
 }
 
 pub unsafe fn sel4_yield() {
     unsafe {
-        asm!(
-            "ecall",
-            inlateout("a7") SYS_YIELD => _,
-            clobber_abi("C"),
-            options(nostack)
-        );
+        arch::current::yield_now();
     }
 }
 
@@ -566,13 +459,7 @@ pub fn write_u64_bytes(buf: &mut [u8], off: usize, v: u64) {
 
 pub fn putchar(ch: u8) {
     unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") ch as u64 => _,
-            inlateout("a7") SYS_DEBUG_PUT_CHAR => _,
-            clobber_abi("C"),
-            options(nostack)
-        );
+        arch::current::debug_put_char(ch);
     }
 }
 
@@ -640,12 +527,7 @@ impl fmt::Display for LogBytes<'_> {
 
 pub fn halt_loop() -> ! {
     unsafe {
-        asm!(
-            "ecall",
-            inlateout("a7") SYS_DEBUG_HALT => _,
-            clobber_abi("C"),
-            options(nostack)
-        );
+        arch::current::debug_halt();
     }
     loop {
         unsafe { sel4_yield() };

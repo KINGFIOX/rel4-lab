@@ -173,7 +173,7 @@ pub(crate) fn create_child_from_untyped(
     let sched_context = alloc.retype_one_from(untyped, OBJ_SCHED_CONTEXT, 0);
     let fault_ep_cap = alloc.mint_cap(fault_ep, cap_rights(true, true, true, true), pid);
 
-    call_checked(INIT_ASID_POOL, LABEL_RISCV_ASID_POOL_ASSIGN, &[vspace], &[]);
+    call_checked(INIT_ASID_POOL, LABEL_ASID_POOL_ASSIGN, &[vspace], &[]);
     page_map(ipc_frame, vspace, CHILD_IPC_BUFFER, true, false);
 
     let mrs = [
@@ -521,13 +521,7 @@ pub(crate) fn map_existing_child_frame(
 }
 
 pub(crate) fn frame_paddr(frame_slot: u64) -> u64 {
-    let reply = unsafe {
-        sel4_call(
-            frame_slot,
-            msg_info(LABEL_RISCV_PAGE_GET_ADDRESS, 0, 0, 0),
-            &[],
-        )
-    };
+    let reply = unsafe { sel4_call(frame_slot, msg_info(LABEL_PAGE_GET_ADDRESS, 0, 0, 0), &[]) };
     let err = msg_label(reply.info);
     if err != 0 {
         warn!("xv6-host: Page_GetAddress failed err={}", err);
@@ -565,12 +559,7 @@ fn map_existing_frame(
 fn page_map(frame_slot: u64, vspace: u64, va: u64, writable: bool, executable: bool) {
     let rights = cap_rights(false, false, true, writable);
     let attrs = if executable { 0 } else { 1 };
-    call_checked(
-        frame_slot,
-        LABEL_RISCV_PAGE_MAP,
-        &[vspace],
-        &[va, rights, attrs],
-    );
+    call_checked(frame_slot, LABEL_PAGE_MAP, &[vspace], &[va, rights, attrs]);
 }
 
 fn register_mapping(
@@ -634,7 +623,7 @@ fn unmap_mapping_at(alloc: &mut Allocator, slot: usize) {
 }
 
 fn page_unmap(frame_slot: u64) {
-    call_checked(frame_slot, LABEL_RISCV_PAGE_UNMAP, &[], &[]);
+    call_checked(frame_slot, LABEL_PAGE_UNMAP, &[], &[]);
 }
 
 pub(crate) fn is_child_page_mapped(child: &TaskStruct, va: u64) -> bool {
