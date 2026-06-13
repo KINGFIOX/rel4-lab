@@ -1,12 +1,14 @@
 //! LoongArch64 user-context ABI skeleton.
 //!
 //! This module fixes the kernel-visible register naming and TCB register
-//! ordering, and provides the first executable user-restore path. Trap entry
-//! and syscall/fault dispatch are still staging work.
+//! ordering, and provides the first executable user-restore path plus an early
+//! diagnostic trap vector. Syscall/fault dispatch is still staging work.
 
 use core::arch::global_asm;
 
-use crate::arch::loongarch64::csr::{CSR_ERA, CSR_PRMD};
+use log_crate::error;
+
+use crate::arch::loongarch64::csr::{self, CSR_BADV, CSR_ERA, CSR_ESTAT, CSR_PRMD};
 
 /// User-mode register snapshot shape for the future LoongArch64 trap entry.
 ///
@@ -39,6 +41,40 @@ impl UserContext {
         }
     }
 }
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct TrapRecord {
+    pub era: u64,
+    pub prmd: u64,
+    pub estat: u64,
+    pub badv: u64,
+}
+
+impl TrapRecord {
+    pub const fn zero() -> Self {
+        Self {
+            era: 0,
+            prmd: 0,
+            estat: 0,
+            badv: 0,
+        }
+    }
+}
+
+pub const LOONGARCH64_TRAP_STACK_SIZE: usize = 16 * 1024;
+
+#[repr(align(16))]
+pub struct TrapStack(pub [u8; LOONGARCH64_TRAP_STACK_SIZE]);
+
+#[unsafe(no_mangle)]
+static mut LOONGARCH64_TRAP_CONTEXT: UserContext = UserContext::zero();
+
+#[unsafe(no_mangle)]
+static mut LOONGARCH64_TRAP_RECORD: TrapRecord = TrapRecord::zero();
+
+#[unsafe(no_mangle)]
+static mut LOONGARCH64_TRAP_STACK: TrapStack = TrapStack([0; LOONGARCH64_TRAP_STACK_SIZE]);
 
 /// Register name -> index in `UserContext.regs`.
 #[repr(usize)]
@@ -177,7 +213,71 @@ pub const ROOTSERVER_SSTATUS: u64 = USER_SSTATUS;
 global_asm!(
     r#"
     .section .text.traps
-    .align 4
+    .align 6
+
+    .globl trap_entry
+trap_entry:
+    la.local $t0, {trap_context}
+    st.d    $zero, $t0,  0*8
+    st.d    $ra,   $t0,  1*8
+    st.d    $tp,   $t0,  2*8
+    st.d    $sp,   $t0,  3*8
+    st.d    $a0,   $t0,  4*8
+    st.d    $a1,   $t0,  5*8
+    st.d    $a2,   $t0,  6*8
+    st.d    $a3,   $t0,  7*8
+    st.d    $a4,   $t0,  8*8
+    st.d    $a5,   $t0,  9*8
+    st.d    $a6,   $t0, 10*8
+    st.d    $a7,   $t0, 11*8
+    st.d    $t0,   $t0, 12*8
+    st.d    $t1,   $t0, 13*8
+    st.d    $t2,   $t0, 14*8
+    st.d    $t3,   $t0, 15*8
+    st.d    $t4,   $t0, 16*8
+    st.d    $t5,   $t0, 17*8
+    st.d    $t6,   $t0, 18*8
+    st.d    $t7,   $t0, 19*8
+    st.d    $t8,   $t0, 20*8
+    st.d    $r21,  $t0, 21*8
+    st.d    $fp,   $t0, 22*8
+    st.d    $s0,   $t0, 23*8
+    st.d    $s1,   $t0, 24*8
+    st.d    $s2,   $t0, 25*8
+    st.d    $s3,   $t0, 26*8
+    st.d    $s4,   $t0, 27*8
+    st.d    $s5,   $t0, 28*8
+    st.d    $s6,   $t0, 29*8
+    st.d    $s7,   $t0, 30*8
+    st.d    $s8,   $t0, 31*8
+
+    csrrd   $t1, {csr_era}
+    st.d    $t1, $t0, 32*8
+    st.d    $t1, $t0, 34*8
+    csrrd   $t1, {csr_prmd}
+    st.d    $t1, $t0, 33*8
+
+    la.local $t1, {trap_record}
+    csrrd   $t2, {csr_era}
+    st.d    $t2, $t1, 0*8
+    csrrd   $t2, {csr_prmd}
+    st.d    $t2, $t1, 1*8
+    csrrd   $t2, {csr_estat}
+    st.d    $t2, $t1, 2*8
+    csrrd   $t2, {csr_badv}
+    st.d    $t2, $t1, 3*8
+
+    la.local $sp, {trap_stack}
+    li.d    $t1, {trap_stack_size}
+    add.d   $sp, $sp, $t1
+    addi.d  $sp, $sp, -16
+
+    la.local $a0, {trap_context}
+    bl      {handle_trap_rust}
+
+1:
+    idle    0
+    b       1b
 
     .globl restore_user_context_locked
 restore_user_context_locked:
@@ -231,16 +331,53 @@ restore_user_context:
 
     ertn
 "#,
+    trap_context = sym LOONGARCH64_TRAP_CONTEXT,
+    trap_record = sym LOONGARCH64_TRAP_RECORD,
+    trap_stack = sym LOONGARCH64_TRAP_STACK,
+    trap_stack_size = const LOONGARCH64_TRAP_STACK_SIZE,
+    handle_trap_rust = sym handle_trap_rust,
     csr_era = const CSR_ERA,
     csr_prmd = const CSR_PRMD,
+    csr_estat = const CSR_ESTAT,
+    csr_badv = const CSR_BADV,
 );
 
 unsafe extern "C" {
+    pub fn trap_entry();
     pub fn restore_user_context(ctx: *mut UserContext) -> !;
     fn restore_user_context_locked(ctx: *mut UserContext) -> !;
 }
 
-pub fn install_trap_vector() {}
+#[unsafe(no_mangle)]
+pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> ! {
+    let record = unsafe { LOONGARCH64_TRAP_RECORD };
+    let (pc, a0, a1, a2, a3, a7) = if uc.is_null() {
+        (0, 0, 0, 0, 0, 0)
+    } else {
+        let uc = unsafe { &*uc };
+        (
+            uc.pc,
+            uc.regs[UserRegister::A0.index()],
+            uc.regs[UserRegister::A1.index()],
+            uc.regs[UserRegister::A2.index()],
+            uc.regs[UserRegister::A3.index()],
+            uc.regs[UserRegister::A7.index()],
+        )
+    };
+
+    error!(
+        "loongarch64 trap: pc={:#x} era={:#x} prmd={:#x} estat={:#x} badv={:#x} a0={:#x} a1={:#x} a2={:#x} a3={:#x} a7={:#x}",
+        pc, record.era, record.prmd, record.estat, record.badv, a0, a1, a2, a3, a7
+    );
+    crate::arch::loongarch64::boot::halt()
+}
+
+pub fn install_trap_vector() {
+    let addr = trap_entry as *const () as usize;
+    debug_assert!(addr & 0x3f == 0, "eentry must be 64-byte aligned");
+    csr::set_eentry(addr);
+    csr::ibar();
+}
 
 pub fn init_timer() {}
 
