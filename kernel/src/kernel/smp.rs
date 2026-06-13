@@ -16,8 +16,6 @@ use crate::abi::constants::MAX_NUM_NODES;
 use crate::api::thread::Thread;
 use crate::object::tcb::Tcb;
 
-const SSTATUS_SIE: usize = 1 << 1;
-
 pub const MAX_BOOT_HARTS: usize = 8;
 pub const KERNEL_STACK_BYTES: usize = 64 * 1024;
 
@@ -150,7 +148,7 @@ impl SpinLock {
     }
 
     pub fn lock(&self) -> SpinLockGuard<'_> {
-        let irq_was_enabled = local_irq_save();
+        let irq_was_enabled = crate::arch::current::irq::local_irq_save();
         let mut remote_stalled_current = false;
         while self
             .locked
@@ -171,27 +169,7 @@ impl SpinLock {
 impl Drop for SpinLockGuard<'_> {
     fn drop(&mut self) {
         self.lock.locked.store(false, Ordering::Release);
-        local_irq_restore(self.irq_was_enabled);
-    }
-}
-
-#[inline]
-fn local_irq_save() -> bool {
-    let sstatus = crate::arch::current::csr::sstatus();
-    let irq_was_enabled = (sstatus & SSTATUS_SIE) != 0;
-    if irq_was_enabled {
-        crate::arch::current::csr::set_sstatus(sstatus & !SSTATUS_SIE);
-    }
-    irq_was_enabled
-}
-
-#[inline]
-fn local_irq_restore(irq_was_enabled: bool) {
-    let sstatus = crate::arch::current::csr::sstatus();
-    if irq_was_enabled {
-        crate::arch::current::csr::set_sstatus(sstatus | SSTATUS_SIE);
-    } else {
-        crate::arch::current::csr::set_sstatus(sstatus & !SSTATUS_SIE);
+        crate::arch::current::irq::local_irq_restore(self.irq_was_enabled);
     }
 }
 

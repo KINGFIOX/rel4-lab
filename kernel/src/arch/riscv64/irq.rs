@@ -2,8 +2,30 @@ pub const PLIC_MAX_IRQ: usize = 95;
 pub const KERNEL_TIMER_IRQ: usize = PLIC_MAX_IRQ + 1;
 pub const MAX_IRQ: usize = KERNEL_TIMER_IRQ;
 
+const SSTATUS_SIE: usize = 1 << 1;
+
 pub fn init() {
     crate::machine::plic::init();
+}
+
+#[inline]
+pub fn local_irq_save() -> bool {
+    let sstatus = super::csr::sstatus();
+    let irq_was_enabled = (sstatus & SSTATUS_SIE) != 0;
+    if irq_was_enabled {
+        super::csr::set_sstatus(sstatus & !SSTATUS_SIE);
+    }
+    irq_was_enabled
+}
+
+#[inline]
+pub fn local_irq_restore(irq_was_enabled: bool) {
+    let sstatus = super::csr::sstatus();
+    if irq_was_enabled {
+        super::csr::set_sstatus(sstatus | SSTATUS_SIE);
+    } else {
+        super::csr::set_sstatus(sstatus & !SSTATUS_SIE);
+    }
 }
 
 #[inline]

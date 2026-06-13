@@ -7,11 +7,9 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
+use crate::arch::current::platform;
 use crate::arch::current::vspace::paddr_to_pptr;
 
-const PCI_ECAM_BASE_PA: usize = 0x3000_0000;
-const PCI_IO_BASE_PA: usize = 0x0300_0000;
-const PCI_DEBUG_UART_PORT: usize = 0x1000;
 const PCI_QEMU_VENDOR_ID: u16 = 0x1b36;
 const PCI_SERIAL_DEVICE_ID: u16 = 0x0002;
 const PCI_CLASS_SERIAL: u16 = 0x0700;
@@ -54,7 +52,11 @@ fn init_pci_debug_uart() -> bool {
         return false;
     };
 
-    write32(cfg, 0x10, (PCI_DEBUG_UART_PORT as u32) | PCI_BAR_IO_SPACE);
+    write32(
+        cfg,
+        0x10,
+        (platform::PCI_DEBUG_UART_PORT as u32) | PCI_BAR_IO_SPACE,
+    );
     write16(cfg, 0x04, PCI_COMMAND_IO);
     init_16550(pci_debug_uart_base_pa(), true);
     true
@@ -81,12 +83,12 @@ fn find_pci_debug_uart_config() -> Option<usize> {
 
 #[inline]
 fn pci_config_base(bus: usize, device: usize, function: usize) -> usize {
-    PCI_ECAM_BASE_PA + (bus << 20) + (device << 15) + (function << 12)
+    platform::PCI_ECAM_BASE_PA + (bus << 20) + (device << 15) + (function << 12)
 }
 
 #[inline]
 fn pci_debug_uart_base_pa() -> usize {
-    PCI_IO_BASE_PA + PCI_DEBUG_UART_PORT
+    platform::PCI_IO_BASE_PA + platform::PCI_DEBUG_UART_PORT
 }
 
 fn init_16550(base_pa: usize, clear_fifos: bool) {
