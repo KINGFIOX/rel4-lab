@@ -1,9 +1,13 @@
 const CRMD_IE: usize = 1 << 2;
+const ECFG_LIE_EXTIOI0: usize = 1 << 2;
 
-pub const MAX_IRQ: usize = 255;
+pub const MAX_IRQ: usize = 256;
 pub const KERNEL_TIMER_IRQ: usize = MAX_IRQ;
 
-pub fn init() {}
+pub fn init() {
+    crate::machine::loongarch_irq::init();
+    super::csr::set_ecfg(super::csr::ecfg() | ECFG_LIE_EXTIOI0);
+}
 
 #[inline]
 pub fn local_irq_save() -> bool {
@@ -27,19 +31,25 @@ pub fn local_irq_restore(irq_was_enabled: bool) {
 
 #[inline]
 pub fn is_external_irq(irq: u64) -> bool {
-    irq > 0 && irq < KERNEL_TIMER_IRQ as u64
+    crate::machine::loongarch_irq::is_external_irq(irq)
 }
 
 #[inline]
-pub fn enable_external_irq(_irq: u64) {}
+pub fn enable_external_irq(irq: u64) {
+    crate::machine::loongarch_irq::enable_irq(irq);
+}
 
 #[inline]
-pub fn disable_external_irq(_irq: u64) {}
+pub fn disable_external_irq(irq: u64) {
+    crate::machine::loongarch_irq::disable_irq(irq);
+}
 
 #[inline]
 pub fn claim_external_irq() -> Option<u64> {
-    None
+    crate::machine::loongarch_irq::claim()
 }
 
 #[inline]
-pub fn complete_external_irq(_irq: u64) {}
+pub fn complete_external_irq(irq: u64) {
+    crate::machine::loongarch_irq::complete(irq);
+}

@@ -209,6 +209,7 @@ const ESTAT_ECODE_SHIFT: usize = 16;
 const ESTAT_ECODE_MASK: usize = 0x3f;
 const ESTAT_ESUBCODE_SHIFT: usize = 22;
 const ESTAT_ESUBCODE_MASK: usize = 0x1ff;
+const ESTAT_IS_EXTIOI0: usize = 1 << 2;
 const ESTAT_IS_TIMER: usize = 1 << 11;
 const ECFG_LIE_TIMER: usize = 1 << 11;
 const TCFG_ENABLE: usize = 1 << 0;
@@ -457,6 +458,11 @@ fn estat_esubcode(estat: usize) -> usize {
 #[inline]
 fn timer_pending(estat: usize) -> bool {
     estat & ESTAT_IS_TIMER != 0
+}
+
+#[inline]
+fn external_irq_pending(estat: usize) -> bool {
+    estat & ESTAT_IS_EXTIOI0 != 0
 }
 
 fn fault_message(
@@ -1046,11 +1052,26 @@ fn handle_timer_interrupt() {
 }
 
 fn service_pending_interrupt(estat: usize) -> bool {
+    let mut serviced = false;
     if timer_pending(estat) {
         handle_timer_interrupt();
-        return true;
+        serviced = true;
     }
-    false
+    if external_irq_pending(estat) {
+        serviced |= service_pending_external_interrupt();
+    }
+    serviced
+}
+
+fn service_pending_external_interrupt() -> bool {
+    let Some(irq) = super::irq::claim_external_irq() else {
+        return false;
+    };
+    let delivered = unsafe { crate::object::irq::signal_irq(irq) };
+    if !delivered {
+        super::irq::complete_external_irq(irq);
+    }
+    true
 }
 
 pub fn service_due_timer_interrupts() -> bool {

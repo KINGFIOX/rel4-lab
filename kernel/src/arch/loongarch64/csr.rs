@@ -109,6 +109,32 @@ pub fn set_sscratch(value: usize) {
 }
 
 #[inline]
+pub fn iocsr_read32(addr: usize) -> u32 {
+    let value: usize;
+    unsafe {
+        asm!(
+            "iocsrrd.w {value}, {addr}",
+            value = out(reg) value,
+            addr = in(reg) addr,
+            options(nostack)
+        );
+    }
+    value as u32
+}
+
+#[inline]
+pub fn iocsr_write32(addr: usize, value: u32) {
+    unsafe {
+        asm!(
+            "iocsrwr.w {value}, {addr}",
+            value = in(reg) value as usize,
+            addr = in(reg) addr,
+            options(nostack)
+        );
+    }
+}
+
+#[inline]
 pub fn sfence_vma_all() {
     dbar();
 }
