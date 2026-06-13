@@ -23,6 +23,7 @@ class TargetConfig:
     qemu: str
     qemu_machine: str
     qemu_cpu: str | None
+    qemu_bios: str | None
     xv6_dir_name: str
     xv6_toolprefixes: tuple[str, ...]
     xv6_march: str
@@ -44,10 +45,12 @@ class TargetConfig:
                 "-m",
                 memory,
                 "-nographic",
-                "-bios",
+                "-nic",
                 "none",
             ]
         )
+        if self.qemu_bios is not None:
+            cmd.extend(["-bios", self.qemu_bios])
         return cmd
 
     def xv6_fs_device_args(self, fs_img: Path) -> list[str]:
@@ -67,7 +70,7 @@ class TargetConfig:
             return [
                 *drive_args,
                 "-device",
-                "virtio-blk-pci,drive=xv6fs,disable-legacy=on,disable-modern=off",
+                "virtio-blk-pci,drive=xv6fs,disable-legacy=on,disable-modern=off,addr=4",
             ]
         die("target", f"unsupported xv6 disk transport: {self.xv6_disk_transport}")
 
@@ -120,6 +123,7 @@ TARGETS: dict[str, TargetConfig] = {
         qemu="qemu-system-riscv64",
         qemu_machine="virt",
         qemu_cpu="rv64",
+        qemu_bios="none",
         xv6_dir_name="xv6-riscv",
         xv6_toolprefixes=(
             "riscv64-none-elf-",
@@ -144,6 +148,7 @@ TARGETS: dict[str, TargetConfig] = {
         qemu="qemu-system-loongarch64",
         qemu_machine="virt",
         qemu_cpu=None,
+        qemu_bios=None,
         xv6_dir_name="xv6-loongarch64",
         xv6_toolprefixes=(
             "loongarch64-none-elf-",
