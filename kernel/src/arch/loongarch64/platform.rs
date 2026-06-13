@@ -13,3 +13,16 @@ pub const PCI_MEM_SIZE: usize = 0x4000_0000;
 
 pub const PCH_PIC_BASE_PA: usize = 0x1000_0000;
 pub const PCH_MSI_BASE_PA: usize = 0x2ff0_0000;
+
+pub const FREE_RAM_REGIONS: &[(u64, u64)] = &[
+    // QEMU loongarch64 virt -m 3072 exposes high RAM at
+    // [0x8000_0000, 0x1_3000_0000); keep the first 32 MiB clear for the
+    // kernel/rootserver/loader staging path.
+    (0x8200_0000, 0x1_3000_0000),
+];
+
+pub const DEVICE_UNTYPED_REGIONS: &[(u64, u64)] = &[
+    // Keep the low memory bank [0, 0x1000_0000) reserved; user-visible MMIO
+    // devices used by the LoongArch userspace stack sit in this range.
+    (0x1000_0000, 0x8000_0000),
+];
