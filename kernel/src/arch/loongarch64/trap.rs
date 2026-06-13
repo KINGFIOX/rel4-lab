@@ -1,0 +1,196 @@
+//! LoongArch64 user-context ABI skeleton.
+//!
+//! This module fixes the kernel-visible register naming and TCB register
+//! ordering before the executable trap entry is wired up. Boot remains blocked
+//! until the LoongArch elfloader and exception-entry ABI are implemented.
+
+/// User-mode register snapshot shape for the future LoongArch64 trap entry.
+///
+/// `regs[0]` is hardwired zero. The remaining indexes are architectural GPR
+/// numbers, matching the LoongArch psABI register names.
+#[repr(C)]
+#[derive(Default)]
+pub struct UserContext {
+    pub regs: [u64; 32],
+    pub pc: u64,
+    pub sstatus: u64,
+    pub restart_pc: u64,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<UserContext>() == 35 * 8);
+    assert!(core::mem::offset_of!(UserContext, regs) == 0);
+    assert!(core::mem::offset_of!(UserContext, pc) == 32 * 8);
+    assert!(core::mem::offset_of!(UserContext, sstatus) == 33 * 8);
+    assert!(core::mem::offset_of!(UserContext, restart_pc) == 34 * 8);
+};
+
+impl UserContext {
+    pub const fn zero() -> Self {
+        Self {
+            regs: [0; 32],
+            pc: 0,
+            sstatus: 0,
+            restart_pc: 0,
+        }
+    }
+}
+
+/// Register name -> index in `UserContext.regs`.
+#[repr(usize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum UserRegister {
+    Ra = 1,
+    Tp = 2,
+    Sp = 3,
+    A0 = 4,
+    A1 = 5,
+    A2 = 6,
+    A3 = 7,
+    A4 = 8,
+    A5 = 9,
+    A6 = 10,
+    A7 = 11,
+    T0 = 12,
+    T1 = 13,
+    T2 = 14,
+    T3 = 15,
+    T4 = 16,
+    T5 = 17,
+    T6 = 18,
+    T7 = 19,
+    T8 = 20,
+    R21 = 21,
+    Fp = 22,
+    S0 = 23,
+    S1 = 24,
+    S2 = 25,
+    S3 = 26,
+    S4 = 27,
+    S5 = 28,
+    S6 = 29,
+    S7 = 30,
+    S8 = 31,
+}
+
+impl UserRegister {
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// LoongArch64 frame registers for seL4-style TCB copy operations.
+///
+/// Until an upstream seL4 LoongArch port is vendored locally, the project ABI
+/// is `pc` followed by GPR r1..r31. The frame/integer split preserves the
+/// existing 16 + 16 seL4 TCB register-operation shape.
+pub const SEL4_TCB_FRAME_REGS: [usize; 16] = [
+    0,
+    UserRegister::Ra.index(),
+    UserRegister::Tp.index(),
+    UserRegister::Sp.index(),
+    UserRegister::A0.index(),
+    UserRegister::A1.index(),
+    UserRegister::A2.index(),
+    UserRegister::A3.index(),
+    UserRegister::A4.index(),
+    UserRegister::A5.index(),
+    UserRegister::A6.index(),
+    UserRegister::A7.index(),
+    UserRegister::T0.index(),
+    UserRegister::T1.index(),
+    UserRegister::T2.index(),
+    UserRegister::T3.index(),
+];
+
+/// LoongArch64 integer registers for seL4-style TCB copy operations.
+pub const SEL4_TCB_GP_REGS: [usize; 16] = [
+    UserRegister::T4.index(),
+    UserRegister::T5.index(),
+    UserRegister::T6.index(),
+    UserRegister::T7.index(),
+    UserRegister::T8.index(),
+    UserRegister::R21.index(),
+    UserRegister::Fp.index(),
+    UserRegister::S0.index(),
+    UserRegister::S1.index(),
+    UserRegister::S2.index(),
+    UserRegister::S3.index(),
+    UserRegister::S4.index(),
+    UserRegister::S5.index(),
+    UserRegister::S6.index(),
+    UserRegister::S7.index(),
+    UserRegister::S8.index(),
+];
+
+pub const SEL4_USER_CONTEXT_WORDS: usize = SEL4_TCB_FRAME_REGS.len() + SEL4_TCB_GP_REGS.len();
+
+/// LoongArch64 `seL4_UserContext` word index to local GPR index.
+///
+/// Index 0 is the PC sentinel; indexes 1..31 are GPR r1..r31.
+pub const SEL4_USER_CONTEXT_REGS: [usize; SEL4_USER_CONTEXT_WORDS] = [
+    0,
+    UserRegister::Ra.index(),
+    UserRegister::Tp.index(),
+    UserRegister::Sp.index(),
+    UserRegister::A0.index(),
+    UserRegister::A1.index(),
+    UserRegister::A2.index(),
+    UserRegister::A3.index(),
+    UserRegister::A4.index(),
+    UserRegister::A5.index(),
+    UserRegister::A6.index(),
+    UserRegister::A7.index(),
+    UserRegister::T0.index(),
+    UserRegister::T1.index(),
+    UserRegister::T2.index(),
+    UserRegister::T3.index(),
+    UserRegister::T4.index(),
+    UserRegister::T5.index(),
+    UserRegister::T6.index(),
+    UserRegister::T7.index(),
+    UserRegister::T8.index(),
+    UserRegister::R21.index(),
+    UserRegister::Fp.index(),
+    UserRegister::S0.index(),
+    UserRegister::S1.index(),
+    UserRegister::S2.index(),
+    UserRegister::S3.index(),
+    UserRegister::S4.index(),
+    UserRegister::S5.index(),
+    UserRegister::S6.index(),
+    UserRegister::S7.index(),
+    UserRegister::S8.index(),
+];
+
+pub const SSTATUS_FS_MASK: u64 = 0;
+pub const SSTATUS_FS_CLEAN: u64 = 0;
+pub const USER_SSTATUS: u64 = 0;
+pub const ROOTSERVER_SSTATUS: u64 = USER_SSTATUS;
+
+pub fn install_trap_vector() {}
+
+pub fn init_timer() {}
+
+pub fn service_due_timer_interrupts() -> bool {
+    false
+}
+
+pub unsafe fn restore_user_context_with_kernel_lock<T>(
+    _ctx: *mut UserContext,
+    _kernel_lock: T,
+) -> ! {
+    loop {}
+}
+
+pub fn idle_scheduler_loop() -> ! {
+    loop {}
+}
+
+pub fn send_cap_fault_ipc(_uc: &mut UserContext, _addr: u64, _in_recv_phase: bool) -> bool {
+    false
+}
+
+pub fn send_timeout_fault_ipc_for<T>(_fault_tcb: *mut T) -> bool {
+    false
+}
