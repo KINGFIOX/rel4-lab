@@ -10,9 +10,13 @@ use crate::kernel::smp::{BklCell, BklObjectGuard};
 use crate::object::tcb::{self, Tcb};
 
 const MAX_TRACKED_SCHED_CONTEXTS: usize = 256;
-const BUDGET_EXHAUSTION_SLACK_TICKS: u64 = crate::abi::constants::SEL4_TIMER_TICKS_PER_US * 1000;
 const MIN_BUDGET_TICKS: u64 =
     crate::abi::constants::SEL4_MIN_BUDGET_US * crate::abi::constants::SEL4_TIMER_TICKS_PER_US;
+const TIMER_PRECISION_TICKS: u64 = crate::abi::constants::SEL4_TIMER_TICKS_PER_US;
+const ROUND_ROBIN_TIMER_PRECISION_TICKS: u64 =
+    crate::abi::constants::SEL4_TIMER_TICKS_PER_US * 5000;
+const LONG_ROUND_ROBIN_BUDGET_THRESHOLD_TICKS: u64 =
+    crate::abi::constants::SEL4_TIMER_TICKS_PER_US * 50_000;
 const REFILL_ARRAY_OFFSET_BYTES: usize = crate::abi::constants::SEL4_CORE_SCHED_CONTEXT_BYTES
     as usize
     - crate::abi::constants::SEL4_MIN_REFILLS as usize
@@ -534,8 +538,112 @@ unsafe fn release_one(sc: *mut SchedContext, now: u64) -> bool {
 }
 
 #[inline]
-fn budget_remains(remaining: u64, charge_ticks: u64) -> bool {
-    remaining > charge_ticks.saturating_add(BUDGET_EXHAUSTION_SLACK_TICKS)
+fn budget_remains(remaining: u64, charge_ticks: u64, margin_ticks: u64) -> bool {
+    remaining > charge_ticks.saturating_add(margin_ticks)
+}
+
+#[inline]
+fn apply_timer_precision(deadline: u64, now: u64, precision_ticks: u64) -> u64 {
+    let earliest = now.saturating_add(precision_ticks);
+    if deadline <= earliest {
+        now
+    } else {
+        deadline - precision_ticks
+    }
+}
+
+#[inline]
+fn round_robin_precision_ticks(total_budget: u64) -> u64 {
+    if total_budget >= LONG_ROUND_ROBIN_BUDGET_THRESHOLD_TICKS {
+        ROUND_ROBIN_TIMER_PRECISION_TICKS
+    } else {
+        TIMER_PRECISION_TICKS
+    }
+}
+
+#[inline]
+fn round_robin_budget_margin_ticks(total_budget: u64) -> u64 {
+    if total_budget >= LONG_ROUND_ROBIN_BUDGET_THRESHOLD_TICKS {
+        ROUND_ROBIN_TIMER_PRECISION_TICKS
+    } else {
+        MIN_BUDGET_TICKS
+    }
+}
+
+unsafe fn current_budget_deadline(
+    now: u64,
+    last_budget_account_ticks: u64,
+    current_tcb: *const Tcb,
+) -> Option<u64> {
+    let sc_kva = unsafe { tcb_sched_context(current_tcb as *mut Tcb) };
+    if sc_kva == 0 || !is_kernel_pspace_kva(sc_kva) {
+        return None;
+    }
+    let sc = sc_kva as *mut SchedContext;
+    unsafe {
+        let _guard = lock(sc_kva);
+        if (*sc).refill_max == 0 {
+            return None;
+        }
+        let head = *refill_head_ptr(sc);
+        if head.time > now {
+            return Some(apply_timer_precision(head.time, now, TIMER_PRECISION_TICKS));
+        }
+        let elapsed = now.saturating_sub(last_budget_account_ticks);
+        let precision = if (*sc).period == 0 {
+            let head = refill_head_ptr(sc);
+            let tail = refill_tail_ptr(sc);
+            round_robin_precision_ticks((*head).amount.saturating_add((*tail).amount))
+        } else {
+            TIMER_PRECISION_TICKS
+        };
+        Some(apply_timer_precision(
+            now.saturating_add(head.amount.saturating_sub(elapsed)),
+            now,
+            precision,
+        ))
+    }
+}
+
+unsafe fn next_release_deadline(now: u64) -> Option<u64> {
+    let (contexts, count) = release_sched_context_snapshot();
+    let current_core = crate::kernel::smp::current_core_id();
+    let mut deadline: Option<u64> = None;
+    unsafe {
+        let mut i = 0;
+        while i < count {
+            let sc_kva = contexts[i];
+            if sc_kva != 0 && is_kernel_pspace_kva(sc_kva) {
+                let sc = sc_kva as *mut SchedContext;
+                let _guard = lock(sc_kva);
+                if (*sc).core as usize == current_core
+                    && (*sc).period != 0
+                    && (*sc).refill_max != 0
+                    && (*sc).tcb != 0
+                {
+                    let head = *refill_head_ptr(sc);
+                    let candidate = if head.time <= now { now } else { head.time };
+                    let candidate = apply_timer_precision(candidate, now, TIMER_PRECISION_TICKS);
+                    deadline = Some(deadline.map_or(candidate, |current| current.min(candidate)));
+                }
+            }
+            i += 1;
+        }
+    }
+    deadline
+}
+
+pub unsafe fn scheduler_timer_deadline(
+    now: u64,
+    last_budget_account_ticks: u64,
+    current_tcb: *const Tcb,
+) -> Option<u64> {
+    let mut deadline =
+        unsafe { current_budget_deadline(now, last_budget_account_ticks, current_tcb) };
+    if let Some(release_deadline) = unsafe { next_release_deadline(now) } {
+        deadline = Some(deadline.map_or(release_deadline, |current| current.min(release_deadline)));
+    }
+    deadline
 }
 
 pub unsafe fn release_due(now: u64) {
@@ -587,6 +695,33 @@ pub unsafe fn postpone(sc_kva: u64) {
             crate::object::tcb::dequeue(tcb);
         }
     }
+}
+
+pub unsafe fn postpone_unreleased_tcb(tcb: *mut Tcb) -> bool {
+    if tcb.is_null() {
+        return false;
+    }
+    let (runnable, sc_kva) = tcb::runnable_sched_context_snapshot(tcb);
+    if !runnable || sc_kva == 0 || !is_kernel_pspace_kva(sc_kva) {
+        return false;
+    }
+    let sc = sc_kva as *mut SchedContext;
+    let should_postpone = unsafe {
+        let _guard = lock(sc_kva);
+        if (*sc).refill_max == 0 || (*sc).period == 0 {
+            false
+        } else {
+            let now = now_ticks();
+            refill_unblock_check(sc, now);
+            !refill_ready(sc, now) || !refill_sufficient(sc, 0)
+        }
+    };
+    if should_postpone {
+        unsafe {
+            postpone(sc_kva);
+        }
+    }
+    should_postpone
 }
 
 pub unsafe fn has_budget(sc_kva: u64) -> bool {
@@ -670,7 +805,12 @@ pub unsafe fn charge(sc_kva: u64, ticks: u64) -> bool {
         if (*sc).period == 0 {
             let head = refill_head_ptr(sc);
             let tail = refill_tail_ptr(sc);
-            if budget_remains((*head).amount, ticks) {
+            let total_budget = (*head).amount.saturating_add((*tail).amount);
+            if budget_remains(
+                (*head).amount,
+                ticks,
+                round_robin_budget_margin_ticks(total_budget),
+            ) {
                 (*head).amount -= ticks;
                 (*tail).amount = (*tail).amount.saturating_add(ticks);
                 return true;
@@ -690,7 +830,7 @@ pub unsafe fn charge(sc_kva: u64, ticks: u64) -> bool {
         }
 
         let head_amount = (*refill_head_ptr(sc)).amount;
-        if budget_remains(head_amount, ticks) {
+        if budget_remains(head_amount, ticks, MIN_BUDGET_TICKS) {
             refill_budget_check(sc, ticks);
             return true;
         }
@@ -939,8 +1079,9 @@ pub unsafe fn try_unbind_tcb(sc_kva: u64, tcb: *mut Tcb) -> bool {
     if sc_kva == 0 || tcb.is_null() {
         return false;
     }
+    crate::kernel::smp::remote_tcb_stall(tcb);
     let sc = sc_kva as *mut SchedContext;
-    unsafe {
+    let unbound = unsafe {
         let _guard = lock(sc_kva);
         if (*sc).tcb != tcb as u64 {
             return false;
@@ -952,7 +1093,11 @@ pub unsafe fn try_unbind_tcb(sc_kva: u64, tcb: *mut Tcb) -> bool {
         let _ = tcb::clear_sched_context_if(tcb, sc_kva);
         (*sc).tcb = 0;
         true
+    };
+    if unbound {
+        unregister_release(sc_kva);
     }
+    unbound
 }
 
 pub unsafe fn replace_reply_head(sc_kva: u64, reply_kva: u64) -> u64 {

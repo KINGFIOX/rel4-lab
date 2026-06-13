@@ -6,6 +6,7 @@
 //! or kernel-mode traps halt the current thread or panic the kernel.
 
 use core::arch::global_asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 use log_crate::{error, warn};
 
 use crate::abi::constants::{N_TOTAL_MSG_REGISTERS, WORD_BYTES};
@@ -219,6 +220,7 @@ pub unsafe fn restore_user_context_with_kernel_lock(
     ctx: *mut UserContext,
     kernel_lock: crate::kernel::smp::KernelLockGuard,
 ) -> ! {
+    program_next_timer();
     kernel_lock.defer_unlock_for_user_restore();
     unsafe { restore_user_context_locked(ctx) }
 }
@@ -280,31 +282,79 @@ const SIE_STIE: usize = 1 << 5;
 const SIE_SEIE: usize = 1 << 9;
 const SIP_SSIP: usize = 1 << 1;
 const SCOUNTEREN_TM: usize = 1 << 1;
-const TIMER_INTERVAL_TICKS: u64 = 20_000;
+const TIMER_INTERVAL_TICKS: u64 = 5_000;
+const SYNTHETIC_TIMER_IRQ_INTERVAL_TICKS: u64 = 20_000;
 const FAULT_MR_REG_COUNT: u64 = 4;
+
+static NEXT_SYNTHETIC_TIMER_IRQ_DEADLINE: AtomicU64 = AtomicU64::new(0);
 
 pub fn init_timer() {
     csr::set_scounteren(csr::scounteren() | SCOUNTEREN_TM);
     csr::set_sie(csr::sie() | SIE_SSIE | SIE_STIE | SIE_SEIE);
-    crate::kernel::smp::set_last_budget_account_ticks(csr::time() as u64);
+    let now = csr::time() as u64;
+    crate::kernel::smp::set_last_budget_account_ticks(now);
+    if crate::kernel::smp::current_core_id() == 0 {
+        NEXT_SYNTHETIC_TIMER_IRQ_DEADLINE.store(
+            now.wrapping_add(SYNTHETIC_TIMER_IRQ_INTERVAL_TICKS),
+            Ordering::Release,
+        );
+    }
     program_next_timer();
+}
+
+fn synthetic_timer_irq_deadline(now: u64) -> Option<u64> {
+    if crate::kernel::smp::current_core_id() != 0 {
+        return None;
+    }
+    let previous = NEXT_SYNTHETIC_TIMER_IRQ_DEADLINE.load(Ordering::Acquire);
+    if previous != 0 {
+        return Some(previous);
+    }
+    let deadline = now.wrapping_add(SYNTHETIC_TIMER_IRQ_INTERVAL_TICKS);
+    NEXT_SYNTHETIC_TIMER_IRQ_DEADLINE.store(deadline, Ordering::Release);
+    Some(deadline)
 }
 
 fn program_next_timer() {
     let now = csr::time() as u64;
-    let previous = crate::kernel::smp::next_timer_deadline();
-    let deadline = if previous != 0 {
-        let candidate = previous.wrapping_add(TIMER_INTERVAL_TICKS);
-        if candidate > now {
-            candidate
-        } else {
-            now.wrapping_add(TIMER_INTERVAL_TICKS)
-        }
-    } else {
-        now.wrapping_add(TIMER_INTERVAL_TICKS)
+    let mut deadline = unsafe {
+        crate::object::sched_context::scheduler_timer_deadline(
+            now,
+            crate::kernel::smp::last_budget_account_ticks(),
+            crate::object::tcb::current(),
+        )
     };
+    if let Some(synthetic_deadline) = synthetic_timer_irq_deadline(now) {
+        deadline = Some(deadline.map_or(synthetic_deadline, |current| {
+            current.min(synthetic_deadline)
+        }));
+    }
+    let deadline = deadline.unwrap_or_else(|| now.wrapping_add(TIMER_INTERVAL_TICKS));
     crate::kernel::smp::set_next_timer_deadline(deadline);
     sbi::set_timer(deadline);
+}
+
+fn should_signal_synthetic_timer_irq(now: u64) -> bool {
+    if crate::kernel::smp::current_core_id() != 0 {
+        return false;
+    }
+    let previous = NEXT_SYNTHETIC_TIMER_IRQ_DEADLINE.load(Ordering::Acquire);
+    if previous == 0 {
+        NEXT_SYNTHETIC_TIMER_IRQ_DEADLINE.store(
+            now.wrapping_add(SYNTHETIC_TIMER_IRQ_INTERVAL_TICKS),
+            Ordering::Release,
+        );
+        return false;
+    }
+    if now < previous {
+        return false;
+    }
+    let mut next = previous;
+    while next <= now {
+        next = next.wrapping_add(SYNTHETIC_TIMER_IRQ_INTERVAL_TICKS);
+    }
+    NEXT_SYNTHETIC_TIMER_IRQ_DEADLINE.store(next, Ordering::Release);
+    true
 }
 
 /// Poll the architectural timer while the kernel is spinning or running a
@@ -731,26 +781,25 @@ fn handle_timer_interrupt() {
             now.saturating_sub(last)
         }
     };
-    program_next_timer();
     unsafe {
         crate::object::sched_context::release_due(now);
-        crate::object::irq::signal_irq(super::irq::KERNEL_TIMER_IRQ as u64);
+        if should_signal_synthetic_timer_irq(now) {
+            crate::object::irq::signal_irq(super::irq::KERNEL_TIMER_IRQ as u64);
+        }
         let cur = crate::object::tcb::current();
         let (cur_running, cur_sc) = crate::object::tcb::running_sched_context_snapshot(cur);
         if cur_running {
-            {
-                if !crate::object::sched_context::charge_tcb(cur, budget_ticks) {
-                    crate::object::sched_context::complete_yield_to_target(cur);
-                    if crate::object::sched_context::is_round_robin(cur_sc) {
-                        crate::object::tcb::rotate_to_tail(cur);
-                    } else {
-                        send_timeout_fault_ipc();
-                    }
+            if !crate::object::sched_context::charge_tcb(cur, budget_ticks) {
+                crate::object::sched_context::complete_yield_to_target(cur);
+                if crate::object::sched_context::is_round_robin(cur_sc) {
+                    crate::object::tcb::rotate_to_tail(cur);
+                } else {
+                    send_timeout_fault_ipc();
                 }
-                return;
             }
         }
     }
+    program_next_timer();
 }
 
 fn handle_software_interrupt() {
@@ -767,11 +816,13 @@ pub fn idle_scheduler_loop() -> ! {
             if next.is_null() {
                 crate::kernel::smp::clear_current_state();
                 switch_to_kernel_vspace();
+                program_next_timer();
                 None
             } else {
                 crate::object::tcb::set_current(next);
                 let ctx = unsafe { crate::object::tcb::prepare_for_user_restore(next) };
                 unsafe { switch_to_tcb_vspace(next) };
+                program_next_timer();
                 Some((ctx, kernel_lock))
             }
         };
@@ -870,6 +921,8 @@ fn kernel_exit(
             tcb::enqueue_if_migrated_from_current_core(cur);
             if tcb::is_runnable_on_current_core(cur) {
                 tcb::enqueue(cur);
+            } else {
+                crate::object::sched_context::postpone_unreleased_tcb(cur);
             }
         }
 
@@ -937,6 +990,7 @@ fn finish_kernel_exit(
     ctx: *mut UserContext,
     kernel_lock: crate::kernel::smp::KernelLockGuard,
 ) -> *mut UserContext {
+    program_next_timer();
     kernel_lock.defer_unlock_for_user_restore();
     ctx
 }

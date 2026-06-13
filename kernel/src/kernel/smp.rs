@@ -558,6 +558,13 @@ pub fn set_next_timer_deadline(deadline: u64) {
 }
 
 #[inline]
+pub fn last_budget_account_ticks() -> u64 {
+    current_hart()
+        .last_budget_account_ticks
+        .load(Ordering::Acquire)
+}
+
+#[inline]
 pub fn set_last_budget_account_ticks(ticks: u64) {
     current_hart()
         .last_budget_account_ticks
