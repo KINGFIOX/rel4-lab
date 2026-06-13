@@ -207,9 +207,23 @@ pub const USER_SSTATUS: u64 = PRMD_PPLV_USER | PRMD_PIE;
 pub const ROOTSERVER_SSTATUS: u64 = USER_SSTATUS;
 const ESTAT_ECODE_SHIFT: usize = 16;
 const ESTAT_ECODE_MASK: usize = 0x3f;
+const ESTAT_ESUBCODE_SHIFT: usize = 22;
+const ESTAT_ESUBCODE_MASK: usize = 0x1ff;
 const EXCCODE_INTERRUPT: usize = 0;
+const EXCCODE_PIL: usize = 1;
+const EXCCODE_PIS: usize = 2;
+const EXCCODE_PIF: usize = 3;
+const EXCCODE_PME: usize = 4;
+const EXCCODE_PNR: usize = 5;
+const EXCCODE_PNX: usize = 6;
+const EXCCODE_PPI: usize = 7;
+const EXCCODE_ADE: usize = 8;
 const EXCCODE_SYSCALL: usize = 11;
+const EXSUBCODE_ADEF: usize = 0;
 const FAULT_MR_REG_COUNT: u64 = 4;
+const VM_FAULT_FSR_INSTRUCTION: u64 = 1;
+const VM_FAULT_FSR_LOAD: u64 = 5;
+const VM_FAULT_FSR_STORE: u64 = 7;
 
 global_asm!(
     r#"
@@ -404,7 +418,8 @@ pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> *mut UserContext {
             );
         }
         _ => {
-            if !send_user_exception_fault(uc, ecode, record.badv) {
+            let esubcode = estat_esubcode(record.estat as usize);
+            if !send_fault_ipc(uc, ecode, esubcode, record.badv) {
                 warn!(
                     "loongarch64 user fault: ecode={} estat={:#x} badv={:#x} era={:#x} sp={:#x} ra={:#x}",
                     ecode,
@@ -427,13 +442,51 @@ fn estat_ecode(estat: usize) -> usize {
     (estat >> ESTAT_ECODE_SHIFT) & ESTAT_ECODE_MASK
 }
 
-fn send_user_exception_fault(uc: &mut UserContext, code: usize, _badv: u64) -> bool {
+#[inline]
+fn estat_esubcode(estat: usize) -> usize {
+    (estat >> ESTAT_ESUBCODE_SHIFT) & ESTAT_ESUBCODE_MASK
+}
+
+fn fault_message(
+    code: usize,
+    subcode: usize,
+    badv: u64,
+    uc: &UserContext,
+) -> (u64, u64, [u64; 16]) {
     let mut mrs = [0; 16];
-    mrs[0] = uc.pc;
-    mrs[1] = uc.regs[UserRegister::Sp.index()];
-    mrs[2] = code as u64;
-    mrs[3] = 0;
-    send_synthetic_fault_ipc(FaultLabel::UserException.raw(), 4, mrs)
+    match vm_fault_fsr(code, subcode) {
+        Some((instruction_fault, fsr)) => {
+            mrs[0] = uc.pc;
+            mrs[1] = badv;
+            mrs[2] = instruction_fault as u64;
+            mrs[3] = fsr;
+            (FaultLabel::VmFault.raw(), 4, mrs)
+        }
+        None => {
+            mrs[0] = uc.pc;
+            mrs[1] = uc.regs[UserRegister::Sp.index()];
+            mrs[2] = code as u64;
+            mrs[3] = subcode as u64;
+            (FaultLabel::UserException.raw(), 4, mrs)
+        }
+    }
+}
+
+fn vm_fault_fsr(code: usize, subcode: usize) -> Option<(bool, u64)> {
+    match code {
+        EXCCODE_PIF | EXCCODE_PNX => Some((true, VM_FAULT_FSR_INSTRUCTION)),
+        EXCCODE_PIS | EXCCODE_PME => Some((false, VM_FAULT_FSR_STORE)),
+        EXCCODE_PIL | EXCCODE_PNR => Some((false, VM_FAULT_FSR_LOAD)),
+        EXCCODE_PPI => Some((false, VM_FAULT_FSR_LOAD)),
+        EXCCODE_ADE if subcode == EXSUBCODE_ADEF => Some((true, VM_FAULT_FSR_INSTRUCTION)),
+        EXCCODE_ADE => Some((false, VM_FAULT_FSR_LOAD)),
+        _ => None,
+    }
+}
+
+fn send_fault_ipc(uc: &mut UserContext, code: usize, subcode: usize, badv: u64) -> bool {
+    let (label, len, mrs) = fault_message(code, subcode, badv, uc);
+    send_synthetic_fault_ipc(label, len, mrs)
 }
 
 pub fn send_cap_fault_ipc(uc: &mut UserContext, addr: u64, in_recv_phase: bool) -> bool {
