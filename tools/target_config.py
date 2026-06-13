@@ -199,7 +199,8 @@ TARGETS: dict[str, TargetConfig] = {
             "loongarch64-linux-gnu-",
         ),
         xv6_march="loongarch64",
-        xv6_mabi="lp64d",
+        # The LoongArch kernel UserContext does not preserve FPU state yet.
+        xv6_mabi="lp64s",
         xv6_disk_transport="virtio-pci",
     ),
 }
