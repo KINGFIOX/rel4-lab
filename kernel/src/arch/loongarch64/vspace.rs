@@ -1,16 +1,16 @@
 //! LoongArch64 VSpace backend staging.
 //!
 //! User paging objects follow the same seL4-style explicit page-table model as
-//! the RISC-V backend. The current LoongArch bring-up still leaves hardware
-//! root switching as a no-op, but frame and page-table caps now mutate real
-//! kernel-side page-table objects instead of rejecting every mapping request.
+//! the RISC-V backend. Page-table entries now use LoongArch EntryLo-compatible
+//! bits and root switching publishes `PGDL`/`ASID`, but the boot path still
+//! leaves full hardware paging/TLB refill bring-up as follow-up work.
 
 use crate::abi::constants::{
     KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE, PPTR_TOP, PT_INDEX_BITS,
 };
 use crate::arch::loongarch64::paging::{
-    PAGE_SHIFT, PAGE_SIZE, PTE_A, PTE_D, PTE_R, PTE_U, PTE_V, PTE_W, PTE_X, PageTable, Pte,
-    pt_index,
+    PAGE_SHIFT, PAGE_SIZE, PTE_D, PTE_MAT_CC, PTE_NR, PTE_NX, PTE_PLV_USER, PTE_PRESENT, PTE_V,
+    PTE_W, PageTable, Pte, pt_index,
 };
 use crate::kernel::smp::{BklCell, BklObjectGuard};
 
@@ -199,7 +199,7 @@ unsafe fn prepare_user_frame_map_at(
     if !user_range_aligned(vaddr, bits) || paddr & ((1usize << bits) - 1) != 0 {
         return Err(UserMapError::InvalidArgument);
     }
-    flags |= PTE_U | PTE_V | PTE_A | PTE_D;
+    flags |= PTE_PRESENT | PTE_V | PTE_PLV_USER | PTE_MAT_CC;
 
     let _guard = lock_vspace(root);
     let lookup = unsafe { lookup_pt_slot_user(root, vaddr)? };
@@ -368,7 +368,12 @@ unsafe fn reclaim_page_table_locked(pt: *mut PageTable, level: usize) {
     }
 }
 
-pub unsafe fn switch_satp(_satp_val: u64) {
+pub unsafe fn switch_satp(satp_val: u64) {
+    if satp_val == 0 {
+        return;
+    }
+    crate::arch::loongarch64::csr::set_pgdl((satp_val & !0xfffu64) as usize);
+    crate::arch::loongarch64::csr::set_asid((satp_val & 0x3ff) as usize);
     crate::arch::loongarch64::csr::sfence_vma_all();
     crate::arch::loongarch64::csr::fence_i();
 }
@@ -418,15 +423,15 @@ fn try_switch_to_tcb_root(tcb: *const crate::object::tcb::Tcb) -> bool {
 }
 
 pub fn user_flags(read: bool, write: bool, exec: bool) -> u64 {
-    let mut f = PTE_V | PTE_U | PTE_A | PTE_D;
-    if read {
-        f |= PTE_R;
+    let mut f = PTE_PRESENT | PTE_V | PTE_PLV_USER | PTE_MAT_CC;
+    if !read {
+        f |= PTE_NR;
     }
     if write {
-        f |= PTE_W;
+        f |= PTE_D | PTE_W;
     }
-    if exec {
-        f |= PTE_X;
+    if !exec {
+        f |= PTE_NX;
     }
     f
 }
@@ -438,11 +443,14 @@ pub fn make_boot_root_pt() -> *mut PageTable {
 }
 
 pub fn satp_for(root: *mut PageTable, _asid: u64) -> u64 {
-    root as u64
+    satp_from_kva(root as u64, _asid)
 }
 
 pub fn satp_from_kva(root_kva: u64, _asid: u64) -> u64 {
-    root_kva
+    let Some(root_pa) = kva_to_page_table_paddr(root_kva as usize) else {
+        return 0;
+    };
+    (root_pa as u64 & !0xfffu64) | (_asid & 0x3ff)
 }
 
 const _: () = {

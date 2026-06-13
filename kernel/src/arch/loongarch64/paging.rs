@@ -1,8 +1,8 @@
-//! LoongArch64 page-table type skeleton.
+//! LoongArch64 page-table entry encoding.
 //!
-//! LoongArch64 uses a different TLB/page-table model from RISC-V Sv39. This
-//! module intentionally only provides the public shape required by the shared
-//! kernel object code while the real LoongArch VSpace backend is being ported.
+//! The software page-table shape still mirrors the repository's three-level
+//! seL4 object model, but the entry bits use LoongArch's TLB EntryLo format
+//! plus the software `Present`/`Write` bits used by LoongArch page walking.
 
 use crate::abi::constants::{PT_INDEX_BITS, SEL4_PAGE_BITS, SEL4_PAGE_TABLE_ENTRIES};
 
@@ -14,18 +14,32 @@ pub const ROOT_CHILD_COVERAGE_BITS: usize = PAGE_SHIFT + PT_INDEX_BITS * 2;
 pub const LEAF_PARENT_COVERAGE_BITS: usize = PAGE_SHIFT + PT_INDEX_BITS;
 
 pub const PTE_V: u64 = 1 << 0;
-pub const PTE_R: u64 = 1 << 1;
-pub const PTE_W: u64 = 1 << 2;
-pub const PTE_X: u64 = 1 << 3;
-pub const PTE_U: u64 = 1 << 4;
-pub const PTE_G: u64 = 1 << 5;
-pub const PTE_A: u64 = 1 << 6;
-pub const PTE_D: u64 = 1 << 7;
+pub const PTE_D: u64 = 1 << 1;
+pub const PTE_PLV_SHIFT: u64 = 2;
+pub const PTE_PLV_MASK: u64 = 0b11 << PTE_PLV_SHIFT;
+pub const PTE_PLV_KERNEL: u64 = 0b00 << PTE_PLV_SHIFT;
+pub const PTE_PLV_USER: u64 = 0b11 << PTE_PLV_SHIFT;
+pub const PTE_MAT_SHIFT: u64 = 4;
+pub const PTE_MAT_SUC: u64 = 0b00 << PTE_MAT_SHIFT;
+pub const PTE_MAT_CC: u64 = 0b01 << PTE_MAT_SHIFT;
+pub const PTE_MAT_WUC: u64 = 0b10 << PTE_MAT_SHIFT;
+pub const PTE_G: u64 = 1 << 6;
+pub const PTE_HUGE: u64 = 1 << 6;
+pub const PTE_PRESENT: u64 = 1 << 7;
+pub const PTE_W: u64 = 1 << 8;
+pub const PTE_MODIFIED: u64 = 1 << 9;
+pub const PTE_SPECIAL: u64 = 1 << 11;
+pub const PTE_PFN_SHIFT: u64 = 12;
+pub const PTE_NR: u64 = 1 << 61;
+pub const PTE_NX: u64 = 1 << 62;
+pub const PTE_RPLV: u64 = 1 << 63;
 
-pub const PTE_KERNEL_RWX: u64 = PTE_V | PTE_R | PTE_W | PTE_X | PTE_G | PTE_A | PTE_D;
-pub const PTE_USER_RW: u64 = PTE_V | PTE_R | PTE_W | PTE_U | PTE_A | PTE_D;
-pub const PTE_USER_RX: u64 = PTE_V | PTE_R | PTE_X | PTE_U | PTE_A | PTE_D;
-pub const PTE_USER_RWX: u64 = PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D;
+pub const PTE_KERNEL_RWX: u64 =
+    PTE_PRESENT | PTE_V | PTE_D | PTE_W | PTE_G | PTE_PLV_KERNEL | PTE_MAT_CC;
+pub const PTE_USER_RW: u64 =
+    PTE_PRESENT | PTE_V | PTE_D | PTE_W | PTE_PLV_USER | PTE_MAT_CC | PTE_NX;
+pub const PTE_USER_RX: u64 = PTE_PRESENT | PTE_V | PTE_PLV_USER | PTE_MAT_CC;
+pub const PTE_USER_RWX: u64 = PTE_PRESENT | PTE_V | PTE_D | PTE_W | PTE_PLV_USER | PTE_MAT_CC;
 
 #[repr(transparent)]
 #[derive(Copy, Clone)]
@@ -46,27 +60,27 @@ impl Pte {
 
     #[inline]
     pub const fn next(pt_paddr: u64) -> Pte {
-        Pte(((pt_paddr >> PAGE_SHIFT) << 10) | PTE_V)
+        Pte((pt_paddr & !((PAGE_SIZE as u64) - 1)) | PTE_PRESENT)
     }
 
     #[inline]
     pub const fn leaf(paddr: u64, flags: u64) -> Pte {
-        Pte(((paddr >> PAGE_SHIFT) << 10) | flags)
+        Pte((paddr & !((PAGE_SIZE as u64) - 1)) | flags)
     }
 
     #[inline]
     pub const fn is_valid(self) -> bool {
-        (self.0 & PTE_V) != 0
+        (self.0 & PTE_PRESENT) != 0
     }
 
     #[inline]
     pub const fn is_leaf(self) -> bool {
-        (self.0 & PTE_V) != 0 && (self.0 & (PTE_R | PTE_W | PTE_X)) != 0
+        (self.0 & PTE_PRESENT) != 0 && (self.0 & PTE_V) != 0
     }
 
     #[inline]
     pub const fn ppn(self) -> u64 {
-        (self.0 >> 10) & ((1u64 << 44) - 1)
+        (self.0 >> PTE_PFN_SHIFT) & ((1u64 << 36) - 1)
     }
 
     #[inline]
