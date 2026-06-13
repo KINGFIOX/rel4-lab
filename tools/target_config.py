@@ -97,13 +97,18 @@ class TargetConfig:
         if any(arch_dir.is_dir() for arch_dir in arch_dirs) and libsel4_dir.is_dir():
             return
         arch_list = " or ".join(str(path.relative_to(sel4_tree_dir)) for path in arch_dirs)
+        port_hint = (
+            "Add a LoongArch seL4/libsel4/elfloader port"
+            if self.name == "loongarch64"
+            else f"Add an {self.name} seL4/libsel4/elfloader port"
+        )
         die(
             prefix,
             (
                 f"official sel4test for ARCH={self.name} is not available in {sel4_tree_dir}; "
                 f"missing {arch_list} and/or "
-                f"{libsel4_dir.relative_to(sel4_tree_dir)}. Add a LoongArch seL4/libsel4/"
-                "elfloader port or set SEL4_TREE_DIR to one before packing."
+                f"{libsel4_dir.relative_to(sel4_tree_dir)}. {port_hint} "
+                "or set SEL4_TREE_DIR to one before packing."
             ),
         )
 

@@ -27,8 +27,6 @@ from tool_common import (
 )
 from target_config import (
     image_suffix_from_env,
-    sel4_build_dir_from_env,
-    sel4_tree_dir_from_env,
     target_from_env,
 )
 
@@ -144,8 +142,6 @@ def main(argv: list[str]) -> int:
         qemu_stdin_file = str(run_qemu_stdin_file)
 
     target.require_qemu(PREFIX)
-    sel4_build_dir = sel4_build_dir_from_env(target)
-    target.require_sel4_arch_source(PREFIX, sel4_tree_dir_from_env(sel4_build_dir))
 
     lock = BuildLock(ROOT_DIR)
     lock.acquire()
