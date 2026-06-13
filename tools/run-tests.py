@@ -19,7 +19,12 @@ from tool_common import (
     qemu_smp_arg,
     tail_lines,
 )
-from target_config import image_name_from_env, target_from_env
+from target_config import (
+    image_name_from_env,
+    sel4_build_dir_from_env,
+    sel4_tree_dir_from_env,
+    target_from_env,
+)
 
 
 DEFAULT_EXPECTED_BASELINE = ""
@@ -52,6 +57,10 @@ def main(argv: list[str]) -> int:
     expected_baseline = getenv("SEL4TEST_EXPECTED_BASELINE", DEFAULT_EXPECTED_BASELINE)
 
     if not packed_image.is_file():
+        target.require_sel4_arch_source(
+            PREFIX,
+            sel4_tree_dir_from_env(sel4_build_dir_from_env(target)),
+        )
         print(f"packed image not found at {packed_image}", file=sys.stderr)
         print("run tools/pack-image.py first", file=sys.stderr)
         return 3

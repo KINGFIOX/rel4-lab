@@ -9,7 +9,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tool_common import ROOT_DIR, getenv, qemu_smp_arg, run
-from target_config import image_name_from_env, rust_target_from_env, target_from_env
+from target_config import (
+    image_name_from_env,
+    rust_target_from_env,
+    sel4_build_dir_from_env,
+    sel4_tree_dir_from_env,
+    target_from_env,
+)
 
 
 def main(argv: list[str]) -> int:
@@ -35,6 +41,10 @@ def main(argv: list[str]) -> int:
         ]
     elif mode == "image":
         if not packed_image.is_file():
+            target.require_sel4_arch_source(
+                "simulate",
+                sel4_tree_dir_from_env(sel4_build_dir_from_env(target)),
+            )
             print(f"packed image not found at {packed_image}", file=sys.stderr)
             print("run tools/pack-image.py first", file=sys.stderr)
             return 1
