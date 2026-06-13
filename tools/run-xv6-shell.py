@@ -21,7 +21,7 @@ from tool_common import (
     output,
     qemu_smp_arg,
 )
-from target_config import target_from_env
+from target_config import image_suffix_from_env, target_from_env
 
 
 PREFIX = "run-xv6-shell"
@@ -83,11 +83,7 @@ def build_image(run_id: str, target) -> tuple[Path, Path | None, bool]:
         rootserver_elf = Path(
             check_output_text([str(ROOT_DIR / "tools" / "build-xv6-user-rootserver.py"), "sh"])
         )
-        image_suffix = (
-            "image-riscv-qemu-riscv-virt"
-            if target.name == "riscv64"
-            else f"image-{target.name}-qemu-virt"
-        )
+        image_suffix = image_suffix_from_env(target)
         packed_image = Path(getenv("OUT_IMAGE", str(ROOT_DIR / "images" / f"xv6-{run_id}-{image_suffix}")))
 
         if attach_fs_img and build_fs_img:

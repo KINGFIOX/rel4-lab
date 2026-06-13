@@ -25,7 +25,7 @@ from tool_common import (
     qemu_smp_arg,
     tail_lines,
 )
-from target_config import target_from_env
+from target_config import image_suffix_from_env, target_from_env
 
 
 PREFIX = "run-xv6-user"
@@ -144,11 +144,7 @@ def main(argv: list[str]) -> int:
     lock.acquire()
     try:
         rootserver_elf = Path(check_output_text([str(ROOT_DIR / "tools" / "build-xv6-user-rootserver.py"), *program_args]))
-        image_suffix = (
-            "image-riscv-qemu-riscv-virt"
-            if target.name == "riscv64"
-            else f"image-{target.name}-qemu-virt"
-        )
+        image_suffix = image_suffix_from_env(target)
         packed_image = Path(getenv("OUT_IMAGE", str(ROOT_DIR / "images" / f"xv6-{run_id}-{image_suffix}")))
         log_file = Path(getenv("LOG_FILE", str(ROOT_DIR / "target" / f"xv6-{run_id}-last-run.log")))
         kernel_debug_log_file = Path(

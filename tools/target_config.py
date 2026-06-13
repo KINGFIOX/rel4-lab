@@ -174,6 +174,10 @@ def image_name_from_env(target: TargetConfig) -> str:
     return os.environ.get("SEL4_IMAGE_NAME", target.image_name)
 
 
+def image_suffix_from_env(target: TargetConfig) -> str:
+    return image_name_from_env(target).removeprefix("sel4test-driver-")
+
+
 def platform_from_env(target: TargetConfig) -> str:
     return os.environ.get("SEL4_PLATFORM", target.platform)
 
