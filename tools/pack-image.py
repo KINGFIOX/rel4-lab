@@ -287,6 +287,7 @@ def main() -> int:
     tmp_stripped = make_temp("rust-kernel.elf.")
     tmp_rootserver_stripped: Path | None = None
     try:
+        ensure_sel4_arch_available(sel4_build_dir, target)
         cargo_env = rust_kernel_env(sel4_build_dir, target)
         log(
             PREFIX,
@@ -302,7 +303,6 @@ def main() -> int:
         )
         require_file(PREFIX, rust_kernel_elf, f"Rust kernel ELF missing: {rust_kernel_elf}")
 
-        ensure_sel4_arch_available(sel4_build_dir, target)
         require_dir(PREFIX, sel4_build_dir, f"SEL4_BUILD_DIR not found: {sel4_build_dir}")
         ensure_sel4_configured(sel4_build_dir, target)
         if rootserver_elf is not None:
