@@ -2389,7 +2389,7 @@ fn cnode_op_copy_or_mint(
     Ok(())
 }
 
-fn derive_cap_for_copy(slot: *mut Cte, mut cap: Cap) -> Result<Cap, SyscallError> {
+pub(crate) fn derive_cap_for_copy(slot: *mut Cte, mut cap: Cap) -> Result<Cap, SyscallError> {
     match cap.tag() {
         Some(CapTag::Zombie) | Some(CapTag::IrqControl) => Ok(Cap::null()),
         Some(CapTag::Untyped) => {

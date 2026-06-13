@@ -42,6 +42,7 @@
 use crate::abi::fault::FaultLabel;
 use crate::abi::types::MessageInfo;
 use crate::api::cspace::{self, lookup_cap};
+use crate::api::invocation::derive_cap_for_copy;
 use crate::api::thread;
 use crate::arch::current::trap::{SEL4_USER_CONTEXT_REGS, UserContext, UserRegister};
 use crate::object::cap::{Cap, CapTag};
@@ -179,9 +180,9 @@ unsafe fn transfer_caps(
             Some(s) => s,
             None => break,
         };
-        let derived = match unsafe { derive_transfer_cap(src_slot, src_cap) } {
-            Some(c) => c,
-            None => break,
+        let derived = match derive_cap_for_copy(src_slot, src_cap) {
+            Ok(cap) if !cap.is_null() => cap,
+            _ => break,
         };
         if !unsafe { insert_derived_cap(src_slot, dst, derived) } {
             break;
@@ -275,21 +276,6 @@ unsafe fn get_receive_slot(receiver: *mut tcb::Tcb) -> Option<*mut Cte> {
         return None;
     }
     Some(r.slot)
-}
-
-unsafe fn derive_transfer_cap(src_slot: *mut Cte, cap: Cap) -> Option<Cap> {
-    match cap.tag() {
-        None | Some(CapTag::Null) | Some(CapTag::IrqControl) | Some(CapTag::Reply) => None,
-        Some(CapTag::Untyped) => {
-            let cspace_guard = crate::object::cnode::lock_cspace();
-            if unsafe { crate::object::cnode::mdb_has_children_locked(&cspace_guard, src_slot) } {
-                None
-            } else {
-                Some(cap)
-            }
-        }
-        _ => Some(cap),
-    }
 }
 
 unsafe fn insert_derived_cap(src_slot: *mut Cte, dst: *mut Cte, cap: Cap) -> bool {
@@ -595,6 +581,8 @@ unsafe fn complete_receive_from_sender(
         if sender_state.is_call && can_reply {
             // Park the caller on the receiver's MCS reply object. If no valid
             // reply object was provided, MCS seL4 makes the caller inactive.
+            let can_donate_reply =
+                !sender_state.is_fault || sender_state.fault_label != FaultLabel::Timeout.raw();
             let reply_set = match reply_object_for_receive(cur, reply_cptr) {
                 Some((reply_cptr, reply_kva, reply_can_grant)) => set_reply_object_for(
                     cur,
@@ -603,12 +591,14 @@ unsafe fn complete_receive_from_sender(
                     reply_can_grant,
                     sender,
                     sender_state.can_grant,
-                    true,
+                    can_donate_reply,
                 ),
                 None => false,
             };
             if reply_set {
-                maybe_donate_sched_context(sender, cur);
+                if can_donate_reply {
+                    maybe_donate_sched_context(sender, cur);
+                }
             } else if sender_state.is_fault {
                 tcb::set_inactive(sender);
                 tcb::clear_waiting_on(sender);
@@ -924,28 +914,18 @@ pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb) {
             }
         }
         let sched_context = tcb::finish_reply_state(caller, was_fault, wake_caller);
-        let mut replenish_sc = 0;
-        let mut budget_check_sc = 0;
-        if wake_caller {
-            if fault_label == FaultLabel::Timeout.raw() && info.label() == 0 {
-                replenish_sc = sched_context;
-            } else if fault_label != FaultLabel::Timeout.raw() {
-                budget_check_sc = sched_context;
+        if wake_caller
+            && sched_context != 0
+            && !crate::object::sched_context::has_budget(sched_context)
+        {
+            if fault_label != FaultLabel::Timeout.raw()
+                && crate::arch::current::trap::send_timeout_fault_ipc_for(caller)
+            {
+                return;
             }
+            crate::object::sched_context::postpone(sched_context);
         }
         if wake_caller {
-            if replenish_sc != 0 {
-                crate::object::sched_context::replenish(replenish_sc);
-            }
-            if budget_check_sc != 0 && !crate::object::sched_context::has_budget(budget_check_sc) {
-                if crate::arch::current::trap::send_timeout_fault_ipc_for(caller) {
-                    return;
-                }
-                // This scaffold has no timed refill queue yet. If no
-                // timeout handler accepted the depleted SC, refill it
-                // so the reply target is not permanently starved.
-                crate::object::sched_context::replenish(budget_check_sc);
-            }
             tcb::enqueue(caller);
         }
     }

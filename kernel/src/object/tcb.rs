@@ -37,6 +37,9 @@ pub fn current() -> *mut Tcb {
 pub fn set_current(tcb: *mut Tcb) -> *mut Tcb {
     let prev = crate::kernel::smp::set_current_tcb(tcb);
     unsafe { crate::api::thread::refresh_from_tcb(tcb) };
+    if !tcb.is_null() {
+        crate::kernel::smp::set_last_budget_account_ticks(crate::arch::current::csr::time() as u64);
+    }
     prev
 }
 

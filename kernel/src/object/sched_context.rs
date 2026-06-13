@@ -71,6 +71,8 @@ impl TrackedSchedContexts {
 
 static TRACKED_SCHED_CONTEXTS: BklCell<TrackedSchedContexts> =
     BklCell::new(TrackedSchedContexts::new());
+static RELEASE_SCHED_CONTEXTS: BklCell<TrackedSchedContexts> =
+    BklCell::new(TrackedSchedContexts::new());
 
 pub(crate) type SchedContextLockGuard = BklObjectGuard;
 
@@ -138,10 +140,19 @@ fn register(sc_kva: u64) {
 
 fn unregister(sc_kva: u64) {
     TRACKED_SCHED_CONTEXTS.with_mut(|tracked| tracked.unregister(sc_kva));
+    RELEASE_SCHED_CONTEXTS.with_mut(|tracked| tracked.unregister(sc_kva));
 }
 
-fn tracked_sched_context_snapshot() -> ([u64; MAX_TRACKED_SCHED_CONTEXTS], usize) {
-    TRACKED_SCHED_CONTEXTS.with_ref(TrackedSchedContexts::snapshot)
+fn register_release(sc_kva: u64) {
+    RELEASE_SCHED_CONTEXTS.with_mut(|tracked| tracked.register(sc_kva));
+}
+
+fn unregister_release(sc_kva: u64) {
+    RELEASE_SCHED_CONTEXTS.with_mut(|tracked| tracked.unregister(sc_kva));
+}
+
+fn release_sched_context_snapshot() -> ([u64; MAX_TRACKED_SCHED_CONTEXTS], usize) {
+    RELEASE_SCHED_CONTEXTS.with_ref(TrackedSchedContexts::snapshot)
 }
 
 pub unsafe fn configure(
@@ -528,7 +539,9 @@ fn budget_remains(remaining: u64, charge_ticks: u64) -> bool {
 }
 
 pub unsafe fn release_due(now: u64) {
-    let (contexts, count) = tracked_sched_context_snapshot();
+    let (contexts, count) = release_sched_context_snapshot();
+    let current_core = crate::kernel::smp::current_core_id();
+    let current = tcb::current();
     unsafe {
         let mut i = 0;
         while i < count {
@@ -538,7 +551,11 @@ pub unsafe fn release_due(now: u64) {
                 let sc = sc_kva as *mut SchedContext;
                 {
                     let _guard = lock(sc_kva);
-                    if release_one(sc, now) && (*sc).tcb != 0 {
+                    if (*sc).core as usize == current_core
+                        && (*sc).tcb != 0
+                        && (*sc).tcb != current as u64
+                        && release_one(sc, now)
+                    {
                         let tcb = (*sc).tcb as *mut Tcb;
                         if tcb::runnable_sched_context_snapshot(tcb).0 {
                             wake_tcb = tcb;
@@ -546,10 +563,28 @@ pub unsafe fn release_due(now: u64) {
                     }
                 }
                 if !wake_tcb.is_null() {
+                    unregister_release(sc_kva);
                     crate::object::tcb::enqueue(wake_tcb);
                 }
             }
             i += 1;
+        }
+    }
+}
+
+pub unsafe fn postpone(sc_kva: u64) {
+    if sc_kva == 0 || !is_kernel_pspace_kva(sc_kva) {
+        return;
+    }
+    let tcb = unsafe {
+        let sc = sc_kva as *mut SchedContext;
+        let _guard = lock(sc_kva);
+        register_release(sc_kva);
+        (*sc).tcb as *mut Tcb
+    };
+    if !tcb.is_null() {
+        unsafe {
+            crate::object::tcb::dequeue(tcb);
         }
     }
 }
@@ -646,8 +681,8 @@ pub unsafe fn charge(sc_kva: u64, ticks: u64) -> bool {
         }
 
         let now = now_ticks();
-        refill_unblock_check(sc, now);
         if !refill_ready(sc, now) || !refill_sufficient(sc, 0) {
+            register_release(sc_kva);
             if (*sc).tcb != 0 {
                 crate::object::tcb::dequeue((*sc).tcb as *mut Tcb);
             }
@@ -661,6 +696,7 @@ pub unsafe fn charge(sc_kva: u64, ticks: u64) -> bool {
         }
 
         refill_budget_check(sc, head_amount);
+        register_release(sc_kva);
         if (*sc).tcb != 0 {
             let tcb = (*sc).tcb as *mut Tcb;
             crate::object::tcb::dequeue(tcb);
@@ -701,6 +737,7 @@ pub unsafe fn yield_tcb(tcb: *mut Tcb) -> bool {
         refill_unblock_check(sc, now);
         let head_amount = (*refill_head_ptr(sc)).amount;
         refill_budget_check(sc, head_amount);
+        register_release(sc_kva);
         if (*sc).tcb != 0 {
             crate::object::tcb::dequeue((*sc).tcb as *mut Tcb);
         }
