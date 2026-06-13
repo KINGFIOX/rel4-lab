@@ -863,11 +863,39 @@ fn finish_kernel_exit(
     ctx
 }
 
-fn switch_to_kernel_vspace() {}
+fn switch_to_kernel_vspace() {
+    let Some(kernel_satp) = crate::kernel::smp::kernel_satp() else {
+        return;
+    };
+    unsafe { crate::arch::loongarch64::vspace::switch_satp(kernel_satp) };
+}
 
 // The current LoongArch VSpace backend is still identity/no-op staging. Keep
 // the scheduler hook explicit so real ASID/root switching can land here.
-fn switch_to_tcb_vspace(_tcb: *const crate::object::tcb::Tcb) {}
+fn switch_to_tcb_vspace(tcb: *const crate::object::tcb::Tcb) {
+    use crate::object::cap::CapTag;
+
+    if tcb.is_null() {
+        return;
+    }
+    let vroot = crate::object::tcb::vspace_cap_snapshot(tcb);
+    if vroot.tag() != Some(CapTag::PageTable) {
+        return;
+    }
+    let root_kva = vroot.page_table_base_ptr();
+    let asid = vroot.page_table_mapped_asid();
+    if root_kva == 0 || !vroot.page_table_is_mapped() || asid == 0 {
+        return;
+    }
+    if crate::object::asid::lookup(asid) != root_kva {
+        return;
+    }
+    let new_satp = crate::arch::loongarch64::vspace::satp_from_kva(root_kva, asid as u64);
+    if new_satp == 0 {
+        return;
+    }
+    unsafe { crate::arch::loongarch64::vspace::switch_satp(new_satp) };
+}
 
 fn park_current_thread() -> ! {
     loop {
