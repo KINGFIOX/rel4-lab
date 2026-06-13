@@ -209,6 +209,10 @@ const ESTAT_ECODE_SHIFT: usize = 16;
 const ESTAT_ECODE_MASK: usize = 0x3f;
 const ESTAT_ESUBCODE_SHIFT: usize = 22;
 const ESTAT_ESUBCODE_MASK: usize = 0x1ff;
+const ESTAT_IS_TIMER: usize = 1 << 11;
+const ECFG_LIE_TIMER: usize = 1 << 11;
+const TCFG_ENABLE: usize = 1 << 0;
+const TCFG_INITVAL_SHIFT: usize = 2;
 const EXCCODE_INTERRUPT: usize = 0;
 const EXCCODE_PIL: usize = 1;
 const EXCCODE_PIS: usize = 2;
@@ -224,6 +228,7 @@ const FAULT_MR_REG_COUNT: u64 = 4;
 const VM_FAULT_FSR_INSTRUCTION: u64 = 1;
 const VM_FAULT_FSR_LOAD: u64 = 5;
 const VM_FAULT_FSR_STORE: u64 = 7;
+const TIMER_INTERVAL_TICKS: u64 = 20_000;
 
 global_asm!(
     r#"
@@ -412,10 +417,12 @@ pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> *mut UserContext {
     match ecode {
         EXCCODE_SYSCALL => handle_syscall(uc),
         EXCCODE_INTERRUPT => {
-            warn!(
-                "loongarch64 interrupt before IRQ backend: estat={:#x} era={:#x}",
-                record.estat, record.era
-            );
+            if !service_pending_interrupt(record.estat as usize) {
+                warn!(
+                    "loongarch64 unhandled interrupt: estat={:#x} era={:#x}",
+                    record.estat, record.era
+                );
+            }
         }
         _ => {
             let esubcode = estat_esubcode(record.estat as usize);
@@ -445,6 +452,11 @@ fn estat_ecode(estat: usize) -> usize {
 #[inline]
 fn estat_esubcode(estat: usize) -> usize {
     (estat >> ESTAT_ESUBCODE_SHIFT) & ESTAT_ESUBCODE_MASK
+}
+
+#[inline]
+fn timer_pending(estat: usize) -> bool {
+    estat & ESTAT_IS_TIMER != 0
 }
 
 fn fault_message(
@@ -975,10 +987,83 @@ pub fn install_trap_vector() {
     csr::ibar();
 }
 
-pub fn init_timer() {}
+pub fn init_timer() {
+    csr::set_ecfg(csr::ecfg() | ECFG_LIE_TIMER);
+    crate::kernel::smp::set_last_budget_account_ticks(csr::time() as u64);
+    program_next_timer();
+}
+
+fn program_next_timer() {
+    let now = csr::time() as u64;
+    let previous = crate::kernel::smp::next_timer_deadline();
+    let deadline = if previous != 0 {
+        let candidate = previous.wrapping_add(TIMER_INTERVAL_TICKS);
+        if candidate > now {
+            candidate
+        } else {
+            now.wrapping_add(TIMER_INTERVAL_TICKS)
+        }
+    } else {
+        now.wrapping_add(TIMER_INTERVAL_TICKS)
+    };
+    crate::kernel::smp::set_next_timer_deadline(deadline);
+
+    let delta = deadline.saturating_sub(now).max(1);
+    let initval = delta.min((usize::MAX >> TCFG_INITVAL_SHIFT) as u64) as usize;
+    csr::set_tcfg((initval << TCFG_INITVAL_SHIFT) | TCFG_ENABLE);
+}
+
+fn clear_timer_interrupt() {
+    csr::set_ticlr(1);
+}
+
+fn handle_timer_interrupt() {
+    clear_timer_interrupt();
+    let now = csr::time() as u64;
+    let budget_ticks = {
+        let last = crate::kernel::smp::swap_last_budget_account_ticks(now);
+        if last == 0 {
+            TIMER_INTERVAL_TICKS
+        } else {
+            now.saturating_sub(last)
+        }
+    };
+    program_next_timer();
+    unsafe {
+        crate::object::sched_context::release_due(now);
+        crate::object::irq::signal_irq(super::irq::KERNEL_TIMER_IRQ as u64);
+        let cur = crate::object::tcb::current();
+        let (cur_running, cur_sc) = crate::object::tcb::running_sched_context_snapshot(cur);
+        if cur_running && !crate::object::sched_context::charge_tcb(cur, budget_ticks) {
+            crate::object::sched_context::complete_yield_to_target(cur);
+            if crate::object::sched_context::is_round_robin(cur_sc) {
+                crate::object::tcb::rotate_to_tail(cur);
+            } else {
+                let _ = send_timeout_fault_ipc_for(cur);
+            }
+        }
+    }
+}
+
+fn service_pending_interrupt(estat: usize) -> bool {
+    if timer_pending(estat) {
+        handle_timer_interrupt();
+        return true;
+    }
+    false
+}
 
 pub fn service_due_timer_interrupts() -> bool {
-    false
+    let deadline = crate::kernel::smp::next_timer_deadline();
+    if deadline == 0 {
+        return false;
+    }
+    let now = csr::time() as u64;
+    if now < deadline {
+        return false;
+    }
+    handle_timer_interrupt();
+    true
 }
 
 pub unsafe fn restore_user_context_with_kernel_lock(

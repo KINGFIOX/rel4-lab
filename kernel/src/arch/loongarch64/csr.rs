@@ -130,5 +130,13 @@ pub fn fence_i() {
 
 #[inline]
 pub fn time() -> usize {
-    0
+    let value: usize;
+    unsafe {
+        asm!(
+            "rdtime.d {value}, $zero",
+            value = out(reg) value,
+            options(nostack, nomem)
+        );
+    }
+    value
 }
