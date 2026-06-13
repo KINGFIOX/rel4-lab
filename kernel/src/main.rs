@@ -40,9 +40,9 @@ mod machine;
 #[cfg(target_arch = "riscv64")]
 mod object;
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
 pub use arch::current::boot::_start;
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
 pub use arch::current::boot::init_kernel;
 #[cfg(target_arch = "riscv64")]
 pub use log_crate::{debug, error, info, trace, warn};
