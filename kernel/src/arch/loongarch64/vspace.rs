@@ -117,12 +117,14 @@ struct PtSlotLookup {
 }
 
 pub struct PreparedUserFrameMap {
+    root: *const PageTable,
     slot: *mut Pte,
     pte: Pte,
     vaddr: usize,
 }
 
 pub struct PreparedUserPageTableMap {
+    root: *const PageTable,
     slot: *mut Pte,
     pte: Pte,
     mapped_addr: usize,
@@ -159,6 +161,27 @@ fn kva_to_page_table_paddr(kva: usize) -> Option<usize> {
 #[inline]
 fn paddr_to_user_pt_kva(paddr: usize) -> *mut PageTable {
     paddr_to_pptr(paddr) as *mut PageTable
+}
+
+#[inline]
+fn root_paddr(root: *const PageTable) -> Option<u64> {
+    if root.is_null() {
+        return None;
+    }
+    kva_to_page_table_paddr(root as usize).map(|paddr| (paddr as u64) & !0xfffu64)
+}
+
+#[inline]
+fn flush_vaddr_for_root(root: *const PageTable, vaddr: usize) {
+    match root_paddr(root) {
+        Some(root_pa) if root_pa == (current_satp() & !0xfffu64) => {
+            csr::sfence_vma_va(vaddr);
+        }
+        _ => {
+            csr::sfence_vma_all();
+        }
+    }
+    crate::kernel::smp::remote_sfence_vma_all();
 }
 
 #[inline]
@@ -241,6 +264,7 @@ unsafe fn prepare_user_frame_map_at(
         }
     }
     Ok(PreparedUserFrameMap {
+        root,
         slot: lookup.slot,
         pte: Pte::leaf(paddr as u64, flags),
         vaddr,
@@ -251,8 +275,7 @@ pub unsafe fn commit_user_frame_map(prepared: PreparedUserFrameMap) {
     unsafe {
         *prepared.slot = prepared.pte;
     }
-    crate::arch::loongarch64::csr::sfence_vma_va(prepared.vaddr);
-    crate::kernel::smp::remote_sfence_vma_all();
+    flush_vaddr_for_root(prepared.root, prepared.vaddr);
 }
 
 pub unsafe fn prepare_user_page_table_map(
@@ -274,6 +297,7 @@ pub unsafe fn prepare_user_page_table_map(
 
     let mapped_addr = vaddr & !((1usize << lookup.bits_left) - 1);
     Ok(PreparedUserPageTableMap {
+        root,
         slot: lookup.slot,
         pte: Pte::next(pt_pa as u64),
         mapped_addr,
@@ -284,8 +308,7 @@ pub unsafe fn commit_user_page_table_map(prepared: PreparedUserPageTableMap) {
     unsafe {
         *prepared.slot = prepared.pte;
     }
-    crate::arch::loongarch64::csr::sfence_vma_va(prepared.mapped_addr);
-    crate::kernel::smp::remote_sfence_vma_all();
+    flush_vaddr_for_root(prepared.root, prepared.mapped_addr);
 }
 
 pub unsafe fn unmap_user_page_table(
@@ -349,8 +372,7 @@ pub unsafe fn unmap_user_frame(
     unsafe {
         *lookup.slot = Pte::NULL;
     }
-    crate::arch::loongarch64::csr::sfence_vma_va(vaddr);
-    crate::kernel::smp::remote_sfence_vma_all();
+    flush_vaddr_for_root(root, vaddr);
     Some(pa)
 }
 
