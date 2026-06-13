@@ -9,6 +9,9 @@
 
 use core::arch::asm;
 
+pub const SUPPORTS_REMOTE_IPI: bool = true;
+pub const SUPPORTS_REMOTE_TLB_FLUSH: bool = true;
+
 #[repr(usize)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SbiExtension {

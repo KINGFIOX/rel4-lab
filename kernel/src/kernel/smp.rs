@@ -326,15 +326,16 @@ pub fn wake_core(core_id: usize) {
     if core_id >= MAX_NUM_NODES || core_id == current_core_id() {
         return;
     }
-    let hart = &HARTS[core_id];
-    if !hart.online.load(Ordering::Acquire) {
+    let Some(hart_id) = remote_online_hart_id(core_id) else {
         return;
-    }
-    let hart_id = hart.hart_id.load(Ordering::Acquire);
-    if hart_id == usize::MAX {
-        return;
-    }
-    let _ = crate::arch::current::sbi::send_ipi(1, hart_id);
+    };
+    assert_remote_ipi_supported("wake_core");
+    let ret = crate::arch::current::sbi::send_ipi(1, hart_id);
+    assert!(
+        ret.error == 0,
+        "SBI send_ipi failed for core {core_id} hart {hart_id}: error={}",
+        ret.error
+    );
 }
 
 pub fn current_core_of_tcb(tcb: *const Tcb) -> Option<usize> {
@@ -389,6 +390,10 @@ fn remote_core_op(core: usize, tcb: *const Tcb, op: usize) {
     let Some(bit) = core_bit(core) else {
         return;
     };
+    if remote_online_hart_id(core).is_none() {
+        return;
+    }
+    assert_remote_ipi_supported("remote_core_op");
 
     REMOTE_STALL_TARGET_TCB.store(tcb as usize, Ordering::Release);
     REMOTE_STALL_OP.store(op, Ordering::Release);
@@ -412,6 +417,33 @@ fn core_bit(core: usize) -> Option<usize> {
     } else {
         None
     }
+}
+
+#[inline]
+fn remote_online_hart_id(core: usize) -> Option<usize> {
+    if core >= MAX_NUM_NODES || core >= MAX_BOOT_HARTS || core == current_core_id() {
+        return None;
+    }
+    let hart = &HARTS[core];
+    if !hart.online.load(Ordering::Acquire) {
+        return None;
+    }
+    let hart_id = hart.hart_id.load(Ordering::Acquire);
+    (hart_id != usize::MAX).then_some(hart_id)
+}
+
+fn assert_remote_ipi_supported(context: &str) {
+    assert!(
+        crate::arch::current::sbi::SUPPORTS_REMOTE_IPI,
+        "{context}: remote IPI requested before this architecture has an IPI backend"
+    );
+}
+
+fn assert_remote_tlb_flush_supported(context: &str) {
+    assert!(
+        crate::arch::current::sbi::SUPPORTS_REMOTE_TLB_FLUSH,
+        "{context}: remote TLB flush requested before this architecture has an RFENCE backend"
+    );
 }
 
 fn handle_remote_stall_while_waiting_for_kernel_lock() -> bool {
@@ -451,35 +483,32 @@ fn handle_remote_stall_while_waiting_for_kernel_lock() -> bool {
 }
 
 pub fn remote_sfence_vma_all() {
-    let current = current_core_id();
     let mut core = 0;
     while core < MAX_NUM_NODES {
-        if core != current {
-            let hart = &HARTS[core];
-            if hart.online.load(Ordering::Acquire) {
-                let hart_id = hart.hart_id.load(Ordering::Acquire);
-                if hart_id != usize::MAX {
-                    let _ = crate::arch::current::sbi::remote_sfence_vma(1, hart_id, 0, 0);
-                }
-            }
+        if let Some(hart_id) = remote_online_hart_id(core) {
+            assert_remote_tlb_flush_supported("remote_sfence_vma_all");
+            let ret = crate::arch::current::sbi::remote_sfence_vma(1, hart_id, 0, 0);
+            assert!(
+                ret.error == 0,
+                "SBI remote_sfence_vma failed for core {core} hart {hart_id}: error={}",
+                ret.error
+            );
         }
         core += 1;
     }
 }
 
 pub fn remote_sfence_vma_asid_all(asid: usize) {
-    let current = current_core_id();
     let mut core = 0;
     while core < MAX_NUM_NODES {
-        if core != current {
-            let hart = &HARTS[core];
-            if hart.online.load(Ordering::Acquire) {
-                let hart_id = hart.hart_id.load(Ordering::Acquire);
-                if hart_id != usize::MAX {
-                    let _ =
-                        crate::arch::current::sbi::remote_sfence_vma_asid(1, hart_id, 0, 0, asid);
-                }
-            }
+        if let Some(hart_id) = remote_online_hart_id(core) {
+            assert_remote_tlb_flush_supported("remote_sfence_vma_asid_all");
+            let ret = crate::arch::current::sbi::remote_sfence_vma_asid(1, hart_id, 0, 0, asid);
+            assert!(
+                ret.error == 0,
+                "SBI remote_sfence_vma_asid failed for core {core} hart {hart_id}: error={}",
+                ret.error
+            );
         }
         core += 1;
     }

@@ -1,5 +1,8 @@
 //! LoongArch64 placeholders for the RISC-V SBI call surface used by shared SMP code.
 
+pub const SUPPORTS_REMOTE_IPI: bool = false;
+pub const SUPPORTS_REMOTE_TLB_FLUSH: bool = false;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct SbiRet {
     pub error: isize,
