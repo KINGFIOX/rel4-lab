@@ -1,4 +1,5 @@
 use crate::allocator::Allocator;
+use crate::arch::current as arch;
 use crate::child::{
     clear_process_mappings, clone_address_space, clone_page_count, copy_to_child, create_child,
     destroy_child_objects, frame_pool_available, mapping_slots_available, read_user_context,
@@ -76,8 +77,8 @@ pub(crate) fn sys_fork(
     clone_address_space(alloc, &parent, &child);
 
     let mut ctx = read_user_context(parent.tcb);
-    ctx[0] = mrs[0].wrapping_add(4);
-    ctx[16] = 0;
+    arch::set_user_context_pc(&mut ctx, arch::resumed_fault_pc(mrs));
+    arch::set_user_context_return_value(&mut ctx, 0);
     write_user_context(child.tcb, &ctx, true);
     procs[slot] = child;
 
@@ -228,13 +229,17 @@ fn reply_waiting_parent(
         }
 
         let mut reply_mrs = parent.wait_reply_mrs;
-        reply_mrs[3] = ret as u64;
+        arch::set_syscall_return_value(&mut reply_mrs, ret as u64);
         if ret >= 0 {
             reap_process(alloc, &mut procs[child_idx]);
             yield_synthetic_init_child(procs);
         }
         unsafe {
-            sel4_send(parent.wait_reply_slot, msg_info(0, 0, 0, 11), &reply_mrs);
+            sel4_send(
+                parent.wait_reply_slot,
+                msg_info(0, 0, 0, arch::FAULT_REPLY_WORDS as u64),
+                &reply_mrs,
+            );
         }
         alloc.delete_cap_slot(parent.wait_reply_slot);
         procs[i].state = PROC_RUNNABLE;

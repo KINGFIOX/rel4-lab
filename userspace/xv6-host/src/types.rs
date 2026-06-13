@@ -1,3 +1,4 @@
+use crate::arch::current as arch;
 use crate::consts::{MAX_FD, MAX_OPEN_FILES, MAX_PATH_BYTES, PROC_UNUSED};
 
 pub(crate) use sel4_user::BootInfo;
@@ -16,7 +17,7 @@ pub(crate) struct Mapping {
 
 pub(crate) enum SyscallResult {
     Reply(i64),
-    ReplyFrame([u64; 11]),
+    ReplyFrame(arch::FaultReplyFrame),
     Block,
     Stop,
 }
@@ -48,16 +49,16 @@ pub(crate) struct TaskStruct {
     pub(crate) fd_serial: [bool; MAX_FD],
     pub(crate) wait_status_ptr: u64,
     pub(crate) wait_reply_slot: u64,
-    pub(crate) wait_reply_mrs: [u64; 11],
+    pub(crate) wait_reply_mrs: arch::FaultReplyFrame,
     pub(crate) vfs_reply_slot: u64,
-    pub(crate) vfs_reply_mrs: [u64; 11],
+    pub(crate) vfs_reply_mrs: arch::FaultReplyFrame,
     pub(crate) vfs_fd: usize,
     pub(crate) vfs_buf: u64,
     pub(crate) vfs_len: usize,
     pub(crate) vfs_done: usize,
     pub(crate) sleep_deadline: u64,
     pub(crate) sleep_reply_slot: u64,
-    pub(crate) sleep_reply_mrs: [u64; 11],
+    pub(crate) sleep_reply_mrs: arch::FaultReplyFrame,
     pub(crate) deferred_reply_slot: u64,
     pub(crate) deferred_mrs: [u64; 64],
 }
@@ -94,16 +95,16 @@ impl TaskStruct {
             fd_serial: [false; MAX_FD],
             wait_status_ptr: 0,
             wait_reply_slot: 0,
-            wait_reply_mrs: [0; 11],
+            wait_reply_mrs: [0; arch::FAULT_REPLY_WORDS],
             vfs_reply_slot: 0,
-            vfs_reply_mrs: [0; 11],
+            vfs_reply_mrs: [0; arch::FAULT_REPLY_WORDS],
             vfs_fd: 0,
             vfs_buf: 0,
             vfs_len: 0,
             vfs_done: 0,
             sleep_deadline: 0,
             sleep_reply_slot: 0,
-            sleep_reply_mrs: [0; 11],
+            sleep_reply_mrs: [0; arch::FAULT_REPLY_WORDS],
             deferred_reply_slot: 0,
             deferred_mrs: [0; 64],
         }

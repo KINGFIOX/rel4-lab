@@ -1,6 +1,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::allocator::Allocator;
+use crate::arch::current as arch;
 use crate::consts::*;
 use crate::exec_syscalls::sys_exec;
 use crate::fs_syscalls::{
@@ -21,7 +22,7 @@ pub(crate) use crate::vfs::{
 
 pub(crate) fn should_defer_vfs_syscall(_child: &crate::types::TaskStruct, mrs: &[u64; 64]) -> bool {
     matches!(
-        Xv6Syscall::from_raw(mrs[10]),
+        Xv6Syscall::from_raw(arch::syscall_number(mrs)),
         Some(
             Xv6Syscall::Fork
                 | Xv6Syscall::Exit
@@ -59,10 +60,10 @@ pub(crate) fn handle_xv6_syscall(
     proc_idx: usize,
     mrs: &[u64; 64],
 ) -> SyscallResult {
-    let sysno = Xv6Syscall::from_raw(mrs[10]);
-    let a0 = mrs[3];
-    let a1 = mrs[4];
-    let a2 = mrs[5];
+    let sysno = Xv6Syscall::from_raw(arch::syscall_number(mrs));
+    let a0 = arch::syscall_arg(mrs, 0);
+    let a1 = arch::syscall_arg(mrs, 1);
+    let a2 = arch::syscall_arg(mrs, 2);
 
     let ret = match sysno {
         Some(Xv6Syscall::Fork) => {
@@ -131,10 +132,10 @@ pub(crate) fn handle_xv6_fault(
     mrs: &[u64; 64],
 ) -> SyscallResult {
     if label == FAULT_VM_FAULT {
-        let fault_addr = mrs[1];
-        let fsr = mrs[3];
+        let fault_addr = arch::vm_fault_addr(mrs);
+        let fsr = arch::vm_fault_status(mrs);
         if handle_lazy_page_fault(alloc, &mut procs[proc_idx], fault_addr, fsr) {
-            return SyscallResult::ReplyFrame([0; 11]);
+            return SyscallResult::ReplyFrame([0; arch::FAULT_REPLY_WORDS]);
         }
         warn!(
             "xv6-host: unhandled VM fault pid={} addr={:#x} fsr={} heap_start={:#x} brk={:#x} limit={:#x}",

@@ -1,4 +1,5 @@
 use crate::allocator::Allocator;
+use crate::arch::current as arch;
 use crate::consts::*;
 use crate::types::{SyscallResult, TaskStruct};
 use crate::vfs::{resume_vfs_waiter_async, start_vfs_read_request, start_vfs_write_request};
@@ -76,9 +77,13 @@ pub(crate) fn pump_sleep_waiters(
             continue;
         }
         let mut reply_mrs = child.sleep_reply_mrs;
-        reply_mrs[3] = 0;
+        arch::set_syscall_return_value(&mut reply_mrs, 0);
         unsafe {
-            sel4_send(child.sleep_reply_slot, msg_info(0, 0, 0, 11), &reply_mrs);
+            sel4_send(
+                child.sleep_reply_slot,
+                msg_info(0, 0, 0, arch::FAULT_REPLY_WORDS as u64),
+                &reply_mrs,
+            );
         }
         alloc.delete_cap_slot(child.sleep_reply_slot);
         child.state = PROC_RUNNABLE;
@@ -101,7 +106,10 @@ pub(crate) fn drop_blocked_reply_caps(alloc: &mut Allocator, child: &mut TaskStr
     }
 }
 
-pub(crate) fn save_blocked_reply(alloc: &mut Allocator, mrs: &[u64; 64]) -> (u64, [u64; 11]) {
+pub(crate) fn save_blocked_reply(
+    alloc: &mut Allocator,
+    mrs: &[u64; 64],
+) -> (u64, arch::FaultReplyFrame) {
     let reply_slot = alloc.alloc_slot();
     call_checked(
         ROOT_CNODE,
@@ -109,16 +117,14 @@ pub(crate) fn save_blocked_reply(alloc: &mut Allocator, mrs: &[u64; 64]) -> (u64
         &[],
         &[reply_slot, ROOT_CNODE_DEPTH],
     );
-    let mut reply_mrs = [0u64; 11];
-    reply_mrs.copy_from_slice(&mrs[..11]);
-    reply_mrs[0] = mrs[0].wrapping_add(4);
+    let reply_mrs = arch::syscall_reply_frame(mrs);
     (reply_slot, reply_mrs)
 }
 
 pub(crate) fn clear_wait_block(child: &mut TaskStruct) {
     child.wait_status_ptr = 0;
     child.wait_reply_slot = 0;
-    child.wait_reply_mrs = [0; 11];
+    child.wait_reply_mrs = [0; arch::FAULT_REPLY_WORDS];
 }
 
 fn pump_vfs_readers(alloc: &mut Allocator, procs: &mut [TaskStruct; MAX_PROCS]) -> bool {
@@ -155,9 +161,13 @@ fn pump_vfs_writers(alloc: &mut Allocator, procs: &mut [TaskStruct; MAX_PROCS]) 
 
 fn reply_vfs_waiter(alloc: &mut Allocator, child: &mut TaskStruct, ret: i64) {
     let mut reply_mrs = child.vfs_reply_mrs;
-    reply_mrs[3] = ret as u64;
+    arch::set_syscall_return_value(&mut reply_mrs, ret as u64);
     unsafe {
-        sel4_send(child.vfs_reply_slot, msg_info(0, 0, 0, 11), &reply_mrs);
+        sel4_send(
+            child.vfs_reply_slot,
+            msg_info(0, 0, 0, arch::FAULT_REPLY_WORDS as u64),
+            &reply_mrs,
+        );
     }
     alloc.delete_cap_slot(child.vfs_reply_slot);
     child.state = PROC_RUNNABLE;
@@ -166,7 +176,7 @@ fn reply_vfs_waiter(alloc: &mut Allocator, child: &mut TaskStruct, ret: i64) {
 
 fn clear_vfs_block(child: &mut TaskStruct) {
     child.vfs_reply_slot = 0;
-    child.vfs_reply_mrs = [0; 11];
+    child.vfs_reply_mrs = [0; arch::FAULT_REPLY_WORDS];
     child.vfs_fd = 0;
     child.vfs_buf = 0;
     child.vfs_len = 0;
@@ -176,5 +186,5 @@ fn clear_vfs_block(child: &mut TaskStruct) {
 fn clear_sleep_block(child: &mut TaskStruct) {
     child.sleep_deadline = 0;
     child.sleep_reply_slot = 0;
-    child.sleep_reply_mrs = [0; 11];
+    child.sleep_reply_mrs = [0; arch::FAULT_REPLY_WORDS];
 }

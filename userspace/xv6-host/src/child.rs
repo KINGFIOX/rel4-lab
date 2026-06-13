@@ -3,6 +3,7 @@ use core::cmp::min;
 use core::ptr;
 
 use crate::allocator::Allocator;
+use crate::arch::current as arch;
 use crate::consts::*;
 use crate::types::{Mapping, TaskStruct};
 use crate::util::*;
@@ -227,16 +228,16 @@ pub(crate) fn create_child_from_untyped(
         fd_serial: [false; MAX_FD],
         wait_status_ptr: 0,
         wait_reply_slot: 0,
-        wait_reply_mrs: [0; 11],
+        wait_reply_mrs: [0; arch::FAULT_REPLY_WORDS],
         vfs_reply_slot: 0,
-        vfs_reply_mrs: [0; 11],
+        vfs_reply_mrs: [0; arch::FAULT_REPLY_WORDS],
         vfs_fd: 0,
         vfs_buf: 0,
         vfs_len: 0,
         vfs_done: 0,
         sleep_deadline: 0,
         sleep_reply_slot: 0,
-        sleep_reply_mrs: [0; 11],
+        sleep_reply_mrs: [0; arch::FAULT_REPLY_WORDS],
         deferred_reply_slot: 0,
         deferred_mrs: [0; 64],
     }
@@ -419,11 +420,7 @@ pub(crate) fn start_child_with_a0(child: &TaskStruct, a0: u64) {
 }
 
 pub(crate) fn start_child_with_a0_a1(child: &TaskStruct, a0: u64, a1: u64) {
-    let mut ctx = [0u64; USER_CONTEXT_WORDS];
-    ctx[0] = child.entry;
-    ctx[2] = child.heap_start;
-    ctx[16] = a0;
-    ctx[17] = a1;
+    let ctx = arch::new_user_context(child.entry, child.heap_start, a0, a1);
     write_user_context(child.tcb, &ctx, true);
 }
 
@@ -811,7 +808,7 @@ pub(crate) fn clone_page_count(parent: &TaskStruct) -> usize {
     count
 }
 
-pub(crate) const USER_CONTEXT_WORDS: usize = 32;
+pub(crate) const USER_CONTEXT_WORDS: usize = arch::USER_CONTEXT_WORDS;
 
 pub(crate) fn read_user_context(tcb: u64) -> [u64; USER_CONTEXT_WORDS] {
     let reply = unsafe {

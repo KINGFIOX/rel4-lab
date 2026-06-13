@@ -1,6 +1,7 @@
 use crate::allocator::Allocator;
+use crate::arch::current as arch;
 use crate::child::{
-    USER_CONTEXT_WORDS, copy_cstr_from_child, copy_from_child, copy_to_child, load_elf, map_stack,
+    copy_cstr_from_child, copy_from_child, copy_to_child, load_elf, map_stack,
     reset_process_mappings, write_user_context,
 };
 use crate::consts::{MAX_EXEC_ARG_LEN, MAX_EXEC_ARGS};
@@ -37,19 +38,10 @@ pub(crate) fn sys_exec(
         return SyscallResult::Reply(-1);
     };
 
-    let mut ctx = [0u64; USER_CONTEXT_WORDS];
-    ctx[0] = child.entry;
-    ctx[2] = sp;
-    ctx[16] = argc as u64;
-    ctx[17] = argv_va;
+    let ctx = arch::new_user_context(child.entry, sp, argc as u64, argv_va);
     write_user_context(child.tcb, &ctx, false);
 
-    let mut reply = [0u64; 11];
-    reply[0] = child.entry;
-    reply[1] = sp;
-    reply[2] = 0;
-    reply[3] = argc as u64;
-    reply[4] = argv_va;
+    let reply = arch::exec_reply_frame(child.entry, sp, argc as u64, argv_va);
     info!("xv6-host: exec {} pid={}", LogBytes(name), child.pid);
     SyscallResult::ReplyFrame(reply)
 }

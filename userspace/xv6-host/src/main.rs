@@ -9,6 +9,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 mod allocator;
+mod arch;
 mod child;
 mod consts;
 mod exec_syscalls;
@@ -21,6 +22,7 @@ mod util;
 mod vfs;
 mod xv6;
 
+use crate::arch::current as host_arch;
 use allocator::Allocator;
 use child::{
     create_child, create_child_from_untyped, frame_paddr, load_elf, load_payload,
@@ -118,8 +120,8 @@ fn run(bi_ptr: *const BootInfo) -> ! {
 
     info!("xv6-host: waiting for fault IPC");
     let mut reply_pending = false;
-    let mut reply_info = msg_info(0, 0, 0, 11);
-    let mut reply_mrs = [0u64; 11];
+    let mut reply_info = msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64);
+    let mut reply_mrs = [0u64; host_arch::FAULT_REPLY_WORDS];
     loop {
         let msg = if reply_pending {
             reply_pending = false;
@@ -175,14 +177,13 @@ fn run(bi_ptr: *const BootInfo) -> ! {
 
         match result {
             SyscallResult::Reply(ret) => {
-                reply_info = msg_info(0, 0, 0, 11);
-                reply_mrs = msg.mrs[..11].try_into().unwrap_or([0; 11]);
-                reply_mrs[0] = msg.mrs[0].wrapping_add(4);
-                reply_mrs[3] = ret as u64;
+                reply_info = msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64);
+                reply_mrs = host_arch::syscall_reply_frame(&msg.mrs);
+                host_arch::set_syscall_return_value(&mut reply_mrs, ret as u64);
                 reply_pending = true;
             }
             SyscallResult::ReplyFrame(frame) => {
-                reply_info = msg_info(0, 0, 0, 11);
+                reply_info = msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64);
                 reply_mrs = frame;
                 reply_pending = true;
             }
@@ -191,7 +192,7 @@ fn run(bi_ptr: *const BootInfo) -> ! {
             }
             SyscallResult::Stop => {
                 reply_info = msg_info(1, 0, 0, 0);
-                reply_mrs = [0; 11];
+                reply_mrs = [0; host_arch::FAULT_REPLY_WORDS];
                 reply_pending = true;
             }
         }
@@ -229,19 +230,25 @@ fn pump_deferred_vfs_syscalls(alloc: &mut Allocator, procs: &mut [TaskStruct; MA
             match result {
                 SyscallResult::Reply(ret) => {
                     xv6::use_deferred_reply_slot(0);
-                    let mut reply_mrs = [0u64; 11];
-                    reply_mrs.copy_from_slice(&mrs[..11]);
-                    reply_mrs[0] = mrs[0].wrapping_add(4);
-                    reply_mrs[3] = ret as u64;
+                    let mut reply_mrs = host_arch::syscall_reply_frame(&mrs);
+                    host_arch::set_syscall_return_value(&mut reply_mrs, ret as u64);
                     unsafe {
-                        sel4_user::sel4_send(reply_slot, msg_info(0, 0, 0, 11), &reply_mrs);
+                        sel4_user::sel4_send(
+                            reply_slot,
+                            msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64),
+                            &reply_mrs,
+                        );
                     }
                     alloc.delete_cap_slot(reply_slot);
                 }
                 SyscallResult::ReplyFrame(frame) => {
                     xv6::use_deferred_reply_slot(0);
                     unsafe {
-                        sel4_user::sel4_send(reply_slot, msg_info(0, 0, 0, 11), &frame);
+                        sel4_user::sel4_send(
+                            reply_slot,
+                            msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64),
+                            &frame,
+                        );
                     }
                     alloc.delete_cap_slot(reply_slot);
                 }
