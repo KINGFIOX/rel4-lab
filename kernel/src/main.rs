@@ -16,11 +16,6 @@
 extern crate core;
 
 #[cfg(target_arch = "loongarch64")]
-compile_error!(
-    "LoongArch64 kernel backend is not implemented yet; add the seL4 LoongArch64 ABI/elfloader port before building this target"
-);
-
-#[cfg(target_arch = "loongarch64")]
 #[panic_handler]
 fn loongarch64_unimplemented_panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
@@ -34,7 +29,7 @@ mod print;
 mod abi;
 #[cfg(target_arch = "riscv64")]
 mod api;
-#[cfg(target_arch = "riscv64")]
+#[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
 mod arch;
 #[cfg(target_arch = "riscv64")]
 mod kernel;
