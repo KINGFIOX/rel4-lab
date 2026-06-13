@@ -95,3 +95,36 @@ pub fn ibar() {
 pub fn dbar() {
     unsafe { asm!("dbar 0", options(nostack, nomem)) };
 }
+
+#[inline]
+pub fn sscratch() -> usize {
+    0
+}
+
+#[inline]
+pub fn set_sscratch(_value: usize) {}
+
+#[inline]
+pub fn sfence_vma_all() {
+    dbar();
+}
+
+#[inline]
+pub fn sfence_vma_va(_vaddr: usize) {
+    dbar();
+}
+
+#[inline]
+pub fn sfence_vma_asid(_asid: usize) {
+    dbar();
+}
+
+#[inline]
+pub fn fence_i() {
+    ibar();
+}
+
+#[inline]
+pub fn time() -> usize {
+    0
+}

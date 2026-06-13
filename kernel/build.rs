@@ -3,8 +3,13 @@ use std::path::PathBuf;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let linker_script = manifest_dir.join("linker.ld");
+    let target = env::var("TARGET").unwrap();
+    let linker_script = match target.as_str() {
+        "loongarch64-unknown-none" => manifest_dir.join("linker-loongarch64.ld"),
+        _ => manifest_dir.join("linker.ld"),
+    };
 
+    println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=RUST_LOG");
     println!("cargo:rerun-if-env-changed=SMP");
     println!("cargo:rerun-if-env-changed=NUM_NODES");

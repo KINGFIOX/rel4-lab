@@ -1,13 +1,16 @@
-//! LoongArch64 kernel backend placeholder.
+//! LoongArch64 kernel backend.
 //!
-//! The repository tooling can now select `ARCH=loongarch64`, but the kernel
-//! backend intentionally remains blocked until the matching seL4 LoongArch64
-//! ABI, libsel4 headers, and elfloader platform are available. Implementing
-//! this module requires the full boot, trap, timer, IRQ, TLB, page-table, and
-//! user-context ABI surface to be derived from that seL4 port.
+//! The backend is being brought up incrementally against QEMU `virt`. The boot
+//! entry and public arch interfaces compile today; the trap, VSpace, interrupt,
+//! and timer implementations are still staging skeletons until the LoongArch
+//! seL4 port semantics are wired through.
 
 pub mod boot;
 pub mod csr;
+pub mod fpu;
 pub mod irq;
+pub mod paging;
 pub mod platform;
+pub mod sbi;
 pub mod trap;
+pub mod vspace;
