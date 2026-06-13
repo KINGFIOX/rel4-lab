@@ -1,14 +1,20 @@
 //! LoongArch64 user-context ABI skeleton.
 //!
 //! This module fixes the kernel-visible register naming and TCB register
-//! ordering, and provides the first executable user-restore path plus an early
-//! diagnostic trap vector. Syscall/fault dispatch is still staging work.
+//! ordering, and provides the first executable user-restore, trap-entry, and
+//! syscall/fault IPC path. Timer, external IRQ, and real VSpace switching are
+//! still staging work.
 
 use core::arch::global_asm;
 
-use log_crate::error;
+use log_crate::{error, warn};
 
+use crate::abi::constants::{N_TOTAL_MSG_REGISTERS, WORD_BYTES};
+use crate::abi::fault::FaultLabel;
+use crate::abi::syscall::SyscallNumber;
+use crate::abi::types::MessageInfo;
 use crate::arch::loongarch64::csr::{self, CSR_BADV, CSR_ERA, CSR_ESTAT, CSR_KS0, CSR_PRMD};
+use crate::object::cap::CapTag;
 
 /// User-mode register snapshot shape for the future LoongArch64 trap entry.
 ///
@@ -199,6 +205,11 @@ pub const PRMD_PPLV_USER: u64 = 0b11;
 pub const PRMD_PIE: u64 = 1 << 2;
 pub const USER_SSTATUS: u64 = PRMD_PPLV_USER | PRMD_PIE;
 pub const ROOTSERVER_SSTATUS: u64 = USER_SSTATUS;
+const ESTAT_ECODE_SHIFT: usize = 16;
+const ESTAT_ECODE_MASK: usize = 0x3f;
+const EXCCODE_INTERRUPT: usize = 0;
+const EXCCODE_SYSCALL: usize = 11;
+const FAULT_MR_REG_COUNT: u64 = 4;
 
 global_asm!(
     r#"
@@ -373,25 +384,495 @@ unsafe extern "C" {
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> *mut UserContext {
     let record = unsafe { LOONGARCH64_TRAP_RECORD };
-    let (pc, a0, a1, a2, a3, a7) = if uc.is_null() {
-        (0, 0, 0, 0, 0, 0)
-    } else {
-        let uc = unsafe { &*uc };
-        (
-            uc.pc,
-            uc.regs[UserRegister::A0.index()],
-            uc.regs[UserRegister::A1.index()],
-            uc.regs[UserRegister::A2.index()],
-            uc.regs[UserRegister::A3.index()],
-            uc.regs[UserRegister::A7.index()],
-        )
-    };
+    let kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
+    if kernel_lock.remote_stalled_current() {
+        return kernel_exit_after_remote_stall(kernel_lock);
+    }
+    if uc.is_null() {
+        panic!("trap entry passed a null user context");
+    }
+    let uc = unsafe { &mut *uc };
+    uc.restart_pc = uc.pc;
 
-    error!(
-        "loongarch64 trap: pc={:#x} era={:#x} prmd={:#x} estat={:#x} badv={:#x} a0={:#x} a1={:#x} a2={:#x} a3={:#x} a7={:#x}",
-        pc, record.era, record.prmd, record.estat, record.badv, a0, a1, a2, a3, a7
-    );
+    let ecode = estat_ecode(record.estat as usize);
+    match ecode {
+        EXCCODE_SYSCALL => handle_syscall(uc),
+        EXCCODE_INTERRUPT => {
+            warn!(
+                "loongarch64 interrupt before IRQ backend: estat={:#x} era={:#x}",
+                record.estat, record.era
+            );
+        }
+        _ => {
+            if !send_user_exception_fault(uc, ecode, record.badv) {
+                warn!(
+                    "loongarch64 user fault: ecode={} estat={:#x} badv={:#x} era={:#x} sp={:#x} ra={:#x}",
+                    ecode,
+                    record.estat,
+                    record.badv,
+                    record.era,
+                    uc.regs[UserRegister::Sp.index()],
+                    uc.regs[UserRegister::Ra.index()],
+                );
+                park_current_thread();
+            }
+        }
+    }
+
+    kernel_exit(uc, kernel_lock)
+}
+
+#[inline]
+fn estat_ecode(estat: usize) -> usize {
+    (estat >> ESTAT_ECODE_SHIFT) & ESTAT_ECODE_MASK
+}
+
+fn send_user_exception_fault(uc: &mut UserContext, code: usize, _badv: u64) -> bool {
+    let mut mrs = [0; 16];
+    mrs[0] = uc.pc;
+    mrs[1] = uc.regs[UserRegister::Sp.index()];
+    mrs[2] = code as u64;
+    mrs[3] = 0;
+    send_synthetic_fault_ipc(FaultLabel::UserException.raw(), 4, mrs)
+}
+
+pub fn send_cap_fault_ipc(uc: &mut UserContext, addr: u64, in_recv_phase: bool) -> bool {
+    let mut mrs = [0; 16];
+    mrs[0] = uc.restart_pc;
+    mrs[1] = addr;
+    mrs[2] = in_recv_phase as u64;
+    mrs[3] = 1;
+    mrs[4] = 0;
+    send_synthetic_fault_ipc(FaultLabel::CapFault.raw(), 5, mrs)
+}
+
+fn send_unknown_syscall_fault(uc: &mut UserContext, sysno: isize) -> bool {
+    let mut mrs = [0; 16];
+    mrs[0] = uc.restart_pc;
+    mrs[1] = uc.regs[UserRegister::Sp.index()];
+    mrs[2] = uc.regs[UserRegister::Ra.index()];
+    mrs[3] = uc.regs[UserRegister::A0.index()];
+    mrs[4] = uc.regs[UserRegister::A1.index()];
+    mrs[5] = uc.regs[UserRegister::A2.index()];
+    mrs[6] = uc.regs[UserRegister::A3.index()];
+    mrs[7] = uc.regs[UserRegister::A4.index()];
+    mrs[8] = uc.regs[UserRegister::A5.index()];
+    mrs[9] = uc.regs[UserRegister::A6.index()];
+    mrs[10] = sysno as u64;
+    send_synthetic_fault_ipc(FaultLabel::UnknownSyscall.raw(), 11, mrs)
+}
+
+fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: [u64; 16]) -> bool {
+    use crate::object::endpoint;
+    use crate::object::tcb;
+
+    let cur = tcb::current();
+    if cur.is_null() {
+        return false;
+    }
+    let handler_cap = tcb::fault_endpoint_snapshot(cur);
+    if handler_cap.tag() != Some(CapTag::Endpoint)
+        || !handler_cap.endpoint_can_send()
+        || !(handler_cap.endpoint_can_grant() || handler_cap.endpoint_can_grant_reply())
+    {
+        return false;
+    }
+    let ep = handler_cap.endpoint_ptr() as *mut endpoint::Endpoint;
+    if ep.is_null() {
+        return false;
+    }
+
+    unsafe {
+        tcb::record_fault_message(cur, label, len, mrs);
+        let receiver = {
+            let _guard = endpoint::lock_queue(ep);
+            let receiver = endpoint::pop_receiver_locked(ep);
+            if receiver.is_null() {
+                block_fault_sender_locked(
+                    cur,
+                    ep,
+                    handler_cap.endpoint_badge(),
+                    handler_cap.endpoint_can_grant(),
+                    handler_cap.endpoint_can_grant_reply(),
+                    label,
+                    len,
+                    mrs,
+                );
+            }
+            receiver
+        };
+        if receiver.is_null() {
+            return true;
+        }
+        write_fault_ipc_message(receiver, handler_cap.endpoint_badge(), label, len, &mrs);
+        finish_fault_ipc_receive(receiver, cur, handler_cap, true);
+    }
+    true
+}
+
+unsafe fn write_fault_ipc_message(
+    receiver: *mut crate::object::tcb::Tcb,
+    badge: u64,
+    label: u64,
+    len: u64,
+    mrs: &[u64; 16],
+) {
+    if receiver.is_null() {
+        return;
+    }
+    let info_word = MessageInfo::new(label, 0, 0, len).0;
+    unsafe {
+        crate::object::tcb::write_fault_ipc_message_regs(receiver, badge, info_word, mrs, len);
+    }
+
+    let copied_len = len.min(mrs.len() as u64);
+    if copied_len > FAULT_MR_REG_COUNT {
+        unsafe {
+            crate::object::tcb::write_ipc_buffer_words(
+                receiver,
+                1 + FAULT_MR_REG_COUNT as usize,
+                &mrs[FAULT_MR_REG_COUNT as usize..copied_len as usize],
+            );
+        }
+    }
+}
+
+unsafe fn finish_fault_ipc_receive(
+    receiver: *mut crate::object::tcb::Tcb,
+    fault_tcb: *mut crate::object::tcb::Tcb,
+    handler_cap: crate::object::cap::Cap,
+    can_donate: bool,
+) {
+    use crate::object::tcb;
+
+    if receiver.is_null() || fault_tcb.is_null() {
+        return;
+    }
+    unsafe {
+        let (reply_cptr, reply_kva, reply_can_grant) = tcb::start_receiver_rendezvous(receiver);
+        if crate::api::ipc::set_reply_object_for(
+            receiver,
+            reply_cptr,
+            reply_kva,
+            reply_can_grant,
+            fault_tcb,
+            handler_cap.endpoint_can_grant(),
+            can_donate,
+        ) {
+            tcb::clear_waiting_on(fault_tcb);
+        } else {
+            tcb::set_inactive(fault_tcb);
+            tcb::clear_waiting_on(fault_tcb);
+        }
+        tcb::finish_receiver_rendezvous(receiver);
+        tcb::enqueue(receiver);
+    }
+}
+
+pub(crate) fn send_timeout_fault_ipc_for(fault_tcb: *mut crate::object::tcb::Tcb) -> bool {
+    use crate::object::endpoint;
+    use crate::object::tcb;
+
+    if fault_tcb.is_null() {
+        return false;
+    }
+    let handler_cap = tcb::timeout_endpoint_snapshot(fault_tcb);
+    if handler_cap.tag() != Some(CapTag::Endpoint)
+        || !handler_cap.endpoint_can_send()
+        || !(handler_cap.endpoint_can_grant() || handler_cap.endpoint_can_grant_reply())
+    {
+        return false;
+    }
+    let ep = handler_cap.endpoint_ptr() as *mut endpoint::Endpoint;
+    if ep.is_null() {
+        return false;
+    }
+
+    let mut mrs = [0u64; 16];
+    unsafe {
+        let sc_kva = tcb::sched_context_snapshot(fault_tcb);
+        if sc_kva != 0 {
+            let (badge, consumed) =
+                crate::object::sched_context::badge_and_consume_consumed(sc_kva);
+            mrs[0] = badge;
+            mrs[1] = consumed;
+        }
+
+        tcb::record_fault_message(fault_tcb, FaultLabel::Timeout.raw(), 2, mrs);
+        let receiver = {
+            let _guard = endpoint::lock_queue(ep);
+            let receiver = endpoint::pop_receiver_locked(ep);
+            if receiver.is_null() {
+                block_fault_sender_locked(
+                    fault_tcb,
+                    ep,
+                    handler_cap.endpoint_badge(),
+                    handler_cap.endpoint_can_grant(),
+                    handler_cap.endpoint_can_grant_reply(),
+                    FaultLabel::Timeout.raw(),
+                    2,
+                    mrs,
+                );
+            }
+            receiver
+        };
+        if receiver.is_null() {
+            return true;
+        }
+
+        write_fault_ipc_message(
+            receiver,
+            handler_cap.endpoint_badge(),
+            FaultLabel::Timeout.raw(),
+            2,
+            &mrs,
+        );
+        finish_fault_ipc_receive(receiver, fault_tcb, handler_cap, false);
+    }
+    true
+}
+
+unsafe fn block_fault_sender_locked(
+    cur: *mut crate::object::tcb::Tcb,
+    ep: *mut crate::object::endpoint::Endpoint,
+    badge: u64,
+    can_grant: bool,
+    can_grant_reply: bool,
+    label: u64,
+    len: u64,
+    mrs: [u64; 16],
+) {
+    use crate::object::endpoint::{self, EpState};
+    use crate::object::tcb;
+
+    if cur.is_null() || ep.is_null() {
+        return;
+    }
+    unsafe {
+        tcb::dequeue(cur);
+        tcb::set_blocked_fault_sender(
+            cur,
+            ep as u64,
+            badge,
+            can_grant,
+            can_grant_reply,
+            label,
+            len,
+            mrs,
+        );
+        endpoint::enqueue_waiter_locked(ep, cur, EpState::Sending);
+    }
+}
+
+fn handle_syscall(uc: &mut UserContext) {
+    let raw_sysno = uc.regs[UserRegister::A7.index()] as isize;
+
+    uc.pc = uc.pc.wrapping_add(4);
+
+    match SyscallNumber::from_raw(raw_sysno) {
+        Some(SyscallNumber::DebugPutChar) => {
+            let ch = uc.regs[UserRegister::A0.index()] as u8;
+            crate::machine::console::putc(ch);
+        }
+        Some(SyscallNumber::DebugNameThread) => {
+            handle_debug_name_thread(uc);
+        }
+        Some(SyscallNumber::DebugCapIdentify) => {
+            let cptr = uc.regs[UserRegister::A0.index()];
+            let tag = match unsafe {
+                crate::api::thread::with_current(|thread| {
+                    crate::api::cspace::lookup_cap(thread, cptr)
+                })
+            } {
+                Ok((cap, _)) => cap.tag_raw(),
+                Err(_) => 0,
+            };
+            uc.regs[UserRegister::A0.index()] = tag;
+        }
+        Some(SyscallNumber::DebugHalt) => {
+            debug_halt("Debug halt syscall from user thread");
+        }
+        Some(SyscallNumber::DebugSendIpi) => {
+            debug_halt("SysDebugSendIPI: not supported on this architecture");
+        }
+        Some(SyscallNumber::DebugDumpScheduler | SyscallNumber::DebugSnapshot) => {}
+        Some(SyscallNumber::Yield) => unsafe {
+            let cur = crate::object::tcb::current();
+            if !cur.is_null() && !crate::object::sched_context::yield_tcb(cur) {
+                crate::object::tcb::rotate_to_tail(cur);
+            }
+        },
+        Some(SyscallNumber::Call) => {
+            crate::api::syscall::do_call(uc);
+        }
+        Some(SyscallNumber::Send) => {
+            crate::api::syscall::do_send(uc, false);
+        }
+        Some(SyscallNumber::NonBlockingSend) => {
+            crate::api::syscall::do_send(uc, true);
+        }
+        Some(SyscallNumber::Recv | SyscallNumber::NonBlockingRecv) => {
+            let blocking = SyscallNumber::from_raw(raw_sysno) == Some(SyscallNumber::Recv);
+            crate::api::syscall::do_recv_mcs(uc, blocking, true);
+        }
+        Some(SyscallNumber::Wait | SyscallNumber::NonBlockingWait) => {
+            let blocking = SyscallNumber::from_raw(raw_sysno) == Some(SyscallNumber::Wait);
+            crate::api::syscall::do_recv_mcs(uc, blocking, false);
+        }
+        Some(SyscallNumber::ReplyRecv) => {
+            crate::api::syscall::do_reply_recv_mcs(uc);
+        }
+        Some(SyscallNumber::NonBlockingSendRecv) => {
+            crate::api::syscall::do_nbsend_recv_mcs(uc, false);
+        }
+        Some(SyscallNumber::NonBlockingSendWait) => {
+            crate::api::syscall::do_nbsend_recv_mcs(uc, true);
+        }
+        None => {
+            if !send_unknown_syscall_fault(uc, raw_sysno) {
+                warn!(
+                    "unknown loongarch64 syscall number {} (a0={:#x} a1={:#x} a7={:#x})",
+                    raw_sysno,
+                    uc.regs[UserRegister::A0.index()],
+                    uc.regs[UserRegister::A1.index()],
+                    uc.regs[UserRegister::A7.index()]
+                );
+                park_current_thread();
+            }
+        }
+    }
+}
+
+fn handle_debug_name_thread(uc: &UserContext) {
+    let cptr = uc.regs[UserRegister::A0.index()];
+    let cap = match unsafe {
+        crate::api::thread::with_current(|thread| crate::api::cspace::lookup_cap(thread, cptr))
+    } {
+        Ok((cap, _)) => cap,
+        Err(_) => debug_halt("SysDebugNameThread: cap is not a TCB, halting"),
+    };
+    if cap.tag() != Some(CapTag::Thread) {
+        debug_halt("SysDebugNameThread: cap is not a TCB, halting");
+    }
+    let target = crate::object::tcb::from_cap(cap);
+    if target.is_null() {
+        debug_halt("SysDebugNameThread: cap is not a TCB, halting");
+    }
+
+    let ipc_buffer = current_ipc_buffer_kva_for_debug();
+    if ipc_buffer == 0 {
+        debug_halt("SysDebugNameThread: Failed to lookup IPC buffer, halting");
+    }
+    let name = unsafe { (ipc_buffer as *const u8).add(WORD_BYTES) };
+    let max_len = N_TOTAL_MSG_REGISTERS * WORD_BYTES;
+    let mut len = 0;
+    while len < max_len {
+        if unsafe { *name.add(len) } == 0 {
+            unsafe { crate::object::tcb::set_debug_name(target, name, len) };
+            return;
+        }
+        len += 1;
+    }
+    debug_halt("SysDebugNameThread: Name too long, halting");
+}
+
+fn current_ipc_buffer_kva_for_debug() -> u64 {
+    let cur = crate::object::tcb::current();
+    if !cur.is_null() {
+        return crate::object::tcb::ipc_buffer_kva_snapshot(cur);
+    }
+    unsafe { crate::api::thread::with_current(|thread| thread.ipc_buffer_kva as u64) }
+}
+
+fn debug_halt(message: &str) -> ! {
+    error!("{message}");
     crate::arch::loongarch64::boot::halt()
+}
+
+fn kernel_exit(
+    uc: &mut UserContext,
+    kernel_lock: crate::kernel::smp::KernelLockGuard,
+) -> *mut UserContext {
+    use crate::object::tcb;
+    let cur = tcb::current();
+
+    loop {
+        unsafe {
+            tcb::enqueue_if_migrated_from_current_core(cur);
+            if tcb::is_runnable_on_current_core(cur) {
+                tcb::enqueue(cur);
+            }
+        }
+
+        let next = tcb::schedule();
+        if !next.is_null() {
+            if next != cur {
+                tcb::set_current(next);
+                let ctx = unsafe { tcb::prepare_for_user_restore(next) };
+                switch_to_tcb_vspace(next);
+                return finish_kernel_exit(ctx, kernel_lock);
+            }
+            unsafe { tcb::prepare_for_user_restore(cur) };
+            return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
+        }
+
+        let cur_runnable = if !cur.is_null() {
+            unsafe { tcb::is_runnable_on_current_core(cur) }
+        } else {
+            false
+        };
+        if cur_runnable {
+            unsafe { tcb::prepare_for_user_restore(cur) };
+            return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
+        }
+
+        crate::kernel::smp::clear_current_state();
+        switch_to_kernel_vspace();
+        drop(kernel_lock);
+        idle_scheduler_loop();
+    }
+}
+
+fn kernel_exit_after_remote_stall(
+    kernel_lock: crate::kernel::smp::KernelLockGuard,
+) -> *mut UserContext {
+    use crate::object::tcb;
+
+    loop {
+        let next = tcb::schedule();
+        if !next.is_null() {
+            tcb::set_current(next);
+            let ctx = unsafe { tcb::prepare_for_user_restore(next) };
+            switch_to_tcb_vspace(next);
+            return finish_kernel_exit(ctx, kernel_lock);
+        }
+
+        crate::kernel::smp::clear_current_state();
+        switch_to_kernel_vspace();
+        drop(kernel_lock);
+        idle_scheduler_loop();
+    }
+}
+
+#[inline]
+fn finish_kernel_exit(
+    ctx: *mut UserContext,
+    kernel_lock: crate::kernel::smp::KernelLockGuard,
+) -> *mut UserContext {
+    kernel_lock.defer_unlock_for_user_restore();
+    ctx
+}
+
+fn switch_to_kernel_vspace() {}
+
+// The current LoongArch VSpace backend is still identity/no-op staging. Keep
+// the scheduler hook explicit so real ASID/root switching can land here.
+fn switch_to_tcb_vspace(_tcb: *const crate::object::tcb::Tcb) {}
+
+fn park_current_thread() -> ! {
+    loop {
+        unsafe { core::arch::asm!("idle 0", options(nomem, nostack)) };
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -428,13 +909,28 @@ pub unsafe fn restore_user_context_with_kernel_lock(
 }
 
 pub fn idle_scheduler_loop() -> ! {
-    loop {}
-}
-
-pub fn send_cap_fault_ipc(_uc: &mut UserContext, _addr: u64, _in_recv_phase: bool) -> bool {
-    false
-}
-
-pub fn send_timeout_fault_ipc_for<T>(_fault_tcb: *mut T) -> bool {
-    false
+    loop {
+        let next_context = {
+            let kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
+            let _ = service_due_timer_interrupts();
+            let next = crate::object::tcb::schedule();
+            if next.is_null() {
+                crate::kernel::smp::clear_current_state();
+                switch_to_kernel_vspace();
+                None
+            } else {
+                crate::object::tcb::set_current(next);
+                let ctx = unsafe { crate::object::tcb::prepare_for_user_restore(next) };
+                switch_to_tcb_vspace(next);
+                Some((ctx, kernel_lock))
+            }
+        };
+        if let Some((ctx, kernel_lock)) = next_context {
+            kernel_lock.defer_unlock_for_user_restore();
+            unsafe { restore_user_context_locked(ctx) };
+        }
+        unsafe {
+            core::arch::asm!("idle 0", options(nomem, nostack));
+        }
+    }
 }
