@@ -35,8 +35,8 @@ use consts::{
     UART_SERVER_PID, VFS_SERVER_ELF, VFS_SERVER_PID, VIRTIO_BLK_SECTOR_SIZE, VfsOp,
     XV6_ABI_VERSION, XV6_DISK_COMPLETION_NTFN_CPTR, XV6_DISK_COMPLETION_RING_VADDR,
     XV6_DISK_ENDPOINT_CPTR, XV6_DISK_SHARED_BUFFER_PAGES, XV6_DISK_SHARED_BUFFER_VADDR,
-    XV6_HOST_REPLY_ENDPOINT_CPTR, XV6_UART_ENDPOINT_CPTR, XV6_UART_MMIO_VADDR,
-    XV6_UART_REPLY_ENDPOINT_CPTR, XV6_VIRTIO_DMA_VADDR, XV6_VIRTIO_MMIO_VADDR,
+    XV6_HOST_REPLY_ENDPOINT_CPTR, XV6_UART_ENDPOINT_CPTR, XV6_UART_MMIO_FRAME_VADDR,
+    XV6_UART_REPLY_ENDPOINT_CPTR, XV6_VIRTIO_DMA_VADDR, XV6_VIRTIO_MMIO_FRAME_VADDR,
     XV6_XV6FS_ENDPOINT_CPTR, XV6FS_SERVER_ELF, XV6FS_SERVER_PID, Xv6Badge, Xv6Protocol, Xv6Status,
 };
 use consts::{
@@ -304,8 +304,8 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
         &[disk_irq_signal_cap],
         &[],
     );
-    let uart_mmio_frame = alloc.retype_device_4k_at(consts::UART0_MMIO_BASE);
-    let virtio_mmio_frame = alloc.retype_device_4k_at(consts::VIRTIO_MMIO_BASE);
+    let uart_mmio_frame = alloc.retype_device_4k_at(consts::UART0_MMIO_FRAME_BASE);
+    let virtio_mmio_frame = alloc.retype_device_4k_at(consts::VIRTIO_MMIO_FRAME_BASE);
     let virtio_dma_frame = alloc.retype_one(OBJ_4K, 0);
     let virtio_dma_paddr = frame_paddr(virtio_dma_frame);
     let mut disk_shared_frames = [0u64; XV6_DISK_SHARED_BUFFER_PAGES];
@@ -319,7 +319,7 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
     let disk_completion_ring_frame = alloc.retype_one(OBJ_4K, 0);
     let shared_maps = shared_frame_maps(&disk_shared_frames);
     let disk_maps = [
-        (virtio_mmio_frame, XV6_VIRTIO_MMIO_VADDR, true, false),
+        (virtio_mmio_frame, XV6_VIRTIO_MMIO_FRAME_VADDR, true, false),
         (virtio_dma_frame, XV6_VIRTIO_DMA_VADDR, true, false),
         shared_maps[0],
         shared_maps[1],
@@ -364,7 +364,7 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
             cap_rights(false, false, false, true),
             Xv6Badge::UartReply.raw(),
         )],
-        &[(uart_mmio_frame, XV6_UART_MMIO_VADDR, true, false)],
+        &[(uart_mmio_frame, XV6_UART_MMIO_FRAME_VADDR, true, false)],
         0,
         0,
     );

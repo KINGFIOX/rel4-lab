@@ -4,7 +4,7 @@ use crate::consts::{
     CHILD_SCHED_BUDGET_US, LABEL_CNODE_COPY, LABEL_CNODE_DELETE, LABEL_CNODE_MINT,
     LABEL_CNODE_REVOKE, LABEL_SCHED_CONTROL_CONFIGURE_FLAGS, LABEL_UNTYPED_RETYPE, MAX_PROCS,
     MAX_RECYCLED_SLOTS, OBJ_UNTYPED, PROCESS_UNTYPED_BITS, PROCESS_UNTYPED_PARENT_BITS, ROOT_CNODE,
-    ROOT_CNODE_DEPTH, VIRTIO_MMIO_BASE, VIRTIO_MMIO_SIZE,
+    ROOT_CNODE_DEPTH, XV6_DEVICE_MMIO_BASE, XV6_DEVICE_MMIO_SIZE,
 };
 use crate::types::BootInfo;
 use crate::util::{halt_loop, warn};
@@ -78,8 +78,8 @@ impl Allocator {
             }
             if desc.is_device != 0 {
                 let top = desc.paddr.saturating_add(1u64 << desc.size_bits);
-                if desc.paddr <= VIRTIO_MMIO_BASE
-                    && top >= VIRTIO_MMIO_BASE.saturating_add(VIRTIO_MMIO_SIZE)
+                if desc.paddr <= XV6_DEVICE_MMIO_BASE
+                    && top >= XV6_DEVICE_MMIO_BASE.saturating_add(XV6_DEVICE_MMIO_SIZE)
                 {
                     device_untyped_slot = slot;
                     device_cursor_pa = desc.paddr;
@@ -98,8 +98,8 @@ impl Allocator {
         }
         if device_untyped_slot == 0 {
             warn!(
-                "xv6-host: no virtio-mmio device untyped for pa={:#x}",
-                VIRTIO_MMIO_BASE
+                "xv6-host: no device MMIO untyped for pa={:#x}",
+                XV6_DEVICE_MMIO_BASE
             );
             halt_loop();
         }

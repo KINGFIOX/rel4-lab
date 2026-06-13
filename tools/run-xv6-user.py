@@ -187,16 +187,7 @@ def main(argv: list[str]) -> int:
         "pci-serial,chardev=kerneldebug,addr=1",
     ]
     if attach_fs_img:
-        qemu_cmd.extend(
-            [
-                "-global",
-                "virtio-mmio.force-legacy=false",
-                "-drive",
-                f"file={xv6_fs_img},if=none,format=raw,id=xv6fs",
-                "-device",
-                "virtio-blk-device,drive=xv6fs,bus=virtio-mmio-bus.0",
-            ]
-        )
+        qemu_cmd.extend(target.xv6_fs_device_args(xv6_fs_img))
 
     kernel_debug_log_file.parent.mkdir(parents=True, exist_ok=True)
     kernel_debug_log_file.unlink(missing_ok=True)

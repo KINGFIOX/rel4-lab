@@ -2,6 +2,10 @@
 #![deny(unsafe_attr_outside_unsafe)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod platform;
+pub use platform::current::*;
+pub use platform::{PciHost, UartMmio, VirtioMmio, VirtioTransport};
+
 pub const XV6_ABI_VERSION: u64 = 1;
 
 /// xv6 user syscall numbers carried in the UnknownSyscall fault register set.
@@ -388,16 +392,9 @@ pub const XV6_FS_NDIRECT: usize = 12;
 pub const XV6_FS_NINDIRECT: usize = FS_BLOCK_SIZE / core::mem::size_of::<u32>();
 pub const XV6_FS_MAXFILE_BLOCKS: usize = XV6_FS_NDIRECT + XV6_FS_NINDIRECT;
 
-pub const VIRTIO_MMIO_BASE: u64 = 0x1000_1000;
-pub const VIRTIO_MMIO_SIZE: u64 = 0x1000;
-pub const VIRTIO0_IRQ: u64 = 1;
-pub const UART0_MMIO_BASE: u64 = 0x1000_0000;
-pub const UART0_MMIO_SIZE: u64 = 0x1000;
-pub const XV6_VIRTIO_MMIO_VADDR: u64 = 0x5000_0000;
 pub const XV6_VIRTIO_DMA_VADDR: u64 = 0x5000_1000;
 pub const XV6_DISK_SHARED_BUFFER_VADDR: u64 = 0x5000_2000;
 pub const XV6_DISK_COMPLETION_RING_VADDR: u64 = 0x5000_3000;
-pub const XV6_UART_MMIO_VADDR: u64 = 0x5000_4000;
 pub const XV6_DISK_COMPLETION_RING_ENTRIES: usize = 32;
 pub const XV6_DISK_COMPLETION_ENTRY_WORDS: usize = 5;
 

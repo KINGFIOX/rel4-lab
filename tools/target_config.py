@@ -27,6 +27,7 @@ class TargetConfig:
     xv6_toolprefixes: tuple[str, ...]
     xv6_march: str
     xv6_mabi: str
+    xv6_disk_transport: str
 
     def qemu_base_cmd(self, smp: str, memory: str) -> list[str]:
         cmd = [
@@ -48,6 +49,27 @@ class TargetConfig:
             ]
         )
         return cmd
+
+    def xv6_fs_device_args(self, fs_img: Path) -> list[str]:
+        drive_args = [
+            "-drive",
+            f"file={fs_img},if=none,format=raw,id=xv6fs",
+        ]
+        if self.xv6_disk_transport == "virtio-mmio":
+            return [
+                "-global",
+                "virtio-mmio.force-legacy=false",
+                *drive_args,
+                "-device",
+                "virtio-blk-device,drive=xv6fs,bus=virtio-mmio-bus.0",
+            ]
+        if self.xv6_disk_transport == "virtio-pci":
+            return [
+                *drive_args,
+                "-device",
+                "virtio-blk-pci,drive=xv6fs,disable-legacy=on,disable-modern=off",
+            ]
+        die("target", f"unsupported xv6 disk transport: {self.xv6_disk_transport}")
 
     def require_qemu(self, prefix: str) -> None:
         if not command_exists(self.qemu):
@@ -108,6 +130,7 @@ TARGETS: dict[str, TargetConfig] = {
         ),
         xv6_march="rv64gc",
         xv6_mabi="lp64",
+        xv6_disk_transport="virtio-mmio",
     ),
     "loongarch64": TargetConfig(
         name="loongarch64",
@@ -130,6 +153,7 @@ TARGETS: dict[str, TargetConfig] = {
         ),
         xv6_march="loongarch64",
         xv6_mabi="lp64d",
+        xv6_disk_transport="virtio-pci",
     ),
 }
 

@@ -123,16 +123,7 @@ def qemu_command(packed_image: Path, xv6_fs_img: Path | None, kernel_debug_log_f
         "pci-serial,chardev=kerneldebug,addr=1",
     ]
     if xv6_fs_img is not None:
-        cmd.extend(
-            [
-                "-global",
-                "virtio-mmio.force-legacy=false",
-                "-drive",
-                f"file={xv6_fs_img},if=none,format=raw,id=xv6fs",
-                "-device",
-                "virtio-blk-device,drive=xv6fs,bus=virtio-mmio-bus.0",
-            ]
-        )
+        cmd.extend(target.xv6_fs_device_args(xv6_fs_img))
     return cmd
 
 
