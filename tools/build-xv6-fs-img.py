@@ -38,12 +38,12 @@ def main() -> int:
     march = getenv("XV6_USER_MARCH", target.xv6_march)
     mabi = getenv("XV6_USER_MABI", target.xv6_mabi)
 
-    require_dir(PREFIX, xv6_dir, f"XV6_DIR not found: {xv6_dir}")
-    xv6_dir = prepare_xv6_dir_for_target(PREFIX, target, xv6_dir, out_dir)
-
     lock = BuildLock(ROOT_DIR)
     lock.acquire()
     try:
+        require_dir(PREFIX, xv6_dir, f"XV6_DIR not found: {xv6_dir}")
+        xv6_dir = prepare_xv6_dir_for_target(PREFIX, target, xv6_dir, out_dir)
+
         toolprefix = os.environ.get("TOOLPREFIX") or infer_toolprefix_for(target)
         if not toolprefix:
             die(PREFIX, f"could not find a {target.name} ELF toolchain")

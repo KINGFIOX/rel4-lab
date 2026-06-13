@@ -90,13 +90,13 @@ def main(argv: list[str]) -> int:
     program = argv[0].removeprefix("_")
     program_args = argv[1:]
 
-    require_dir(PREFIX, xv6_dir, f"XV6_DIR not found: {xv6_dir}")
-    xv6_dir = prepare_xv6_dir_for_target(PREFIX, target, xv6_dir, out_dir)
-    require_file(PREFIX, xv6_dir / "user" / f"{program}.c", f"xv6 user program not found: user/{program}.c")
-
     lock = BuildLock(ROOT_DIR)
     lock.acquire()
     try:
+        require_dir(PREFIX, xv6_dir, f"XV6_DIR not found: {xv6_dir}")
+        xv6_dir = prepare_xv6_dir_for_target(PREFIX, target, xv6_dir, out_dir)
+        require_file(PREFIX, xv6_dir / "user" / f"{program}.c", f"xv6 user program not found: user/{program}.c")
+
         toolprefix = os.environ.get("TOOLPREFIX") or infer_toolprefix_for(target)
         if not toolprefix:
             die(PREFIX, f"could not find a {target.name} ELF toolchain")
