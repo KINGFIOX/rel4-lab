@@ -5,11 +5,12 @@ use std::path::PathBuf;
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let linker_script = manifest_dir.join("linker.ld");
+    let linker_script = linker_script_for_target(&manifest_dir);
     let profile = env::var("PROFILE").unwrap_or_default();
     let allow_placeholders =
         profile != "release" && env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some();
 
+    println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-changed={}", linker_script.display());
     println!(
         "cargo:rustc-link-arg-bin=xv6-host=-T{}",
@@ -94,6 +95,16 @@ fn main() {
     if env::var("XV6_ROOT_IS_INIT").as_deref() == Ok("1") {
         println!("cargo:rustc-env=XV6_COMPILED_ROOT_IS_INIT=1");
     }
+}
+
+fn linker_script_for_target(manifest_dir: &PathBuf) -> PathBuf {
+    let target = env::var("TARGET").unwrap();
+    let filename = match target.as_str() {
+        "riscv64gc-unknown-none-elf" => "linker-riscv64.ld",
+        "loongarch64-unknown-none" => "linker-loongarch64.ld",
+        _ => panic!("unsupported target for xv6-host: {target}"),
+    };
+    manifest_dir.join(filename)
 }
 
 fn resolve_embedded_elf(
