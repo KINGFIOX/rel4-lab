@@ -401,10 +401,18 @@ pub unsafe fn switch_satp(satp_val: u64) {
         return;
     }
     configure_page_walk();
+    if current_satp() == satp_val {
+        return;
+    }
     csr::set_pgdl((satp_val & !0xfffu64) as usize);
     csr::set_asid((satp_val & 0x3ff) as usize);
     csr::sfence_vma_all();
     csr::fence_i();
+}
+
+#[inline]
+pub fn current_satp() -> u64 {
+    ((csr::pgdl() as u64) & !0xfffu64) | ((csr::asid() as u64) & 0x3ff)
 }
 
 pub fn set_current_vspace_root() {

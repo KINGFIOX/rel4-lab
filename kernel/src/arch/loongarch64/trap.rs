@@ -938,11 +938,15 @@ fn switch_to_kernel_vspace() {
     let Some(kernel_satp) = crate::kernel::smp::kernel_satp() else {
         return;
     };
-    unsafe { crate::arch::loongarch64::vspace::switch_satp(kernel_satp) };
+    if crate::arch::loongarch64::vspace::current_satp() != kernel_satp {
+        unsafe { crate::arch::loongarch64::vspace::switch_satp(kernel_satp) };
+    }
 }
 
-// The current LoongArch VSpace backend is still identity/no-op staging. Keep
-// the scheduler hook explicit so real ASID/root switching can land here.
+/// Program the LoongArch PGDL/ASID pair for the TCB we're about to resume.
+///
+/// The VSpace cap must already be mapped through an ASID pool, matching the
+/// same seL4 root-switching contract as the RISC-V backend.
 fn switch_to_tcb_vspace(tcb: *const crate::object::tcb::Tcb) {
     use crate::object::cap::CapTag;
 
@@ -965,7 +969,9 @@ fn switch_to_tcb_vspace(tcb: *const crate::object::tcb::Tcb) {
     if new_satp == 0 {
         return;
     }
-    unsafe { crate::arch::loongarch64::vspace::switch_satp(new_satp) };
+    if crate::arch::loongarch64::vspace::current_satp() != new_satp {
+        unsafe { crate::arch::loongarch64::vspace::switch_satp(new_satp) };
+    }
 }
 
 fn park_current_thread() -> ! {
