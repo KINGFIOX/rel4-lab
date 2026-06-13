@@ -1,8 +1,12 @@
 //! LoongArch64 user-context ABI skeleton.
 //!
 //! This module fixes the kernel-visible register naming and TCB register
-//! ordering before the executable trap entry is wired up. Boot remains blocked
-//! until the LoongArch elfloader and exception-entry ABI are implemented.
+//! ordering, and provides the first executable user-restore path. Trap entry
+//! and syscall/fault dispatch are still staging work.
+
+use core::arch::global_asm;
+
+use crate::arch::loongarch64::csr::{CSR_ERA, CSR_PRMD};
 
 /// User-mode register snapshot shape for the future LoongArch64 trap entry.
 ///
@@ -165,8 +169,76 @@ pub const SEL4_USER_CONTEXT_REGS: [usize; SEL4_USER_CONTEXT_WORDS] = [
 
 pub const SSTATUS_FS_MASK: u64 = 0;
 pub const SSTATUS_FS_CLEAN: u64 = 0;
-pub const USER_SSTATUS: u64 = 0;
+pub const PRMD_PPLV_USER: u64 = 0b11;
+pub const PRMD_PIE: u64 = 1 << 2;
+pub const USER_SSTATUS: u64 = PRMD_PPLV_USER | PRMD_PIE;
 pub const ROOTSERVER_SSTATUS: u64 = USER_SSTATUS;
+
+global_asm!(
+    r#"
+    .section .text.traps
+    .align 4
+
+    .globl restore_user_context_locked
+restore_user_context_locked:
+    addi.d  $sp, $sp, -16
+    st.d    $a0, $sp, 0
+    bl      kernel_unlock_for_user_restore
+    ld.d    $a0, $sp, 0
+    addi.d  $sp, $sp, 16
+    b       restore_user_context
+
+    .globl restore_user_context
+restore_user_context:
+    move    $t0, $a0
+
+    ld.d    $t1, $t0, 32*8
+    csrwr   $t1, {csr_era}
+    ld.d    $t1, $t0, 33*8
+    csrwr   $t1, {csr_prmd}
+
+    ld.d    $ra, $t0,  1*8
+    ld.d    $tp, $t0,  2*8
+    ld.d    $sp, $t0,  3*8
+    ld.d    $a0, $t0,  4*8
+    ld.d    $a1, $t0,  5*8
+    ld.d    $a2, $t0,  6*8
+    ld.d    $a3, $t0,  7*8
+    ld.d    $a4, $t0,  8*8
+    ld.d    $a5, $t0,  9*8
+    ld.d    $a6, $t0, 10*8
+    ld.d    $a7, $t0, 11*8
+    ld.d    $t1, $t0, 13*8
+    ld.d    $t2, $t0, 14*8
+    ld.d    $t3, $t0, 15*8
+    ld.d    $t4, $t0, 16*8
+    ld.d    $t5, $t0, 17*8
+    ld.d    $t6, $t0, 18*8
+    ld.d    $t7, $t0, 19*8
+    ld.d    $t8, $t0, 20*8
+    ld.d    $r21, $t0, 21*8
+    ld.d    $fp, $t0, 22*8
+    ld.d    $s0, $t0, 23*8
+    ld.d    $s1, $t0, 24*8
+    ld.d    $s2, $t0, 25*8
+    ld.d    $s3, $t0, 26*8
+    ld.d    $s4, $t0, 27*8
+    ld.d    $s5, $t0, 28*8
+    ld.d    $s6, $t0, 29*8
+    ld.d    $s7, $t0, 30*8
+    ld.d    $s8, $t0, 31*8
+    ld.d    $t0, $t0, 12*8
+
+    ertn
+"#,
+    csr_era = const CSR_ERA,
+    csr_prmd = const CSR_PRMD,
+);
+
+unsafe extern "C" {
+    pub fn restore_user_context(ctx: *mut UserContext) -> !;
+    fn restore_user_context_locked(ctx: *mut UserContext) -> !;
+}
 
 pub fn install_trap_vector() {}
 
@@ -176,11 +248,12 @@ pub fn service_due_timer_interrupts() -> bool {
     false
 }
 
-pub unsafe fn restore_user_context_with_kernel_lock<T>(
-    _ctx: *mut UserContext,
-    _kernel_lock: T,
+pub unsafe fn restore_user_context_with_kernel_lock(
+    ctx: *mut UserContext,
+    kernel_lock: crate::kernel::smp::KernelLockGuard,
 ) -> ! {
-    loop {}
+    kernel_lock.defer_unlock_for_user_restore();
+    unsafe { restore_user_context_locked(ctx) }
 }
 
 pub fn idle_scheduler_loop() -> ! {
