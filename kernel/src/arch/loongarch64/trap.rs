@@ -14,7 +14,7 @@ use crate::abi::constants::{N_TOTAL_MSG_REGISTERS, WORD_BYTES};
 use crate::abi::fault::FaultLabel;
 use crate::abi::syscall::SyscallNumber;
 use crate::abi::types::MessageInfo;
-use crate::arch::loongarch64::csr::{self, CSR_BADV, CSR_ERA, CSR_ESTAT, CSR_KS0, CSR_PRMD};
+use crate::arch::loongarch64::csr;
 use crate::object::cap::CapTag;
 
 /// User-mode register snapshot shape for the future LoongArch64 trap entry.
@@ -235,19 +235,7 @@ const SYNTHETIC_TIMER_IRQ_INTERVAL_TICKS: u64 = 20_000;
 
 static NEXT_SYNTHETIC_TIMER_IRQ_DEADLINE: AtomicU64 = AtomicU64::new(0);
 
-global_asm!(
-    include_str!("trap.S"),
-    trap_record = sym LOONGARCH64_TRAP_RECORD,
-    handle_trap_rust = sym handle_trap_rust,
-    kernel_trap_panic = sym kernel_trap_panic,
-    csr_era = const CSR_ERA,
-    csr_prmd = const CSR_PRMD,
-    csr_estat = const CSR_ESTAT,
-    csr_badv = const CSR_BADV,
-    csr_ks0 = const CSR_KS0,
-    prmd_pplv_mask = const PRMD_PPLV_MASK,
-    prmd_pplv_user = const PRMD_PPLV_USER,
-);
+global_asm!(include_str!("trap.S"));
 
 unsafe extern "C" {
     pub fn trap_entry();

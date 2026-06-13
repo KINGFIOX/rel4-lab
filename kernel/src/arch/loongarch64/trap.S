@@ -6,28 +6,35 @@
     .equ TRAP_SCRATCH_SAVED_USER_SP, 16
     .equ TRAP_SCRATCH_SAVED_USER_T1, 24
     .equ TRAP_SCRATCH_SAVED_USER_T2, 32
+    .equ CSR_PRMD, 0x001
+    .equ CSR_ESTAT, 0x005
+    .equ CSR_ERA, 0x006
+    .equ CSR_BADV, 0x007
+    .equ CSR_KS0, 0x030
+    .equ PRMD_PPLV_MASK, 0x3
+    .equ PRMD_PPLV_USER, 0x3
 
     .globl trap_entry
 trap_entry:
-    csrwr   $t0, {csr_ks0}
-    beqz    $t0, {kernel_trap_panic}
+    csrwr   $t0, CSR_KS0
+    beqz    $t0, kernel_trap_panic
 
     st.d    $sp, $t0, TRAP_SCRATCH_SAVED_USER_SP
     st.d    $t1, $t0, TRAP_SCRATCH_SAVED_USER_T1
     st.d    $t2, $t0, TRAP_SCRATCH_SAVED_USER_T2
 
-    csrrd   $t1, {csr_prmd}
-    andi    $t1, $t1, {prmd_pplv_mask}
-    li.w    $t2, {prmd_pplv_user}
+    csrrd   $t1, CSR_PRMD
+    andi    $t1, $t1, PRMD_PPLV_MASK
+    li.w    $t2, PRMD_PPLV_USER
     beq     $t1, $t2, 1f
-    csrwr   $t0, {csr_ks0}
-    b       {kernel_trap_panic}
+    csrwr   $t0, CSR_KS0
+    b       kernel_trap_panic
 
 1:
     ld.d    $sp, $t0, TRAP_SCRATCH_USER_CONTEXT
     bnez    $sp, 2f
-    csrwr   $t0, {csr_ks0}
-    b       {kernel_trap_panic}
+    csrwr   $t0, CSR_KS0
+    b       kernel_trap_panic
 
 2:
     st.d    $zero, $sp,  0*8
@@ -61,34 +68,34 @@ trap_entry:
 
     ld.d    $t1, $t0, TRAP_SCRATCH_SAVED_USER_SP
     st.d    $t1, $sp,  3*8
-    csrrd   $t1, {csr_ks0}
+    csrrd   $t1, CSR_KS0
     st.d    $t1, $sp, 12*8
     ld.d    $t1, $t0, TRAP_SCRATCH_SAVED_USER_T1
     st.d    $t1, $sp, 13*8
     ld.d    $t1, $t0, TRAP_SCRATCH_SAVED_USER_T2
     st.d    $t1, $sp, 14*8
 
-    csrrd   $t1, {csr_era}
+    csrrd   $t1, CSR_ERA
     st.d    $t1, $sp, 32*8
     st.d    $t1, $sp, 34*8
-    csrrd   $t1, {csr_prmd}
+    csrrd   $t1, CSR_PRMD
     st.d    $t1, $sp, 33*8
 
-    la.local $t1, {trap_record}
-    csrrd   $t2, {csr_era}
+    la.local $t1, LOONGARCH64_TRAP_RECORD
+    csrrd   $t2, CSR_ERA
     st.d    $t2, $t1, 0*8
-    csrrd   $t2, {csr_prmd}
+    csrrd   $t2, CSR_PRMD
     st.d    $t2, $t1, 1*8
-    csrrd   $t2, {csr_estat}
+    csrrd   $t2, CSR_ESTAT
     st.d    $t2, $t1, 2*8
-    csrrd   $t2, {csr_badv}
+    csrrd   $t2, CSR_BADV
     st.d    $t2, $t1, 3*8
 
     ld.d    $t2, $t0, TRAP_SCRATCH_KERNEL_STACK_TOP
-    csrwr   $t0, {csr_ks0}
+    csrwr   $t0, CSR_KS0
     move    $a0, $sp
     move    $sp, $t2
-    bl      {handle_trap_rust}
+    bl      handle_trap_rust
 
     b       restore_user_context_locked
 
@@ -105,14 +112,14 @@ restore_user_context_locked:
 restore_user_context:
     move    $t0, $a0
 
-    csrrd   $t1, {csr_ks0}
-    beqz    $t1, {kernel_trap_panic}
+    csrrd   $t1, CSR_KS0
+    beqz    $t1, kernel_trap_panic
     st.d    $t0, $t1, TRAP_SCRATCH_USER_CONTEXT
 
     ld.d    $t1, $t0, 32*8
-    csrwr   $t1, {csr_era}
+    csrwr   $t1, CSR_ERA
     ld.d    $t1, $t0, 33*8
-    csrwr   $t1, {csr_prmd}
+    csrwr   $t1, CSR_PRMD
 
     ld.d    $ra, $t0,  1*8
     ld.d    $tp, $t0,  2*8
