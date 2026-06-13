@@ -8,7 +8,7 @@ use core::arch::global_asm;
 
 use log_crate::error;
 
-use crate::arch::loongarch64::csr::{self, CSR_BADV, CSR_ERA, CSR_ESTAT, CSR_PRMD};
+use crate::arch::loongarch64::csr::{self, CSR_BADV, CSR_ERA, CSR_ESTAT, CSR_KS0, CSR_PRMD};
 
 /// User-mode register snapshot shape for the future LoongArch64 trap entry.
 ///
@@ -62,19 +62,8 @@ impl TrapRecord {
     }
 }
 
-pub const LOONGARCH64_TRAP_STACK_SIZE: usize = 16 * 1024;
-
-#[repr(align(16))]
-pub struct TrapStack(pub [u8; LOONGARCH64_TRAP_STACK_SIZE]);
-
-#[unsafe(no_mangle)]
-static mut LOONGARCH64_TRAP_CONTEXT: UserContext = UserContext::zero();
-
 #[unsafe(no_mangle)]
 static mut LOONGARCH64_TRAP_RECORD: TrapRecord = TrapRecord::zero();
-
-#[unsafe(no_mangle)]
-static mut LOONGARCH64_TRAP_STACK: TrapStack = TrapStack([0; LOONGARCH64_TRAP_STACK_SIZE]);
 
 /// Register name -> index in `UserContext.regs`.
 #[repr(usize)]
@@ -205,6 +194,7 @@ pub const SEL4_USER_CONTEXT_REGS: [usize; SEL4_USER_CONTEXT_WORDS] = [
 
 pub const SSTATUS_FS_MASK: u64 = 0;
 pub const SSTATUS_FS_CLEAN: u64 = 0;
+pub const PRMD_PPLV_MASK: u64 = 0b11;
 pub const PRMD_PPLV_USER: u64 = 0b11;
 pub const PRMD_PIE: u64 = 1 << 2;
 pub const USER_SSTATUS: u64 = PRMD_PPLV_USER | PRMD_PIE;
@@ -215,47 +205,78 @@ global_asm!(
     .section .text.traps
     .align 6
 
+    .equ TRAP_SCRATCH_KERNEL_STACK_TOP, 0
+    .equ TRAP_SCRATCH_USER_CONTEXT, 8
+    .equ TRAP_SCRATCH_SAVED_USER_SP, 16
+    .equ TRAP_SCRATCH_SAVED_USER_T1, 24
+    .equ TRAP_SCRATCH_SAVED_USER_T2, 32
+
     .globl trap_entry
 trap_entry:
-    la.local $t0, {trap_context}
-    st.d    $zero, $t0,  0*8
-    st.d    $ra,   $t0,  1*8
-    st.d    $tp,   $t0,  2*8
-    st.d    $sp,   $t0,  3*8
-    st.d    $a0,   $t0,  4*8
-    st.d    $a1,   $t0,  5*8
-    st.d    $a2,   $t0,  6*8
-    st.d    $a3,   $t0,  7*8
-    st.d    $a4,   $t0,  8*8
-    st.d    $a5,   $t0,  9*8
-    st.d    $a6,   $t0, 10*8
-    st.d    $a7,   $t0, 11*8
-    st.d    $t0,   $t0, 12*8
-    st.d    $t1,   $t0, 13*8
-    st.d    $t2,   $t0, 14*8
-    st.d    $t3,   $t0, 15*8
-    st.d    $t4,   $t0, 16*8
-    st.d    $t5,   $t0, 17*8
-    st.d    $t6,   $t0, 18*8
-    st.d    $t7,   $t0, 19*8
-    st.d    $t8,   $t0, 20*8
-    st.d    $r21,  $t0, 21*8
-    st.d    $fp,   $t0, 22*8
-    st.d    $s0,   $t0, 23*8
-    st.d    $s1,   $t0, 24*8
-    st.d    $s2,   $t0, 25*8
-    st.d    $s3,   $t0, 26*8
-    st.d    $s4,   $t0, 27*8
-    st.d    $s5,   $t0, 28*8
-    st.d    $s6,   $t0, 29*8
-    st.d    $s7,   $t0, 30*8
-    st.d    $s8,   $t0, 31*8
+    csrwr   $t0, {csr_ks0}
+    beqz    $t0, {kernel_trap_panic}
+
+    st.d    $sp, $t0, TRAP_SCRATCH_SAVED_USER_SP
+    st.d    $t1, $t0, TRAP_SCRATCH_SAVED_USER_T1
+    st.d    $t2, $t0, TRAP_SCRATCH_SAVED_USER_T2
+
+    csrrd   $t1, {csr_prmd}
+    andi    $t1, $t1, {prmd_pplv_mask}
+    li.w    $t2, {prmd_pplv_user}
+    beq     $t1, $t2, 1f
+    csrwr   $t0, {csr_ks0}
+    b       {kernel_trap_panic}
+
+1:
+    ld.d    $sp, $t0, TRAP_SCRATCH_USER_CONTEXT
+    bnez    $sp, 2f
+    csrwr   $t0, {csr_ks0}
+    b       {kernel_trap_panic}
+
+2:
+    st.d    $zero, $sp,  0*8
+    st.d    $ra,   $sp,  1*8
+    st.d    $tp,   $sp,  2*8
+    st.d    $a0,   $sp,  4*8
+    st.d    $a1,   $sp,  5*8
+    st.d    $a2,   $sp,  6*8
+    st.d    $a3,   $sp,  7*8
+    st.d    $a4,   $sp,  8*8
+    st.d    $a5,   $sp,  9*8
+    st.d    $a6,   $sp, 10*8
+    st.d    $a7,   $sp, 11*8
+    st.d    $t3,   $sp, 15*8
+    st.d    $t4,   $sp, 16*8
+    st.d    $t5,   $sp, 17*8
+    st.d    $t6,   $sp, 18*8
+    st.d    $t7,   $sp, 19*8
+    st.d    $t8,   $sp, 20*8
+    st.d    $r21,  $sp, 21*8
+    st.d    $fp,   $sp, 22*8
+    st.d    $s0,   $sp, 23*8
+    st.d    $s1,   $sp, 24*8
+    st.d    $s2,   $sp, 25*8
+    st.d    $s3,   $sp, 26*8
+    st.d    $s4,   $sp, 27*8
+    st.d    $s5,   $sp, 28*8
+    st.d    $s6,   $sp, 29*8
+    st.d    $s7,   $sp, 30*8
+    st.d    $s8,   $sp, 31*8
+
+    ld.d    $t1, $t0, TRAP_SCRATCH_SAVED_USER_SP
+    st.d    $t1, $sp,  3*8
+    csrrd   $t1, {csr_ks0}
+    st.d    $t1, $sp, 12*8
+    ld.d    $t1, $t0, TRAP_SCRATCH_SAVED_USER_T1
+    st.d    $t1, $sp, 13*8
+    ld.d    $t1, $t0, TRAP_SCRATCH_SAVED_USER_T2
+    st.d    $t1, $sp, 14*8
 
     csrrd   $t1, {csr_era}
-    st.d    $t1, $t0, 32*8
-    st.d    $t1, $t0, 34*8
+    st.d    $t1, $sp, 32*8
+    st.d    $t1, $sp, 34*8
     csrrd   $t1, {csr_prmd}
-    st.d    $t1, $t0, 33*8
+    st.d    $t1, $sp, 33*8
 
     la.local $t1, {trap_record}
     csrrd   $t2, {csr_era}
@@ -267,17 +288,13 @@ trap_entry:
     csrrd   $t2, {csr_badv}
     st.d    $t2, $t1, 3*8
 
-    la.local $sp, {trap_stack}
-    li.d    $t1, {trap_stack_size}
-    add.d   $sp, $sp, $t1
-    addi.d  $sp, $sp, -16
-
-    la.local $a0, {trap_context}
+    ld.d    $t2, $t0, TRAP_SCRATCH_KERNEL_STACK_TOP
+    csrwr   $t0, {csr_ks0}
+    move    $a0, $sp
+    move    $sp, $t2
     bl      {handle_trap_rust}
 
-1:
-    idle    0
-    b       1b
+    b       restore_user_context_locked
 
     .globl restore_user_context_locked
 restore_user_context_locked:
@@ -291,6 +308,10 @@ restore_user_context_locked:
     .globl restore_user_context
 restore_user_context:
     move    $t0, $a0
+
+    csrrd   $t1, {csr_ks0}
+    beqz    $t1, {kernel_trap_panic}
+    st.d    $t0, $t1, TRAP_SCRATCH_USER_CONTEXT
 
     ld.d    $t1, $t0, 32*8
     csrwr   $t1, {csr_era}
@@ -331,15 +352,16 @@ restore_user_context:
 
     ertn
 "#,
-    trap_context = sym LOONGARCH64_TRAP_CONTEXT,
     trap_record = sym LOONGARCH64_TRAP_RECORD,
-    trap_stack = sym LOONGARCH64_TRAP_STACK,
-    trap_stack_size = const LOONGARCH64_TRAP_STACK_SIZE,
     handle_trap_rust = sym handle_trap_rust,
+    kernel_trap_panic = sym kernel_trap_panic,
     csr_era = const CSR_ERA,
     csr_prmd = const CSR_PRMD,
     csr_estat = const CSR_ESTAT,
     csr_badv = const CSR_BADV,
+    csr_ks0 = const CSR_KS0,
+    prmd_pplv_mask = const PRMD_PPLV_MASK,
+    prmd_pplv_user = const PRMD_PPLV_USER,
 );
 
 unsafe extern "C" {
@@ -349,7 +371,7 @@ unsafe extern "C" {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> ! {
+pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> *mut UserContext {
     let record = unsafe { LOONGARCH64_TRAP_RECORD };
     let (pc, a0, a1, a2, a3, a7) = if uc.is_null() {
         (0, 0, 0, 0, 0, 0)
@@ -370,6 +392,18 @@ pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> ! {
         pc, record.era, record.prmd, record.estat, record.badv, a0, a1, a2, a3, a7
     );
     crate::arch::loongarch64::boot::halt()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn kernel_trap_panic() -> ! {
+    let estat = csr::estat();
+    let badv = csr::badv();
+    let era = csr::era();
+    error!(
+        "loongarch64 kernel trap: estat={:#x} badv={:#x} era={:#x}",
+        estat, badv, era
+    );
+    panic!("kernel trap");
 }
 
 pub fn install_trap_vector() {

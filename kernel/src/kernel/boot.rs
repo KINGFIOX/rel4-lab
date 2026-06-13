@@ -17,7 +17,8 @@ use crate::arch::current::paging::{
     pt_index,
 };
 use crate::arch::current::trap::{
-    UserContext, init_timer, install_trap_vector, restore_user_context_with_kernel_lock,
+    UserContext, UserRegister, init_timer, install_trap_vector,
+    restore_user_context_with_kernel_lock,
 };
 use crate::arch::current::vspace::{
     alloc_pt_page, kpptr_to_paddr, make_boot_root_pt, paddr_to_kpptr, satp_for, switch_satp,
@@ -751,9 +752,9 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         t.context.pc = args.user_ventry as u64;
         t.context.restart_pc = args.user_ventry as u64;
         t.context.sstatus = crate::arch::current::trap::ROOTSERVER_SSTATUS;
-        t.context.regs[10] = USER_BOOTINFO_VA as u64; // a0 = bootinfo
-        t.context.regs[11] = 0;
-        t.context.regs[2] = USER_STACK_TOP as u64; // sp
+        t.context.regs[UserRegister::A0.index()] = USER_BOOTINFO_VA as u64;
+        t.context.regs[UserRegister::A1.index()] = 0;
+        t.context.regs[UserRegister::Sp.index()] = USER_STACK_TOP as u64;
         t.state = crate::object::tcb::ThreadState::Running as u8;
         t.priority = 255;
         t.mcp = 255;

@@ -18,6 +18,7 @@ pub const CSR_PGDL: usize = 0x019;
 pub const CSR_PGDH: usize = 0x01a;
 pub const CSR_PGD: usize = 0x01b;
 pub const CSR_CPUID: usize = 0x020;
+pub const CSR_KS0: usize = 0x030;
 pub const CSR_TCFG: usize = 0x041;
 pub const CSR_TVAL: usize = 0x042;
 pub const CSR_TICLR: usize = 0x044;
@@ -78,6 +79,7 @@ rw_csr!(pgdl, set_pgdl, CSR_PGDL);
 rw_csr!(pgdh, set_pgdh, CSR_PGDH);
 ro_csr!(pgd, CSR_PGD);
 ro_csr!(cpuid, CSR_CPUID);
+rw_csr!(ks0, set_ks0, CSR_KS0);
 rw_csr!(tcfg, set_tcfg, CSR_TCFG);
 ro_csr!(tval, CSR_TVAL);
 rw_csr!(ticlr, set_ticlr, CSR_TICLR);
@@ -98,11 +100,13 @@ pub fn dbar() {
 
 #[inline]
 pub fn sscratch() -> usize {
-    0
+    ks0()
 }
 
 #[inline]
-pub fn set_sscratch(_value: usize) {}
+pub fn set_sscratch(value: usize) {
+    set_ks0(value);
+}
 
 #[inline]
 pub fn sfence_vma_all() {
