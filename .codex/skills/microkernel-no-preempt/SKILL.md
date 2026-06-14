@@ -1,6 +1,6 @@
 ---
 name: microkernel-no-preempt
-description: Keep this Rust RV64/LoongArch seL4-style microkernel free of preemptive scheduler behavior while preserving user-space portability across seL4 and rel4. Use when reviewing, planning, maintaining, or changing timer, trap, scheduler, runqueue, context-switch code, or user-space assumptions so timer-driven preemption, timeslice expiry, quantum rotation, asynchronous budget charging, and involuntary scheduler switches stay absent or kept out of scope unless the user explicitly asks for preemptive scheduling.
+description: Keep this Rust RV64/LoongArch seL4-style microkernel free of preemptive scheduler behavior while preserving user-space portability across seL4 and rel4. Use when reviewing, planning, maintaining, or changing timer, trap, scheduler, runqueue, context-switch code, or user-space assumptions so timer-driven preemption, timeslice expiry, quantum rotation, asynchronous budget charging, involuntary scheduler switches, and user-space reliance on preemption stay absent or kept out of scope unless the user explicitly asks for preemptive scheduling.
 ---
 
 # Microkernel No Preempt
@@ -9,7 +9,7 @@ description: Keep this Rust RV64/LoongArch seL4-style microkernel free of preemp
 
 Use this skill to keep scheduling cooperative/non-preemptive. Threads should switch when they block, yield, fault into the kernel, or make explicit syscalls that change runnable state, not because a timer interrupt expired a quantum.
 
-User-space written for this project may run on seL4, where timer preemption exists, but its correctness must not depend on that behavior. The same source should also run on rel4, where context switches happen only at explicit kernel interaction points.
+User-space written for this project should be portable across seL4 and rel4. It may run on seL4, where timer preemption exists, but it must be written as if preemption is not a correctness or progress guarantee. The same source should also run on rel4, where context switches happen only at explicit kernel interaction points.
 
 Preemption-related effects must not be part of the rel4 user-space contract. User programs must not rely on timer preemption for correctness, progress, ordering, fairness, or timing.
 
@@ -35,7 +35,7 @@ Keep these behaviors available:
 
 - Prefer source compatibility with seL4 user programs: timer APIs, `Yield`, blocking IPC, notifications, sleeps, or related constants may exist if they are needed for the same user binary/source to build or run on seL4 and rel4.
 - These compatibility paths may expose time or interrupt services, but they must not make rel4 emulate seL4 quantum expiry, timer-driven ready-queue rotation, or involuntary preemption.
-- User-space written for this project must not depend on preemption for correctness, progress, timing, IPC ordering, or fairness. If a workflow needs interleaving, make it explicit with `Yield`, blocking IPC, notifications, sleeps, or protocol-level synchronization.
+- User-space written for this project must not depend on preemption for correctness, progress, timing, IPC ordering, or fairness, even when that same source is also expected to run on seL4. If a workflow needs interleaving, make it explicit with `Yield`, blocking IPC, notifications, sleeps, or protocol-level synchronization.
 - Do not introduce tests, service loops, or user programs that assume a CPU-bound thread will be involuntarily preempted so another runnable thread can run.
 
 ## Workflow
@@ -45,7 +45,7 @@ Keep these behaviors available:
 3. In `kernel/src/arch/riscv64/trap.rs` and `kernel/src/arch/loongarch64/trap.rs`, keep timer handlers focused on interrupt delivery and timer reprogramming, not scheduler quantum expiry.
 4. Keep runqueue operations deterministic: enqueue runnable threads, dequeue selected threads, and reschedule only after explicit kernel events.
 5. Make RISC-V and LoongArch trap/timer behavior symmetric unless a hardware difference requires a narrow arch-specific branch.
-6. When changing user-space, avoid assumptions that timer preemption will provide fairness or progress; add explicit yield/blocking/synchronization where needed.
+6. When changing user-space owned by this project, write it so it remains correct on both seL4 and rel4 without relying on timer preemption; add explicit yield/blocking/synchronization where interleaving is required.
 
 ## Validation
 
