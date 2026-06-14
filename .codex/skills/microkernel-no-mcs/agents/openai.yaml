@@ -1,0 +1,4 @@
+interface:
+  display_name: "Microkernel No MCS"
+  short_description: "Keep MCS real-time scheduling out of scope"
+  default_prompt: "Use $microkernel-no-mcs when rolling back or changing this microkernel so MCS real-time scheduling, sched-context budget enforcement, timeout-fault budget delivery, refill queues, and budget donation are removed or kept out of scope unless explicitly requested."
