@@ -50,7 +50,6 @@ pub fn set_current(tcb: *mut Tcb) -> *mut Tcb {
 // and surrounding TCB/SC state transitions are serialized by the seL4-style
 // big kernel lock.
 
-pub const DEFAULT_TIME_SLICE_TICKS: u8 = 5;
 pub const TCB_CNODE_RADIX: usize = 4;
 pub const TCB_CNODE_ENTRIES: usize = 1 << TCB_CNODE_RADIX;
 pub const TCB_ARCH_CNODE_ENTRIES: usize = TCB_CNODE_ENTRIES;
@@ -177,18 +176,6 @@ fn runqueue_snapshot(tcb: *const Tcb) -> RunqueueSnapshot {
 }
 
 #[inline]
-pub(crate) fn priority_snapshot(tcb: *const Tcb) -> usize {
-    let _ = tcb;
-    0
-}
-
-#[inline]
-pub(crate) fn mcp_snapshot(tcb: *const Tcb) -> usize {
-    let _ = tcb;
-    0
-}
-
-#[inline]
 pub(crate) fn yield_authority_snapshot(tcb: *const Tcb) -> (usize, u64, usize) {
     let _ = tcb;
     (0, 0, 0)
@@ -273,273 +260,24 @@ pub(crate) fn timeout_endpoint_snapshot(tcb: *const Tcb) -> Cap {
 }
 
 #[inline]
-pub(crate) fn sched_context_snapshot(tcb: *const Tcb) -> u64 {
-    if tcb.is_null() {
-        return 0;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        (*tcb).sched_context
-    }
-}
-
-pub(crate) unsafe fn bind_sched_context_if_unbound(tcb: *mut Tcb, sched_context: u64) -> bool {
-    if tcb.is_null() || sched_context == 0 {
-        return false;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        if (*tcb).sched_context != 0 {
-            return false;
-        }
-        (*tcb).sched_context = sched_context;
-        true
-    }
-}
-
-pub(crate) unsafe fn bind_sched_context_if_unbound_or_same(
-    tcb: *mut Tcb,
-    sched_context: u64,
-) -> bool {
-    if tcb.is_null() || sched_context == 0 {
-        return false;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        if (*tcb).sched_context != 0 && (*tcb).sched_context != sched_context {
-            return false;
-        }
-        (*tcb).sched_context = sched_context;
-        true
-    }
-}
-
-pub(crate) unsafe fn clear_sched_context_if(tcb: *mut Tcb, sched_context: u64) -> bool {
+pub(crate) fn runnable_snapshot(tcb: *const Tcb) -> bool {
     if tcb.is_null() {
         return false;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        if (*tcb).sched_context != sched_context {
-            return false;
-        }
-        (*tcb).sched_context = 0;
-        true
-    }
-}
-
-/// TCB pair updates are serialized by the seL4-style BKL, not by ordered
-/// per-TCB locks. The pointers stay in the helper signature to document the
-/// pair being mutated.
-fn with_tcb_pair_guard<R>(first: *const Tcb, second: *const Tcb, f: impl FnOnce() -> R) -> R {
-    let _ = (first, second);
-    let _guard = BklObjectGuard::new();
-    f()
-}
-
-pub(crate) unsafe fn move_sched_context_if_target_unbound(
-    from: *mut Tcb,
-    to: *mut Tcb,
-    sched_context: u64,
-) -> bool {
-    if from.is_null() || to.is_null() || sched_context == 0 {
-        return false;
-    }
-    if from == to {
-        return false;
-    }
-    unsafe {
-        with_tcb_pair_guard(from, to, || {
-            if (*from).sched_context != sched_context || (*to).sched_context != 0 {
-                return false;
-            }
-            (*from).sched_context = 0;
-            (*to).sched_context = sched_context;
-            true
-        })
-    }
-}
-
-#[inline]
-pub(crate) fn yield_to_sched_context_snapshot(tcb: *const Tcb) -> u64 {
-    if tcb.is_null() {
-        return 0;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        (*tcb).yield_to_sc
-    }
-}
-
-#[inline]
-pub(crate) fn yield_from_snapshot(tcb: *const Tcb) -> *mut Tcb {
-    if tcb.is_null() {
-        return core::ptr::null_mut();
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        (*tcb).yield_from_tcb as *mut Tcb
-    }
-}
-
-pub(crate) unsafe fn start_yield_to_if_idle(
-    yielder: *mut Tcb,
-    target: *mut Tcb,
-    sched_context: u64,
-    consumed_start: u64,
-) -> bool {
-    if yielder.is_null() || target.is_null() || yielder == target || sched_context == 0 {
-        return false;
-    }
-    unsafe {
-        with_tcb_pair_guard(yielder, target, || {
-            if (*yielder).yield_to_sc != 0 || (*target).yield_from_tcb != 0 {
-                return false;
-            }
-            (*yielder).yield_to_sc = sched_context;
-            (*yielder).yield_to_consumed_start = consumed_start;
-            (*target).yield_from_tcb = yielder as u64;
-            true
-        })
-    }
-}
-
-pub(crate) unsafe fn yield_to_pair_matches(
-    yielder: *mut Tcb,
-    target: *mut Tcb,
-    sched_context: u64,
-) -> bool {
-    if yielder.is_null() || target.is_null() {
-        return false;
-    }
-    unsafe {
-        with_tcb_pair_guard(yielder, target, || {
-            (*target).yield_from_tcb == yielder as u64 && (*yielder).yield_to_sc == sched_context
-        })
-    }
-}
-
-pub(crate) unsafe fn clear_yield_to(yielder: *mut Tcb) {
-    if yielder.is_null() {
-        return;
-    }
-    unsafe {
-        let _guard = lock_state(yielder);
-        (*yielder).yield_to_sc = 0;
-        (*yielder).yield_to_consumed_start = 0;
-    }
-}
-
-pub(crate) unsafe fn cancel_yield_to_for_target(yielder: *mut Tcb, target: *mut Tcb) {
-    if yielder.is_null() {
-        return;
-    }
-    if target.is_null() || yielder == target {
-        unsafe {
-            let _guard = lock_state(yielder);
-            if (*yielder).yield_from_tcb == yielder as u64 {
-                (*yielder).yield_from_tcb = 0;
-            }
-            (*yielder).yield_to_sc = 0;
-            (*yielder).yield_to_consumed_start = 0;
-        }
-        return;
-    }
-    unsafe {
-        with_tcb_pair_guard(yielder, target, || {
-            if (*target).yield_from_tcb == yielder as u64 {
-                (*target).yield_from_tcb = 0;
-            }
-            (*yielder).yield_to_sc = 0;
-            (*yielder).yield_to_consumed_start = 0;
-        });
-    }
-}
-
-pub(crate) unsafe fn clear_yield_from_if(target: *mut Tcb, yielder: *mut Tcb) -> bool {
-    if target.is_null() || yielder.is_null() {
-        return false;
-    }
-    unsafe {
-        let _guard = lock_state(target);
-        if (*target).yield_from_tcb != yielder as u64 {
-            return false;
-        }
-        (*target).yield_from_tcb = 0;
-        true
-    }
-}
-
-pub(crate) unsafe fn finish_yield_to(yielder: *mut Tcb, sched_context: u64, consumed: u64) -> bool {
-    if yielder.is_null() || sched_context == 0 {
-        return false;
-    }
-    unsafe {
-        let _guard = lock_state(yielder);
-        if (*yielder).yield_to_sc != sched_context {
-            return false;
-        }
-        (*yielder).yield_to_sc = 0;
-        (*yielder).yield_to_consumed_start = 0;
-        (*yielder).context.regs[crate::arch::current::trap::UserRegister::A2.index()] = consumed;
-        (*yielder).state = ThreadState::Running as u8;
-        true
-    }
-}
-
-pub(crate) unsafe fn finish_yield_to_pair(
-    yielder: *mut Tcb,
-    target: *mut Tcb,
-    sched_context: u64,
-    consumed: u64,
-) -> bool {
-    if yielder.is_null() || target.is_null() {
-        return false;
-    }
-    unsafe {
-        with_tcb_pair_guard(yielder, target, || {
-            if (*target).yield_from_tcb != yielder as u64 || (*yielder).yield_to_sc != sched_context
-            {
-                return false;
-            }
-            (*target).yield_from_tcb = 0;
-            (*yielder).yield_to_sc = 0;
-            (*yielder).yield_to_consumed_start = 0;
-            (*yielder).context.regs[crate::arch::current::trap::UserRegister::A2.index()] =
-                consumed;
-            (*yielder).state = ThreadState::Running as u8;
-            true
-        })
-    }
-}
-
-#[inline]
-pub(crate) fn running_sched_context_snapshot(tcb: *const Tcb) -> (bool, u64) {
-    if tcb.is_null() {
-        return (false, 0);
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        (
-            (*tcb).state == ThreadState::Running as u8,
-            (*tcb).sched_context,
-        )
-    }
-}
-
-#[inline]
-pub(crate) fn runnable_sched_context_snapshot(tcb: *const Tcb) -> (bool, u64) {
-    if tcb.is_null() {
-        return (false, 0);
     }
     unsafe {
         let _guard = lock_state(tcb);
         let state = (*tcb).state;
-        (
-            state == ThreadState::Running as u8 || state == ThreadState::Restart as u8,
-            (*tcb).sched_context,
-        )
+        state == ThreadState::Running as u8 || state == ThreadState::Restart as u8
     }
+}
+
+/// Pair updates are serialized by the seL4-style BKL, not by ordered per-TCB
+/// locks. The pointers stay in the helper signature to document the pair being
+/// accessed.
+fn with_tcb_pair_guard<R>(first: *const Tcb, second: *const Tcb, f: impl FnOnce() -> R) -> R {
+    let _ = (first, second);
+    let _guard = BklObjectGuard::new();
+    f()
 }
 
 #[inline]
@@ -839,7 +577,7 @@ pub(crate) unsafe fn set_blocked_on_reply(tcb: *mut Tcb, reply_object: u64) -> u
         clear_endpoint_ipc_state_locked_preserving_fault(tcb);
         (*tcb).state = ThreadState::BlockedOnReply as u8;
         (*tcb).reply_object = reply_object;
-        (*tcb).sched_context
+        0
     }
 }
 
@@ -1381,7 +1119,7 @@ pub(crate) unsafe fn finish_reply_state(
         (*tcb).reply_slot = 0;
         if wake {
             (*tcb).state = ThreadState::Running as u8;
-            (*tcb).sched_context
+            0
         } else {
             (*tcb).state = ThreadState::Inactive as u8;
             0
@@ -1775,10 +1513,10 @@ pub unsafe fn is_runnable_on_current_core(tcb: *const Tcb) -> bool {
 }
 
 #[inline]
-unsafe fn sched_snapshot(tcb: *const Tcb) -> (u8, u64, u8) {
+unsafe fn sched_snapshot(tcb: *const Tcb) -> (u8, u8) {
     unsafe {
         let _guard = lock_state(tcb);
-        ((*tcb).state, (*tcb).sched_context, (*tcb).affinity)
+        ((*tcb).state, (*tcb).affinity)
     }
 }
 
@@ -1789,7 +1527,7 @@ pub unsafe fn enqueue_if_migrated_from_current_core(tcb: *mut Tcb) {
     if tcb.is_null() {
         return;
     }
-    let (state, _sched_context, affinity) = unsafe { sched_snapshot(tcb) };
+    let (state, affinity) = unsafe { sched_snapshot(tcb) };
     if (state == ThreadState::Running as u8 || state == ThreadState::Restart as u8)
         && core_for_affinity(affinity) != crate::kernel::smp::current_core_id()
     {
@@ -1817,23 +1555,19 @@ pub enum ThreadState {
 
 #[repr(C, align(32))]
 pub struct Tcb {
-    /// seL4-style CTEs embedded in the TCB object. RISC-V MCS uses slots
-    /// 0..4 for CSpace, VSpace, IPC buffer, fault handler, and timeout
-    /// handler; the remaining slots exist because ZombieTCB uses radix 4.
+    /// seL4-style CTEs embedded in the TCB object. Slots 0..4 are used for
+    /// CSpace, VSpace, IPC buffer, fault handler, and timeout handler; the
+    /// remaining slots exist because ZombieTCB uses radix 4.
     pub ctes: [Cte; TCB_CNODE_ENTRIES],
 
     /// Saved user-mode register state. The trap path restores this on
     /// `sret` once a scheduler picks the TCB.
     pub context: UserContext,
 
-    /// Scheduling.
+    /// Cooperative round-robin scheduling state.
     pub state: u8,
-    pub priority: u8,
-    pub mcp: u8,
-    pub domain: u8,
     pub affinity: u8,
-    pub time_slice_ticks: u8,
-    pub _sched_pad: [u8; 2],
+    pub _sched_pad: [u8; 6],
 
     /// User-mode VA at which the IPC buffer is mapped.
     pub ipc_buffer_uva: u64,
@@ -1843,15 +1577,8 @@ pub struct Tcb {
     /// resolved; 0 means "not yet set up".
     pub ipc_buffer_kva: u64,
 
-    /// MCS scheduling context currently bound to this TCB, or 0 for passive.
-    pub sched_context: u64,
     /// seL4_TCBFlag bits. RISC-V currently uses bit 0 for fpuDisabled.
     pub flags: u64,
-    /// MCS `SchedContext_YieldTo` bookkeeping. `yield_to_sc` is set on
-    /// the yielding TCB; `yield_from_tcb` is set on the target TCB.
-    pub yield_to_sc: u64,
-    pub yield_to_consumed_start: u64,
-    pub yield_from_tcb: u64,
 
     /// Pointer (PSpace KVA) to the bound `Notification`, or 0.
     pub bound_notification: u64,
@@ -1868,7 +1595,7 @@ pub struct Tcb {
     pub receive_reply_object: u64,
     pub receive_reply_can_grant: u8,
 
-    /// Slot holding the MCS reply cap that parked this TCB on a reply object.
+    /// Slot holding the reply cap that parked this TCB on a reply object.
     pub reply_slot: u64,
     pub reply_object: u64,
 
@@ -1913,19 +1640,11 @@ impl Tcb {
             ctes: [Cte::null(); TCB_CNODE_ENTRIES],
             context: UserContext::zero(),
             state: 0,
-            priority: 0,
-            mcp: 0,
-            domain: 0,
             affinity: 0,
-            time_slice_ticks: 0,
-            _sched_pad: [0; 2],
+            _sched_pad: [0; 6],
             ipc_buffer_uva: 0,
             ipc_buffer_kva: 0,
-            sched_context: 0,
             flags: 0,
-            yield_to_sc: 0,
-            yield_to_consumed_start: 0,
-            yield_from_tcb: 0,
             bound_notification: 0,
             queue_next: 0,
             queue_prev: 0,
@@ -1972,7 +1691,6 @@ pub unsafe fn init(tcb_kva: u64) {
     unsafe {
         let _guard = lock_state(t);
         (*t).state = ThreadState::Inactive as u8;
-        (*t).time_slice_ticks = DEFAULT_TIME_SLICE_TICKS;
         (*t).context.sstatus = crate::arch::current::trap::USER_SSTATUS;
     }
 }
@@ -2027,8 +1745,6 @@ pub unsafe fn suspend(tcb: *mut Tcb) {
         // backing slab might be reused.
         unlink_from_wait_object(tcb);
         dequeue(tcb);
-        crate::object::sched_context::complete_yield_to_target(tcb);
-        crate::object::sched_context::cancel_yield_to(tcb);
         crate::object::reply::remove_tcb(tcb);
         let _guard = lock_state(tcb);
         (*tcb).state = ThreadState::Inactive as u8;
@@ -2057,25 +1773,10 @@ pub unsafe fn resume(tcb: *mut Tcb) {
         crate::object::reply::remove_tcb(tcb);
         {
             let _guard = lock_state(tcb);
-            if (*tcb).time_slice_ticks == 0 {
-                (*tcb).time_slice_ticks = DEFAULT_TIME_SLICE_TICKS;
-            }
             (*tcb).state = ThreadState::Restart as u8;
         }
         enqueue(tcb);
     }
-}
-
-pub unsafe fn set_priority(tcb: *mut Tcb, prio: u8) {
-    let _ = (tcb, prio);
-}
-
-pub unsafe fn set_mcp(tcb: *mut Tcb, mcp: u8) {
-    let _ = (tcb, mcp);
-}
-
-pub unsafe fn set_domain(tcb: *mut Tcb, domain: u8) {
-    let _ = (tcb, domain);
 }
 
 pub unsafe fn set_affinity(tcb: *mut Tcb, affinity: u8) {
@@ -2274,14 +1975,6 @@ pub unsafe fn finalize(tcb: *mut Tcb) {
         // then run the normal suspend path before clearing Rust-local state.
         unbind_notification(tcb);
         crate::arch::current::fpu::release(tcb);
-        let sched_context = {
-            let _guard = lock_state(tcb);
-            (*tcb).sched_context
-        };
-        if sched_context != 0 {
-            let _ = crate::object::sched_context::try_unbind_tcb(sched_context, tcb);
-            crate::object::sched_context::complete_yield_to_yielder(sched_context);
-        }
         suspend(tcb);
         clear_finalized_state(tcb);
     }
@@ -2296,11 +1989,7 @@ unsafe fn clear_finalized_state(tcb: *mut Tcb) {
         (*tcb).reply_slot = 0;
         (*tcb).reply_object = 0;
         clear_endpoint_ipc_state_locked(tcb);
-        (*tcb).sched_context = 0;
         (*tcb).flags = 0;
-        (*tcb).yield_to_sc = 0;
-        (*tcb).yield_to_consumed_start = 0;
-        (*tcb).yield_from_tcb = 0;
         (*tcb).bound_notification = 0;
         (*tcb).ipc_buffer_uva = 0;
         (*tcb).ipc_buffer_kva = 0;

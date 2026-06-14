@@ -2,7 +2,7 @@
 //!
 //! The arch trap handler decodes the syscall number and routes here. This
 //! module dispatches capability invocations, endpoint/notification IPC,
-//! replies, and MCS receive variants, then writes the seL4-style reply
+//! replies, and explicit-reply receive variants, then writes the seL4-style reply
 //! registers back into the saved `UserContext` before returning to user mode.
 
 #![allow(dead_code)]
@@ -142,7 +142,7 @@ pub fn do_call(uc: &mut UserContext) {
         })
     };
     if endpoint_call {
-        // Endpoint Call is a real IPC send. A successful MCS reply will later
+        // Endpoint Call is a real IPC send. A successful reply will later
         // arrive through an explicit Reply cap, so we do not write the normal
         // invocation reply here.
         crate::api::ipc::call(uc);
@@ -158,8 +158,7 @@ pub fn do_call(uc: &mut UserContext) {
 
 fn restart_current_invocation_after_preemption(uc: &mut UserContext) {
     let current = crate::object::tcb::current();
-    let (runnable, _) = crate::object::tcb::runnable_sched_context_snapshot(current);
-    if runnable {
+    if crate::object::tcb::runnable_snapshot(current) {
         uc.pc = uc.restart_pc;
     }
 }
@@ -336,13 +335,13 @@ pub fn do_nbsend_recv_mcs(uc: &mut UserContext, wait: bool) {
     let saved_src = src;
     if send_dest != 0 {
         uc.regs[UserRegister::A0.index()] = send_dest;
-        do_send_with_donation(uc, true);
+        do_send_with_reply_rights(uc, true);
     }
     uc.regs[UserRegister::A0.index()] = saved_src;
     do_recv_inner(uc, true, if wait { 0 } else { reply_or_dest }, !wait);
 }
 
-fn do_send_with_donation(uc: &mut UserContext, nb: bool) {
+fn do_send_with_reply_rights(uc: &mut UserContext, nb: bool) {
     let cptr = uc.regs[UserRegister::A0.index()];
     let (cap, _slot) = match unsafe { thread::with_current(|t| lookup_cap(t, cptr)) } {
         Ok(v) => v,

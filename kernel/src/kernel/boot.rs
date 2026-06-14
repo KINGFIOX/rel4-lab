@@ -610,7 +610,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     };
 
     let RootCnodeInit {
-        root_sc_kva,
+        root_sc_kva: _,
         next_slot,
         schedcontrol_start_slot,
         schedcontrol_end_slot,
@@ -672,7 +672,6 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     ROOTSERVER_TCB.with_mut(|rs| {
         rs.ipc_buffer_uva = USER_IPC_BUFFER_VA as u64;
         rs.ipc_buffer_kva = init_ipc_buffer_tcb_cap.frame_base_ptr();
-        rs.sched_context = root_sc_kva;
     });
 
     // --- Populate BootInfo -----------------------------------------------
@@ -734,10 +733,6 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         t.context.regs[UserRegister::A1.index()] = 0;
         t.context.regs[UserRegister::Sp.index()] = USER_STACK_TOP as u64;
         t.state = crate::object::tcb::ThreadState::Running as u8;
-        t.priority = 255;
-        t.mcp = 255;
-        t.time_slice_ticks = tcb::DEFAULT_TIME_SLICE_TICKS;
-        t.sched_context = root_sc_kva;
         t as *mut Tcb
     });
     tcb::set_current(t);

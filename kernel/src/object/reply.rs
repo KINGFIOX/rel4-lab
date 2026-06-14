@@ -1,4 +1,4 @@
-//! Minimal MCS reply object.
+//! Minimal explicit reply object.
 
 #![allow(dead_code)]
 
@@ -261,7 +261,7 @@ pub unsafe fn push(
     caller: *mut Tcb,
     callee: *mut Tcb,
     reply_kva: u64,
-    can_donate: bool,
+    _reply_rights: bool,
     can_grant: bool,
 ) -> bool {
     if caller.is_null() || callee.is_null() || reply_kva == 0 {
@@ -282,7 +282,7 @@ pub unsafe fn push(
 
         tcb::dequeue(caller);
 
-        let _ = (can_donate, callee);
+        let _ = callee;
         tcb::set_blocked_on_reply(caller, reply_kva);
     }
     true

@@ -370,19 +370,7 @@ pub fn wake_current_core_of_tcb(tcb: *const Tcb) {
 
 pub fn remote_tcb_stall(tcb: *const Tcb) {
     debug_assert_kernel_lock_held();
-    if tcb.is_null() {
-        return;
-    }
-    if crate::object::tcb::sched_context_snapshot(tcb) == 0 {
-        return;
-    }
-    let Some(core) = current_core_of_tcb(tcb) else {
-        return;
-    };
-    if core == current_core_id() {
-        return;
-    }
-    remote_core_op(core, tcb, REMOTE_OP_STALL_TCB);
+    let _ = tcb;
 }
 
 pub fn remote_fpu_owner_release(core: usize, tcb: *const Tcb) {

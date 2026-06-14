@@ -26,7 +26,6 @@
 #![allow(dead_code)]
 
 use crate::object::endpoint;
-use crate::object::sched_context;
 use crate::object::tcb::{self, Tcb};
 use crate::object::wait_queue_lock::{self, WaitQueueLockGuard};
 
@@ -107,16 +106,6 @@ impl Notification {
         self.words[3] = p;
     }
 
-    #[inline]
-    pub(crate) fn sched_context(&self) -> u64 {
-        self.words[4]
-    }
-
-    #[inline]
-    pub(crate) fn set_sched_context(&mut self, p: u64) {
-        self.words[4] = p;
-    }
-
     /// Head of the blocked-receiver queue (or null).
     #[inline]
     fn head(&self) -> *mut Tcb {
@@ -159,14 +148,6 @@ pub(crate) unsafe fn lock_queue(ntfn: *const Notification) -> WaitQueueLockGuard
     wait_queue_lock::lock(ntfn.cast())
 }
 
-pub unsafe fn maybe_donate_sched_context(ntfn: *mut Notification, tcb: *mut Tcb) {
-    let _ = (ntfn, tcb);
-}
-
-pub unsafe fn maybe_return_sched_context(ntfn: *mut Notification, tcb: *mut Tcb) {
-    let _ = (ntfn, tcb);
-}
-
 pub(crate) unsafe fn bound_tcb_snapshot(ntfn: *const Notification) -> *mut Tcb {
     if ntfn.is_null() {
         return core::ptr::null_mut();
@@ -205,7 +186,6 @@ pub(crate) unsafe fn consume_active_locked(ntfn: *mut Notification, tcb: *mut Tc
         let badge = n.badge();
         n.set_badge(0);
         n.set_state(NtfnState::Idle);
-        maybe_donate_sched_context(ntfn, tcb);
         Some(badge)
     }
 }
@@ -367,19 +347,6 @@ struct DetachedNotification {
     waiters: *mut Tcb,
 }
 
-unsafe fn unbind_sched_context_locked(ntfn: *mut Notification) {
-    unsafe {
-        let sched_context = (*ntfn).sched_context();
-        if sched_context == 0 {
-            return;
-        }
-        (*ntfn).set_sched_context(0);
-        if is_kernel_pspace_kva(sched_context) {
-            sched_context::clear_notification_if_bound(sched_context, ntfn as u64);
-        }
-    }
-}
-
 unsafe fn unbind_bound_tcb_locked(ntfn: *mut Notification) {
     unsafe {
         let bound_tcb = (*ntfn).bound_tcb();
@@ -395,17 +362,15 @@ unsafe fn unbind_bound_tcb_locked(ntfn: *mut Notification) {
 
 unsafe fn detach_final_state_locked(ntfn: *mut Notification) -> DetachedNotification {
     unsafe {
-        unbind_sched_context_locked(ntfn);
         unbind_bound_tcb_locked(ntfn);
         let waiters = take_all_locked(ntfn);
         DetachedNotification { waiters }
     }
 }
 
-unsafe fn prepare_signal_receiver_locked(ntfn: *mut Notification, tcb: *mut Tcb, badge: u64) {
+unsafe fn prepare_signal_receiver_locked(_ntfn: *mut Notification, tcb: *mut Tcb, badge: u64) {
     unsafe {
         tcb::complete_notification_wait(tcb, badge);
-        maybe_donate_sched_context(ntfn, tcb);
     }
 }
 
@@ -435,7 +400,6 @@ unsafe fn try_signal_bound_endpoint(
         endpoint::remove_waiter_locked(ep, tcb);
         n.set_badge(0);
         n.set_state(NtfnState::Idle);
-        maybe_donate_sched_context(ntfn, tcb);
         Some((tcb, combined))
     }
 }
@@ -588,7 +552,6 @@ pub unsafe fn wait(ntfn: *mut Notification, tcb: *mut Tcb, blocking: bool) -> Wa
                 tcb::dequeue(tcb);
                 tcb::set_blocked_on_notification(tcb, ntfn as u64);
                 enqueue_waiter_locked(ntfn, tcb);
-                maybe_return_sched_context(ntfn, tcb);
             }
             n.set_state(NtfnState::Waiting);
             WaitOutcome::Blocked

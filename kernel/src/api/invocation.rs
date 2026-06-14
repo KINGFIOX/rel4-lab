@@ -328,7 +328,7 @@ pub fn handle_untyped(
         // allocation from offset 0 — mirrors `resetUntypedCap` in the C
         // kernel's `decodeUntypedInvocation`. This is what makes a
         // Revoke-on-parent return a fully fresh untyped to libsel4allocman
-        // so subsequent `_refill_pool` calls don't drown in NotEnoughMemory.
+        // so subsequent allocator pool refills don't drown in NotEnoughMemory.
         let cspace_guard = crate::object::cnode::lock_cspace();
         // Ensure target slots are empty.
         for i in 0..node_window {
@@ -514,7 +514,7 @@ fn user_map_error_reply(
 
 /// RISC-V Page_Map / Page_Unmap / Page_GetAddress.
 ///
-/// The labels live in `arch_invocation_label`. With the MCS ABI:
+/// The labels live in `arch_invocation_label`:
 ///   39 RISCVPageTableMap     40 RISCVPageTableUnmap
 ///   41 RISCVPageMap          42 RISCVPageUnmap
 ///   43 RISCVPageGetAddress
@@ -1067,32 +1067,6 @@ pub fn handle_sched_control(
     let _ = (cap, uc);
     Ok(())
 }
-#[inline]
-fn sched_control_time_args_valid(budget_us: u64, period_us: u64) -> bool {
-    use crate::abi::constants::{SEL4_MAX_PERIOD_US, SEL4_MIN_BUDGET_US, SEL4_TIMER_TICKS_PER_US};
-
-    if budget_us > SEL4_MAX_PERIOD_US || period_us > SEL4_MAX_PERIOD_US {
-        return false;
-    }
-    let budget_ticks = budget_us.saturating_mul(SEL4_TIMER_TICKS_PER_US);
-    let period_ticks = period_us.saturating_mul(SEL4_TIMER_TICKS_PER_US);
-    let min_budget_ticks = SEL4_MIN_BUDGET_US * SEL4_TIMER_TICKS_PER_US;
-    budget_ticks >= min_budget_ticks
-        && period_ticks >= min_budget_ticks
-        && budget_ticks <= period_ticks
-}
-#[inline]
-fn sched_context_max_extra_refills(sc_cap: Cap) -> u64 {
-    use crate::abi::constants::{SEL4_CORE_SCHED_CONTEXT_BYTES, SEL4_REFILL_SIZE_BYTES};
-
-    let size_bits = sc_cap.sched_context_size_bits();
-    let bytes = if size_bits >= u64::BITS as u64 {
-        u64::MAX
-    } else {
-        1u64 << size_bits
-    };
-    bytes.saturating_sub(SEL4_CORE_SCHED_CONTEXT_BYTES) / SEL4_REFILL_SIZE_BYTES
-}
 pub fn handle_sched_context(
     thread: &Thread,
     cap: Cap,
@@ -1135,7 +1109,7 @@ pub fn handle_sched_context(
 
 /// TCB invocations.
 ///
-/// Label values (MCS ABI) come from `enum invocation_label` in
+/// Label values come from `enum invocation_label` in
 /// `libsel4/include/sel4/invocation.h`:
 ///
 /// ```text
@@ -1198,7 +1172,7 @@ fn handle_thread_inner(
     match label_id {
         id if id == InvocationLabel::TcbConfigure.raw() => {
             {
-                // MCS libsel4: tag = MessageInfo(TCBConfigure, 0, 3, 3)
+                // libsel4: tag = MessageInfo(TCBConfigure, 0, 3, 3)
                 //   extraCaps[0] = cspace_root
                 //   extraCaps[1] = vspace_root
                 //   extraCaps[2] = buffer_frame
@@ -1241,7 +1215,7 @@ fn handle_thread_inner(
 
         id if id == InvocationLabel::TcbSetSpace.raw() => {
             {
-                // MCS libsel4: tag = MessageInfo(TCBSetSpace, 0, 3, 2)
+                // libsel4: tag = MessageInfo(TCBSetSpace, 0, 3, 2)
                 //   extraCaps[0] = fault_ep, [1] = cspace_root, [2] = vspace_root
                 //   mr0 = cspace_data, mr1 = vspace_data
                 if length < 2 {

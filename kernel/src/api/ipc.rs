@@ -2,7 +2,7 @@
 //! Reply / ReplyRecv state-machine glue that bridges `syscall::do_*`
 //! to `object::endpoint`.
 //!
-//! Design follows the C kernel's MCS path:
+//! Design follows the explicit reply-cap IPC path:
 //!
 //! * `seL4_Send` (blocking) and `seL4_Call` walk the EP. If a receiver
 //!   is already waiting → rendezvous, transfer message, wake the
@@ -17,7 +17,7 @@
 //!   whether the queued sender was a Call). No sender → block on the
 //!   EP (`BlockedOnReceive`).
 //! * `seL4_NBRecv` is Recv minus the blocking fallback.
-//! * Reply delivery comes through an MCS reply object.
+//! * Reply delivery comes through an explicit reply object.
 //! * `seL4_ReplyRecv` is Reply followed by Recv on a fresh cap/reply object.
 //!
 //! Message-register transfer:
@@ -44,7 +44,7 @@ use crate::abi::types::MessageInfo;
 use crate::api::cspace::{self, lookup_cap};
 use crate::api::invocation::derive_cap_for_copy;
 use crate::api::thread;
-use crate::arch::current::trap::{SEL4_USER_CONTEXT_REGS, UserContext, UserRegister};
+use crate::arch::current::trap::{UserContext, UserRegister};
 use crate::object::cap::{Cap, CapTag};
 use crate::object::cnode::Cte;
 use crate::object::endpoint::{self, EpState};
@@ -487,7 +487,7 @@ pub(crate) unsafe fn set_reply_object_for(
     reply_can_grant: bool,
     caller: *mut tcb::Tcb,
     can_grant: bool,
-    can_donate: bool,
+    _reply_rights: bool,
 ) -> bool {
     if receiver.is_null() || caller.is_null() || reply_kva == 0 {
         return false;
@@ -501,7 +501,7 @@ pub(crate) unsafe fn set_reply_object_for(
             caller,
             receiver,
             reply_kva,
-            can_donate,
+            false,
             can_grant && reply_can_grant,
         ) {
             return false;
@@ -510,11 +510,6 @@ pub(crate) unsafe fn set_reply_object_for(
         true
     }
 }
-unsafe fn maybe_donate_sched_context(from: *mut tcb::Tcb, to: *mut tcb::Tcb) -> bool {
-    let _ = (from, to);
-    false
-}
-
 unsafe fn consume_bound_notification_if_active(cur: *mut tcb::Tcb, uc: &mut UserContext) -> bool {
     if cur.is_null() {
         return false;
@@ -573,10 +568,8 @@ unsafe fn complete_receive_from_sender(
             );
         }
         if sender_state.is_call && can_reply {
-            // Park the caller on the receiver's MCS reply object. If no valid
-            // reply object was provided, MCS seL4 makes the caller inactive.
-            let can_donate_reply =
-                !sender_state.is_fault || sender_state.fault_label != FaultLabel::Timeout.raw();
+            // Park the caller on the receiver's explicit reply object. If no
+            // valid reply object was provided, the caller becomes inactive.
             let reply_set = match reply_object_for_receive(cur, reply_cptr) {
                 Some((reply_cptr, reply_kva, reply_can_grant)) => set_reply_object_for(
                     cur,
@@ -585,14 +578,12 @@ unsafe fn complete_receive_from_sender(
                     reply_can_grant,
                     sender,
                     sender_state.can_grant,
-                    can_donate_reply,
+                    false,
                 ),
                 None => false,
             };
             if reply_set {
-                if can_donate_reply {
-                    maybe_donate_sched_context(sender, cur);
-                }
+                // Caller is now parked on the reply object.
             } else if sender_state.is_fault {
                 tcb::set_inactive(sender);
                 tcb::clear_waiting_on(sender);
@@ -612,7 +603,7 @@ unsafe fn complete_receive_from_sender(
 /// `seL4_Send` on an Endpoint. `blocking` controls whether we queue
 /// (true → `seL4_Send`) or drop (false → `seL4_NBSend`) when no
 /// receiver is waiting.
-pub fn send(uc: &mut UserContext, blocking: bool, can_donate: bool) {
+pub fn send(uc: &mut UserContext, blocking: bool, _reply_rights: bool) {
     let cptr = uc.regs[UserRegister::A0.index()];
     let info = MessageInfo(uc.regs[UserRegister::A1.index()]);
 
@@ -667,9 +658,6 @@ pub fn send(uc: &mut UserContext, blocking: bool, can_donate: bool) {
             extra_cap_slots,
         );
         tcb::wake_blocked_receiver_after_send(receiver);
-        if can_donate {
-            maybe_donate_sched_context(cur, receiver);
-        }
         tcb::enqueue(receiver);
     }
 }
@@ -744,7 +732,6 @@ fn recv_with_reply(uc: &mut UserContext, blocking: bool, reply_cptr: u64) {
             {
                 RecvBlockAction::Notification(badge)
             } else {
-                crate::object::notification::maybe_return_sched_context(ntfn, cur);
                 block_receiver_locked(ep, cur, cap.endpoint_can_grant(), reply_cptr);
                 RecvBlockAction::Blocked
             }
@@ -773,10 +760,10 @@ fn recv_with_reply(uc: &mut UserContext, blocking: bool, reply_cptr: u64) {
     }
 }
 
-/// `seL4_Call`. Equivalent to a blocking Send followed by an explicit
-/// wait for the matching Reply. Rendezvous transfers the message,
-/// binds the receiver's MCS reply object to the caller, and parks the
-/// caller on `BlockedOnReply`. No receiver waiting -> queue as a Call sender.
+/// `seL4_Call`. Equivalent to a blocking Send followed by an explicit wait for
+/// the matching Reply. Rendezvous transfers the message, binds the receiver's
+/// reply object to the caller, and parks the caller on `BlockedOnReply`. No
+/// receiver waiting -> queue as a Call sender.
 pub fn call(uc: &mut UserContext) {
     let cptr = uc.regs[UserRegister::A0.index()];
     let info = MessageInfo(uc.regs[UserRegister::A1.index()]);
@@ -844,7 +831,6 @@ pub fn call(uc: &mut UserContext) {
             ) {
                 // Park the caller until Reply comes back.
                 tcb::finish_call_sender_after_rendezvous(cur, true);
-                maybe_donate_sched_context(cur, receiver);
             } else {
                 tcb::finish_call_sender_after_rendezvous(cur, false);
             }
@@ -856,8 +842,8 @@ pub fn call(uc: &mut UserContext) {
     }
 }
 
-/// MCS has no implicit caller slot. Reply delivery is driven by Send on an
-/// explicit Reply cap, so this compatibility hook is a no-op.
+/// Reply delivery is driven by Send on an explicit Reply cap, so this
+/// compatibility hook is a no-op.
 pub fn reply(uc: &mut UserContext) {
     let _ = uc;
 }
@@ -893,15 +879,11 @@ pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb) {
                     label if label == FaultLabel::UserException.raw() => {
                         apply_user_exception_reply(cur, uc, caller, info.length())
                     }
-                    label if label == FaultLabel::Timeout.raw() => {
-                        apply_timeout_reply(cur, uc, caller, info.length())
-                    }
                     _ => {}
                 }
             } else {
                 let no_resume = fault_label == FaultLabel::UnknownSyscall.raw()
                     || fault_label == FaultLabel::UserException.raw();
-                let no_resume = no_resume || fault_label == FaultLabel::Timeout.raw();
                 if no_resume {
                     wake_caller = false;
                 }
@@ -931,37 +913,6 @@ unsafe fn apply_user_exception_reply(
         if n >= 2 {
             regs[reg_count] = (UserRegister::Sp.index(), reply_mr(sender, uc, 1));
             reg_count += 1;
-        }
-        tcb::write_user_context(caller, pc, &regs[..reg_count]);
-    }
-}
-
-unsafe fn apply_timeout_reply(
-    sender: *mut tcb::Tcb,
-    uc: &UserContext,
-    caller: *mut tcb::Tcb,
-    length: u64,
-) {
-    let n = (length as usize).min(32);
-    let mut values = [0u64; 32];
-    unsafe {
-        for i in 0..n {
-            values[i] = reply_mr(sender, uc, i);
-        }
-        let mut regs = [(0usize, 0u64); 32];
-        let mut reg_count = 0;
-        let mut pc = None;
-        for i in 0..n {
-            let v = values[i];
-            if i == 0 {
-                pc = Some(v);
-            } else {
-                let reg = SEL4_USER_CONTEXT_REGS[i];
-                if reg != 0 {
-                    regs[reg_count] = (reg, v);
-                    reg_count += 1;
-                }
-            }
         }
         tcb::write_user_context(caller, pc, &regs[..reg_count]);
     }

@@ -505,7 +505,7 @@ unsafe fn finish_fault_ipc_receive(
     receiver: *mut crate::object::tcb::Tcb,
     fault_tcb: *mut crate::object::tcb::Tcb,
     handler_cap: crate::object::cap::Cap,
-    can_donate: bool,
+    _reply_rights: bool,
 ) {
     use crate::object::tcb;
 
@@ -521,7 +521,7 @@ unsafe fn finish_fault_ipc_receive(
             reply_can_grant,
             fault_tcb,
             handler_cap.endpoint_can_grant(),
-            can_donate,
+            false,
         ) {
             tcb::clear_waiting_on(fault_tcb);
         } else {
