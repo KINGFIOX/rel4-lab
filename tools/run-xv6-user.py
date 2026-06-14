@@ -15,6 +15,7 @@ from tool_common import (
     ROOT_DIR,
     BuildLock,
     LoggedProcess,
+    default_xv6_out_dir,
     die,
     ensure_rust_log_at_least_info,
     env_flag,
@@ -55,7 +56,7 @@ Environment:
   SMP=N|ON|OFF         QEMU CPU count, or ON to use NUM_NODES, default 2
   XV6_ATTACH_FS_IMG=0  boot without attaching xv6 fs.img as virtio-blk
   XV6_BUILD_FS_IMG=0   attach existing XV6_FS_IMG without rebuilding it
-  XV6_FS_IMG=PATH      fs image path, default target/xv6compat/fs.img
+  XV6_FS_IMG=PATH      fs image path, default target/xv6compat/ARCH/fs.img
   XV6_KEEP_RUN_FS_IMG=1 keep the default per-run fs.img copy after QEMU exits
   XV6_EXPECT_TIMEOUT=1  treat timeout as success if no fatal log pattern appears
   KERNEL_DEBUG_LOG_FILE=PATH  kernel debug UART log path
@@ -131,14 +132,15 @@ def main(argv: list[str]) -> int:
     attach_fs_img = getenv("XV6_ATTACH_FS_IMG", "1") == "1"
     build_fs_img = getenv("XV6_BUILD_FS_IMG", "1") == "1"
     fs_img_explicit = "XV6_FS_IMG" in os.environ
-    xv6_fs_img = Path(getenv("XV6_FS_IMG", str(ROOT_DIR / "target" / "xv6compat" / "fs.img")))
+    out_dir = default_xv6_out_dir(target)
+    xv6_fs_img = Path(getenv("XV6_FS_IMG", str(out_dir / "fs.img")))
     keep_run_fs_img = getenv("XV6_KEEP_RUN_FS_IMG", "0") == "1"
     run_id = getenv("XV6_RUN_ID", f"{program}-{os.getpid()}")
     run_fs_img: Path | None = None
     run_qemu_stdin_file: Path | None = None
 
     if qemu_stdin_text:
-        run_qemu_stdin_file = ROOT_DIR / "target" / "xv6compat" / f"qemu-stdin-{run_id}.txt"
+        run_qemu_stdin_file = out_dir / f"qemu-stdin-{run_id}.txt"
         run_qemu_stdin_file.parent.mkdir(parents=True, exist_ok=True)
         run_qemu_stdin_file.write_text(qemu_stdin_text)
         qemu_stdin_file = str(run_qemu_stdin_file)
@@ -167,7 +169,7 @@ def main(argv: list[str]) -> int:
         if attach_fs_img and not xv6_fs_img.is_file():
             die(PREFIX, f"XV6_FS_IMG not found: {xv6_fs_img}")
         if attach_fs_img and not fs_img_explicit:
-            run_fs_img = ROOT_DIR / "target" / "xv6compat" / f"fs-{run_id}.img"
+            run_fs_img = out_dir / f"fs-{run_id}.img"
             run_fs_img.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(xv6_fs_img, run_fs_img)
             xv6_fs_img = run_fs_img

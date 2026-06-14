@@ -273,6 +273,10 @@ def default_xv6_dir_for_target(target) -> Path:
     return requested
 
 
+def default_xv6_out_dir(target) -> Path:
+    return ROOT_DIR / "target" / "xv6compat" / target.name
+
+
 def prepare_xv6_dir_for_target(prefix: str, target, source_dir: Path, out_dir: Path) -> Path:
     if target.name != "loongarch64":
         return source_dir

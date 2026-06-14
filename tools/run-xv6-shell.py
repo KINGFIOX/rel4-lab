@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tool_common import (
     ROOT_DIR,
     BuildLock,
+    default_xv6_out_dir,
     die,
     ensure_rust_log_at_least_info,
     getenv,
@@ -46,7 +47,7 @@ Environment:
   SMP=N|ON|OFF          QEMU CPU count, or ON to use NUM_NODES, default 2
   XV6_ATTACH_FS_IMG=0   boot without attaching xv6 fs.img as virtio-blk
   XV6_BUILD_FS_IMG=0    attach existing XV6_FS_IMG without rebuilding it
-  XV6_FS_IMG=PATH       fs image path, default target/xv6compat/fs.img
+  XV6_FS_IMG=PATH       fs image path, default target/xv6compat/ARCH/fs.img
   XV6_KEEP_RUN_FS_IMG=1 keep the default per-run fs.img copy after QEMU exits
   XV6_RUN_ID=NAME       output image/log suffix, default shell-$PID
   OUT_IMAGE=PATH        packed image path
@@ -78,7 +79,8 @@ def build_image(run_id: str, target) -> tuple[Path, Path | None, bool]:
     attach_fs_img = getenv("XV6_ATTACH_FS_IMG", "1") == "1"
     build_fs_img = getenv("XV6_BUILD_FS_IMG", "1") == "1"
     fs_img_explicit = "XV6_FS_IMG" in os.environ
-    xv6_fs_img = Path(getenv("XV6_FS_IMG", str(ROOT_DIR / "target" / "xv6compat" / "fs.img")))
+    out_dir = default_xv6_out_dir(target)
+    xv6_fs_img = Path(getenv("XV6_FS_IMG", str(out_dir / "fs.img")))
     keep_run_fs_img = getenv("XV6_KEEP_RUN_FS_IMG", "0") == "1"
     run_fs_img: Path | None = None
 
@@ -98,7 +100,7 @@ def build_image(run_id: str, target) -> tuple[Path, Path | None, bool]:
         if attach_fs_img and not xv6_fs_img.is_file():
             die(PREFIX, f"XV6_FS_IMG not found: {xv6_fs_img}")
         if attach_fs_img and not fs_img_explicit:
-            run_fs_img = ROOT_DIR / "target" / "xv6compat" / f"fs-{run_id}.img"
+            run_fs_img = out_dir / f"fs-{run_id}.img"
             run_fs_img.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(xv6_fs_img, run_fs_img)
             xv6_fs_img = run_fs_img
