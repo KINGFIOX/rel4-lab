@@ -67,11 +67,36 @@ const PAGE_WALK_CONTROL_LOW: usize = (PAGE_SHIFT << PWCL_PTBASE_SHIFT)
     | (PAGE_WALK_PTE_WIDTH_64 << PWCL_PTEWIDTH_SHIFT);
 const PAGE_WALK_CONTROL_HIGH: usize = 0;
 
+const CRMD_DA: usize = 1 << 3;
+const CRMD_PG: usize = 1 << 4;
+const DMW_PLV0: usize = 1 << 0;
+const DMW_MAT_SHIFT: usize = 4;
+const DMW_MAT_CC: usize = 0b01 << DMW_MAT_SHIFT;
+const DMW_PSEG_SHIFT: usize = 25;
+const DMW_VSEG_SHIFT: usize = 60;
+// Staging low-identity kernel layout: PLV0 sees VA[0x0...] as PA[0x0...].
+// PLV3 is deliberately not enabled here, so user mappings still use PGDL.
+const DMW_LOW_DIRECT: usize = DMW_PLV0 | DMW_MAT_CC;
+
 #[inline]
 fn configure_page_walk() {
     csr::set_pwcl(PAGE_WALK_CONTROL_LOW);
     csr::set_pwch(PAGE_WALK_CONTROL_HIGH);
     csr::set_stlbps(PAGE_SHIFT);
+}
+
+#[inline]
+fn configure_kernel_direct_map() {
+    csr::set_dmw0(DMW_LOW_DIRECT);
+    csr::set_dmw1(0);
+    csr::set_dmw2(0);
+    csr::set_dmw3(0);
+}
+
+#[inline]
+fn enable_paging() {
+    let crmd = csr::crmd();
+    csr::set_crmd((crmd & !CRMD_DA) | CRMD_PG);
 }
 
 #[repr(C, align(4096))]
@@ -422,12 +447,15 @@ pub unsafe fn switch_satp(satp_val: u64) {
     if satp_val == 0 {
         return;
     }
+    configure_kernel_direct_map();
     configure_page_walk();
     if current_satp() == satp_val {
+        enable_paging();
         return;
     }
     csr::set_pgdl((satp_val & !0xfffu64) as usize);
     csr::set_asid((satp_val & csr::ASID_MASK as u64) as usize);
+    enable_paging();
     csr::sfence_vma_all();
     csr::fence_i();
 }
@@ -495,7 +523,10 @@ pub fn user_flags(read: bool, write: bool, exec: bool) -> u64 {
     f
 }
 
-pub fn copy_kernel_mappings_to(_pt: *mut PageTable) {}
+pub fn copy_kernel_mappings_to(_pt: *mut PageTable) {
+    // LoongArch keeps kernel access in the PLV0-only DMW direct map; copying
+    // low-address kernel leaves into user roots would collide with user PTs.
+}
 
 pub fn make_boot_root_pt() -> *mut PageTable {
     alloc_pt_page()
@@ -519,4 +550,7 @@ const _: () = {
     assert!(PAGE_WALK_DIR1_BASE < 32);
     assert!(PAGE_WALK_DIR2_BASE < 32);
     assert!(PAGE_WALK_PTE_WIDTH_64 < 4);
+    assert!(DMW_PSEG_SHIFT < DMW_VSEG_SHIFT);
+    assert!(DMW_LOW_DIRECT & (0xfusize << DMW_PSEG_SHIFT) == 0);
+    assert!(DMW_LOW_DIRECT & (0xfusize << DMW_VSEG_SHIFT) == 0);
 };
