@@ -1,6 +1,6 @@
 ---
 name: microkernel-no-preempt
-description: Keep this Rust RV64/LoongArch seL4-style microkernel free of preemptive scheduler behavior while keeping user-space portable across seL4 and rel4. Use when rolling back, reviewing, planning, or changing timer, trap, scheduler, runqueue, context-switch code, or user-space assumptions so timer-driven preemption, timeslice expiry, quantum rotation, asynchronous budget charging, and involuntary scheduler switches are removed or kept out of scope unless the user explicitly asks for preemptive scheduling.
+description: Keep this Rust RV64/LoongArch seL4-style microkernel free of preemptive scheduler behavior while preserving user-space portability across seL4 and rel4. Use when reviewing, planning, maintaining, or changing timer, trap, scheduler, runqueue, context-switch code, or user-space assumptions so timer-driven preemption, timeslice expiry, quantum rotation, asynchronous budget charging, and involuntary scheduler switches stay absent or kept out of scope unless the user explicitly asks for preemptive scheduling.
 ---
 
 # Microkernel No Preempt
@@ -9,9 +9,11 @@ description: Keep this Rust RV64/LoongArch seL4-style microkernel free of preemp
 
 Use this skill to keep scheduling cooperative/non-preemptive. Threads should switch when they block, yield, fault into the kernel, or make explicit syscalls that change runnable state, not because a timer interrupt expired a quantum.
 
-User-space written for this project must not rely on preemptive scheduling for correctness, progress, ordering, fairness, or timing. It may still run on seL4, where timer preemption exists, but the program logic must also work on rel4 when context switches happen only at explicit kernel interaction points.
+User-space written for this project may run on seL4, where timer preemption exists, but its correctness must not depend on that behavior. The same source should also run on rel4, where context switches happen only at explicit kernel interaction points.
 
-## Remove Or Avoid
+Preemption-related effects must not be part of the rel4 user-space contract. User programs must not rely on timer preemption for correctness, progress, ordering, fairness, or timing.
+
+## Avoid
 
 Treat these as out of scope unless the user explicitly requests preemptive scheduling:
 
@@ -31,19 +33,19 @@ Keep these behaviors available:
 
 ## Compatibility Policy
 
-- Prefer user-space source compatibility with seL4, but do not require rel4 to emulate seL4 timer preemption or quantum-expiry behavior.
-- User-space may use explicit `Yield`, blocking IPC, notifications, sleeps, or other explicit synchronization points to make progress portable between seL4 and rel4.
+- Prefer source compatibility with seL4 user programs: timer APIs, `Yield`, blocking IPC, notifications, sleeps, or related constants may exist if they are needed for the same user binary/source to build or run on seL4 and rel4.
+- These compatibility paths may expose time or interrupt services, but they must not make rel4 emulate seL4 quantum expiry, timer-driven ready-queue rotation, or involuntary preemption.
+- User-space written for this project must not depend on preemption for correctness, progress, timing, IPC ordering, or fairness. If a workflow needs interleaving, make it explicit with `Yield`, blocking IPC, notifications, sleeps, or protocol-level synchronization.
 - Do not introduce tests, service loops, or user programs that assume a CPU-bound thread will be involuntarily preempted so another runnable thread can run.
-- If a user-space workflow needs interleaving, make it explicit in protocol logic rather than relying on timer-driven scheduler interruption.
 
 ## Workflow
 
 1. Inspect existing diffs before editing with `git status --short` and task-scoped `git diff`.
-2. Remove preemption policy from shared scheduler code before modifying architecture trap handlers.
+2. Keep preemption policy out of shared scheduler code before modifying architecture trap handlers.
 3. In `kernel/src/arch/riscv64/trap.rs` and `kernel/src/arch/loongarch64/trap.rs`, keep timer handlers focused on interrupt delivery and timer reprogramming, not scheduler quantum expiry.
 4. Keep runqueue operations deterministic: enqueue runnable threads, dequeue selected threads, and reschedule only after explicit kernel events.
 5. Make RISC-V and LoongArch trap/timer behavior symmetric unless a hardware difference requires a narrow arch-specific branch.
-6. When changing user-space, remove assumptions that timer preemption will provide fairness or progress; add explicit yield/blocking/synchronization where needed.
+6. When changing user-space, avoid assumptions that timer preemption will provide fairness or progress; add explicit yield/blocking/synchronization where needed.
 
 ## Validation
 
@@ -54,4 +56,4 @@ Use the smallest useful validation stage:
 - Architecture parity: validate both `ARCH=riscv64` and `ARCH=loongarch64` when shared scheduling or both trap handlers changed.
 - xv6 impact: run a targeted xv6 program such as `tools/run-xv6-user.py forktest` before broad `usertests`.
 
-Do not claim preemption removal is complete until temporary diagnostics are removed and relevant focused validations pass.
+Do not claim preemption avoidance is complete until temporary diagnostics are cleaned up and relevant focused validations pass.

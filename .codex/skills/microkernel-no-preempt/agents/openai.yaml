@@ -1,4 +1,4 @@
 interface:
   display_name: "Microkernel No Preempt"
   short_description: "Keep preemptive scheduling out of scope"
-  default_prompt: "Use $microkernel-no-preempt when rolling back or changing this microkernel so timer-driven preemption, timeslice expiry, quantum rotation, and scheduler decisions from asynchronous timer budget accounting are out of scope; user-space must not rely on preemption for correctness, ordering, fairness, or progress unless explicitly requested."
+  default_prompt: "Use $microkernel-no-preempt when changing this microkernel so timer-driven preemption, timeslice expiry, quantum rotation, and scheduler decisions from asynchronous timer budget accounting are out of scope; keep user-space portable across seL4 and rel4 by requiring explicit yield, blocking, or synchronization instead of relying on preemption for correctness, ordering, fairness, or progress."
