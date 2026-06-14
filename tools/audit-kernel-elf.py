@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import struct
 import sys
 from dataclasses import dataclass
@@ -37,7 +38,12 @@ PF_X = 1 << 0
 PF_W = 1 << 1
 PF_R = 1 << 2
 PAGE_SIZE = 4096
-KERNEL_STACK_BYTES = 512 * 1024
+RUST_USIZE_CONST_RE = re.compile(
+    r"pub\s+const\s+(?P<name>[A-Z0-9_]+)\s*:\s*usize\s*=\s*(?P<expr>[^;]+);"
+)
+BOOT_STACK_IMMEDIATE_RE = re.compile(
+    r'"li(?:\.d)?\s+(?:\$)?t1,\s*(?P<value>[0-9_]+)"'
+)
 
 
 @dataclass(frozen=True)
@@ -115,6 +121,16 @@ class LayoutExpectation:
     max_load_end_paddr: int | None = None
 
 
+@dataclass(frozen=True)
+class StackExpectation:
+    per_hart_bytes: int
+    max_harts: int
+
+    @property
+    def total_bytes(self) -> int:
+        return self.per_hart_bytes * self.max_harts
+
+
 EXPECTATIONS = {
     "riscv64": LayoutExpectation(
         machine=RISCV_ELF_MACHINE,
@@ -140,6 +156,44 @@ def target_arch(target_name: str) -> str:
     if target_name == "loongarch64":
         return "loongarch64"
     die(PREFIX, f"unsupported ARCH={target_name}")
+
+
+def eval_rust_usize_expr(expr: str, constants: dict[str, int]) -> int:
+    text = expr.split("//", 1)[0].strip()
+    for name, value in sorted(constants.items(), key=lambda item: len(item[0]), reverse=True):
+        text = re.sub(rf"\b{re.escape(name)}\b", str(value), text)
+    text = text.replace("_", "")
+    if not re.fullmatch(r"[0-9()+*\- /]+", text):
+        die(PREFIX, f"unsupported Rust usize expression: {expr}")
+    return int(eval(text, {"__builtins__": {}}, {}))
+
+
+def read_smp_stack_expectation() -> StackExpectation:
+    path = ROOT_DIR / "kernel" / "src" / "kernel" / "smp.rs"
+    constants: dict[str, int] = {}
+    for match in RUST_USIZE_CONST_RE.finditer(path.read_text()):
+        name = match.group("name")
+        if name not in ("MAX_BOOT_HARTS", "KERNEL_STACK_BYTES"):
+            continue
+        constants[name] = eval_rust_usize_expr(match.group("expr"), constants)
+    missing = {"MAX_BOOT_HARTS", "KERNEL_STACK_BYTES"} - constants.keys()
+    if missing:
+        die(PREFIX, f"missing SMP stack constants in {path}: {', '.join(sorted(missing))}")
+    return StackExpectation(
+        per_hart_bytes=constants["KERNEL_STACK_BYTES"],
+        max_harts=constants["MAX_BOOT_HARTS"],
+    )
+
+
+def boot_stack_immediate(arch: str) -> int:
+    path = ROOT_DIR / "kernel" / "src" / "arch" / arch / "boot.rs"
+    matches = [
+        int(match.group("value").replace("_", ""))
+        for match in BOOT_STACK_IMMEDIATE_RE.finditer(path.read_text())
+    ]
+    if len(matches) != 1:
+        die(PREFIX, f"expected one boot stack immediate in {path}, found {len(matches)}")
+    return matches[0]
 
 
 def parse_header(data: bytes) -> ElfHeader:
@@ -303,6 +357,7 @@ def validate_symbols(
     symbols: dict[str, Symbol],
     program_headers: list[ProgramHeader],
     expectation: LayoutExpectation,
+    stack_expectation: StackExpectation,
 ) -> list[str]:
     errors: list[str] = []
     required = (
@@ -349,9 +404,11 @@ def validate_symbols(
     ):
         errors.append("BSS/stack/kernel-end linker symbols are not ordered")
     stack_bytes = sym("__stack_top") - sym("__stack_bottom")
-    if stack_bytes != KERNEL_STACK_BYTES:
+    if stack_bytes != stack_expectation.total_bytes:
         errors.append(
-            f"kernel stack reserve is {stack_bytes:#x}, expected {KERNEL_STACK_BYTES:#x}"
+            f"kernel stack reserve is {stack_bytes:#x}, "
+            f"expected {stack_expectation.total_bytes:#x} "
+            f"({stack_expectation.max_harts} * {stack_expectation.per_hart_bytes:#x})"
         )
     if sym("__bss_end") % 8 != 0:
         errors.append(f"__bss_end is not 8-byte aligned: {sym('__bss_end'):#x}")
@@ -388,6 +445,7 @@ def main(argv: list[str]) -> int:
     target = target_from_env(PREFIX)
     arch = target_arch(target.name)
     expectation = EXPECTATIONS[arch]
+    stack_expectation = read_smp_stack_expectation()
     rust_target = rust_target_from_env(target)
 
     if args.build:
@@ -404,11 +462,17 @@ def main(argv: list[str]) -> int:
     program_headers = parse_program_headers(data, header)
     sections = parse_section_headers(data, header)
     symbols = parse_symbols(data, sections)
+    stack_immediate = boot_stack_immediate(arch)
     errors = [
         *validate_header(header, expectation),
         *validate_load_segments(program_headers, expectation),
-        *validate_symbols(symbols, program_headers, expectation),
+        *validate_symbols(symbols, program_headers, expectation, stack_expectation),
     ]
+    if stack_immediate != stack_expectation.per_hart_bytes:
+        errors.append(
+            f"boot stack stride is {stack_immediate:#x}, "
+            f"expected {stack_expectation.per_hart_bytes:#x}"
+        )
     if errors:
         for error in errors:
             log(PREFIX, f"FAIL: {error}")
