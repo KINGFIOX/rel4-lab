@@ -47,6 +47,30 @@ BOOT_STACK_IMMEDIATE_RE = re.compile(
 BOOT_STACK_CONST_RE = re.compile(
     r"kernel_stack_bytes\s*=\s*const\s+crate::kernel::smp::KERNEL_STACK_BYTES"
 )
+BOOT_FN_RE = re.compile(
+    r"pub\s+extern\s+\"C\"\s+fn\s+(?P<name>init_kernel|init_secondary_hart)\s*"
+    r"\((?P<body>.*?)\)\s*->\s*!",
+    re.S,
+)
+BOOT_ARGS_RE = re.compile(r"pub\s+struct\s+BootArgs\s*\{(?P<body>.*?)\}", re.S)
+BOOT_ARGS_INIT_RE = re.compile(
+    r"crate::kernel::boot::BootArgs\s*\{(?P<body>.*?)\}",
+    re.S,
+)
+RUST_FIELD_RE = re.compile(r"pub\s+([A-Za-z_][A-Za-z0-9_]*)\s*:")
+RUST_PARAM_RE = re.compile(r"(_?[A-Za-z][A-Za-z0-9_]*)\s*:\s*usize")
+RUST_INIT_FIELD_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*,")
+
+EXPECTED_BOOT_HANDOFF_FIELDS = (
+    "user_pstart",
+    "user_pend",
+    "pv_offset",
+    "user_ventry",
+    "dtb_pa",
+    "dtb_size",
+    "hart_id",
+    "core_id",
+)
 
 
 @dataclass(frozen=True)
@@ -198,6 +222,65 @@ def validate_boot_stack_source(arch: str) -> list[str]:
         errors.append(
             f"{path.relative_to(ROOT_DIR)} does not bind boot stack stride to KERNEL_STACK_BYTES"
         )
+    return errors
+
+
+def source_field_list(body: str, pattern: re.Pattern[str]) -> list[str]:
+    return [match.group(1).lstrip("_") for match in pattern.finditer(body)]
+
+
+def validate_boot_handoff_source(arch: str) -> list[str]:
+    shared_boot = ROOT_DIR / "kernel" / "src" / "kernel" / "boot.rs"
+    arch_boot = ROOT_DIR / "kernel" / "src" / "arch" / arch / "boot.rs"
+    shared_text = shared_boot.read_text()
+    arch_text = arch_boot.read_text()
+    expected = list(EXPECTED_BOOT_HANDOFF_FIELDS)
+    errors: list[str] = []
+
+    boot_args_match = BOOT_ARGS_RE.search(shared_text)
+    if boot_args_match is None:
+        errors.append(f"{shared_boot.relative_to(ROOT_DIR)} is missing BootArgs")
+    else:
+        fields = source_field_list(boot_args_match.group("body"), RUST_FIELD_RE)
+        if fields != expected:
+            errors.append(f"BootArgs fields are {fields}, expected {expected}")
+
+    functions = {
+        match.group("name"): match.group("body")
+        for match in BOOT_FN_RE.finditer(arch_text)
+    }
+    for name in ("init_kernel", "init_secondary_hart"):
+        body = functions.get(name)
+        if body is None:
+            errors.append(f"{arch_boot.relative_to(ROOT_DIR)} is missing {name}")
+            continue
+        params = source_field_list(body, RUST_PARAM_RE)
+        if params != expected:
+            errors.append(
+                f"{arch_boot.relative_to(ROOT_DIR)} {name} params are {params}, expected {expected}"
+            )
+
+    init_matches = BOOT_ARGS_INIT_RE.findall(arch_text)
+    if not init_matches:
+        errors.append(f"{arch_boot.relative_to(ROOT_DIR)} does not construct BootArgs")
+    else:
+        fields = source_field_list(init_matches[0], RUST_INIT_FIELD_RE)
+        if fields != expected:
+            errors.append(
+                f"{arch_boot.relative_to(ROOT_DIR)} BootArgs initializer fields are "
+                f"{fields}, expected {expected}"
+            )
+
+    for name in ("init_kernel", "init_secondary_hart"):
+        if f"{name} = sym {name}" not in arch_text:
+            errors.append(
+                f"{arch_boot.relative_to(ROOT_DIR)} does not bind {name} as an asm symbol"
+            )
+        if f"{{{name}}}" not in arch_text:
+            errors.append(
+                f"{arch_boot.relative_to(ROOT_DIR)} does not call {name} from _start asm"
+            )
+
     return errors
 
 
@@ -472,6 +555,7 @@ def main(argv: list[str]) -> int:
         *validate_load_segments(program_headers, expectation),
         *validate_symbols(symbols, program_headers, expectation, stack_expectation),
         *validate_boot_stack_source(arch),
+        *validate_boot_handoff_source(arch),
     ]
     if errors:
         for error in errors:
