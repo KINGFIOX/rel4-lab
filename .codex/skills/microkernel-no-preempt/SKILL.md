@@ -1,6 +1,6 @@
 ---
 name: microkernel-no-preempt
-description: Keep this Rust RV64/LoongArch seL4-style microkernel free of preemptive scheduler behavior while preserving seL4-compatible user-space source portability. Use when reviewing, planning, maintaining, or changing timer, trap, scheduler, runqueue, context-switch code, or user-space assumptions so timer-driven preemption, timeslice expiry, quantum rotation, asynchronous budget charging, involuntary scheduler switches, and project user-space reliance on preemption stay absent or kept out of scope unless the user explicitly asks for preemptive scheduling.
+description: Keep this Rust RV64/LoongArch seL4-style microkernel free of preemptive scheduler behavior while preserving seL4-compatible user-space source portability. Use when reviewing, planning, maintaining, or changing timer, trap, scheduler, runqueue, context-switch code, or project user-space assumptions so timer-driven preemption, timeslice expiry, quantum rotation, asynchronous budget charging, involuntary scheduler switches, and any reliance on preemption for correctness, progress, ordering, fairness, or timing stay absent unless the user explicitly asks for preemptive scheduling.
 ---
 
 # Microkernel No Preempt
@@ -11,7 +11,7 @@ Use this skill to keep scheduling cooperative/non-preemptive. Threads should swi
 
 User-space written for this project should be portable across seL4 and rel4. It may run on seL4, where timer preemption exists, but it must be written as if preemption is not a correctness or progress guarantee. The same source should also run on rel4, where context switches happen only at explicit kernel interaction points.
 
-Preemption-related effects must not be part of the rel4 user-space contract. User programs must not rely on timer preemption for correctness, progress, ordering, fairness, or timing.
+Preemption-related effects must not be part of the rel4 user-space contract. Project user programs may tolerate being preempted on seL4, but they must not rely on timer preemption for correctness, progress, ordering, fairness, or timing on either kernel.
 
 ## Avoid
 
@@ -35,8 +35,9 @@ Keep these behaviors available:
 
 - Prefer source compatibility with seL4 user programs: timer APIs, `Yield`, blocking IPC, notifications, sleeps, or related constants may exist if they are needed for the same user binary/source to build or run on seL4 and rel4.
 - These compatibility paths may expose time or interrupt services, but they must not make rel4 emulate seL4 quantum expiry, timer-driven ready-queue rotation, or involuntary preemption.
-- User-space written for this project may tolerate seL4 preemption, but it must remain correct when rel4 never preempts a running thread. Do not use CPU-bound busy loops, implicit time slicing, or assumed involuntary interleaving as part of the program's correctness, progress, timing, IPC ordering, or fairness story.
-- If a workflow needs another runnable thread to make progress, make that dependency explicit with `Yield`, blocking IPC, notifications, sleeps, or protocol-level synchronization.
+- User-space written for this project may set up workloads that are preemptible on seL4, but it must remain correct when rel4 never preempts a running thread.
+- Do not use CPU-bound busy loops, implicit time slicing, scheduler tick side effects, or assumed involuntary interleaving as part of a program's correctness, progress, timing, IPC ordering, or fairness story.
+- If a workflow needs another runnable thread to make progress, make that dependency explicit with `Yield`, blocking IPC, notifications, sleeps, or protocol-level synchronization. Treat explicit coordination as the portability boundary between seL4 and rel4.
 - Do not introduce tests, service loops, or user programs that assume a CPU-bound thread will be involuntarily preempted so another runnable thread can run.
 
 ## Workflow
