@@ -1,6 +1,6 @@
 ---
 name: microkernel-no-domain
-description: Keep this Rust RV64/LoongArch seL4-style microkernel on one global scheduling domain. Use when rolling back, reviewing, planning, or changing scheduler, TCB, timer, runqueue, boot, ABI, or configuration code so user-space may remain seL4-compatible but the kernel treats all threads as belonging to one large domain with no domain queues, time slices, rotation, or domain-aware dispatch unless explicitly requested.
+description: Keep this Rust RV64/LoongArch seL4-style microkernel on one global scheduling domain. Use when reviewing, planning, maintaining, or changing scheduler, TCB, timer, runqueue, boot, ABI, or configuration code so user-space may remain seL4-compatible but the kernel treats all threads as belonging to one large domain with no domain queues, time slices, rotation, or domain-aware dispatch unless explicitly requested.
 ---
 
 # Microkernel No Domain
@@ -11,7 +11,7 @@ Use this skill to keep the kernel on a single global scheduling domain. User-spa
 
 Domain values must not affect dispatch, eligibility, IPC ordering, affinity, wakeups, timer behavior, or any other scheduler decision.
 
-## Remove Or Avoid
+## Avoid
 
 Treat these as out of scope unless the user explicitly requests multi-domain scheduling:
 
@@ -39,10 +39,10 @@ Keep these behaviors available:
 
 1. Inspect existing diffs before editing with `git status --short` and task-scoped `git diff`.
 2. Search for domain terms with `rg -n "domain|Domain|ksCurDomain|DomainTime|domain_time|tcbDomain" kernel userspace tools`.
-3. Remove domain policy from shared scheduler and TCB code before touching architecture trap handlers.
+3. Keep domain policy out of shared scheduler and TCB code before touching architecture trap handlers.
 4. Replace domain eligibility checks with single-domain behavior: a runnable thread on the current core is schedulable without comparing a domain ID.
-5. Keep RISC-V and LoongArch behavior symmetric; domain removal should normally be shared scheduler code, not architecture-specific branches.
-6. If retaining seL4-compatible domain ABI, document and implement it as a single-domain no-op rather than deleting it solely to prove there are no domain names in the tree.
+5. Keep RISC-V and LoongArch behavior symmetric; single-domain behavior should normally live in shared scheduler code, not architecture-specific branches.
+6. If retaining seL4-compatible domain ABI, document and implement it as a single-domain no-op rather than chasing a domain-name-free source tree.
 
 ## Validation
 
@@ -53,4 +53,4 @@ Use the smallest useful validation stage:
 - Architecture parity: run matching LoongArch build/test commands when shared scheduler code or LoongArch trap code changed.
 - xv6 impact: run a targeted xv6 program such as `tools/run-xv6-user.py forktest` before broad `usertests`.
 
-Do not claim domain scheduling removal is complete until temporary diagnostics are removed, compatibility paths are no-ops, and relevant focused validations pass.
+Do not claim domain scheduling avoidance is complete until temporary diagnostics are cleaned up, compatibility paths are no-ops, and relevant focused validations pass.

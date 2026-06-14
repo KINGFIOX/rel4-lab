@@ -1,15 +1,15 @@
 ---
 name: microkernel-no-mcs
-description: Keep this Rust RV64/LoongArch seL4-style microkernel free of MCS real-time scheduling semantics. Use when rolling back, reviewing, planning, or changing sched-context, sched-control, timeout-fault, budget accounting, budget donation, reply-consumed-time, refill queue, or MCS-specific IPC/scheduler behavior so those features are removed or kept out of scope unless the user explicitly asks for real-time OS support.
+description: Keep this Rust RV64/LoongArch seL4-style microkernel free of MCS real-time scheduling semantics. Use when reviewing, planning, or changing sched-context, sched-control, timeout-fault, budget accounting, budget donation, reply-consumed-time, refill queue, or MCS-specific IPC/scheduler behavior so those features stay absent or kept out of scope unless the user explicitly asks for real-time OS support.
 ---
 
 # Microkernel No MCS
 
 ## Intent
 
-Use this skill to simplify the kernel away from seL4 MCS real-time scheduling. The kernel should keep ordinary seL4-style IPC, capabilities, faults, and runnable/blocked TCB behavior, but not sched-context budget policy or timeout-fault budget enforcement.
+Use this skill to keep the kernel away from seL4 MCS real-time scheduling. The kernel should keep ordinary seL4-style IPC, capabilities, faults, and runnable/blocked TCB behavior, but not sched-context budget policy or timeout-fault budget enforcement.
 
-## Remove Or Avoid
+## Avoid
 
 Treat these as out of scope unless the user explicitly requests real-time OS support:
 
@@ -20,7 +20,7 @@ Treat these as out of scope unless the user explicitly requests real-time OS sup
 
 ## Preserve
 
-Keep these semantics intact while removing MCS:
+Keep these semantics intact while avoiding MCS:
 
 - Basic TCB runnable, blocked-on-send, blocked-on-receive, blocked-on-reply, and restart transitions.
 - Endpoint, notification, ordinary reply, CSpace, VSpace, IRQ, and non-timeout user fault behavior needed by sel4tests.
@@ -30,9 +30,9 @@ Keep these semantics intact while removing MCS:
 ## Workflow
 
 1. Inspect existing diffs before editing with `git status --short` and task-scoped `git diff`.
-2. Remove MCS policy from shared modules first, especially `kernel/src/object/sched_context.rs`, `kernel/src/object/reply.rs`, `kernel/src/object/tcb.rs`, and `kernel/src/kernel/smp.rs`.
+2. Keep MCS policy out of shared modules, especially `kernel/src/object/reply.rs`, `kernel/src/object/tcb.rs`, and `kernel/src/kernel/smp.rs`; do not recreate `kernel/src/object/sched_context.rs` unless real-time support is explicitly requested.
 3. Replace MCS-dependent checks with simpler runnable/blocked checks only when needed for existing IPC correctness.
-4. Keep timeout faults for budget exhaustion removed; do not emulate them with compatibility shims.
+4. Keep timeout faults for budget exhaustion absent; do not emulate them with compatibility shims.
 5. Apply matching architecture changes in `kernel/src/arch/riscv64/` and `kernel/src/arch/loongarch64/` when trap code references MCS behavior.
 
 ## Validation
@@ -44,4 +44,4 @@ Use the smallest useful validation stage:
 - LoongArch parity: run the matching `ARCH=loongarch64` build/test command when shared scheduler or LoongArch trap code changed.
 - xv6 impact: run a targeted xv6 program such as `tools/run-xv6-user.py forktest` before broad `usertests`.
 
-Do not claim MCS removal is complete until diagnostics are removed and the relevant focused validations pass.
+Do not claim MCS avoidance is complete until diagnostics are cleaned up and the relevant focused validations pass.

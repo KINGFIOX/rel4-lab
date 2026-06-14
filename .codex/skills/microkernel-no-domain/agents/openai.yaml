@@ -1,4 +1,4 @@
 interface:
   display_name: "Microkernel No Domain"
   short_description: "Use one global scheduling domain"
-  default_prompt: "Use $microkernel-no-domain when rolling back or changing this microkernel so user-space may remain seL4-compatible, but rel4 collapses any domain values or multi-domain setup into one effective scheduling domain with no domain queues, time slices, rotation, or domain-aware dispatch unless explicitly requested."
+  default_prompt: "Use $microkernel-no-domain when changing this microkernel so user-space may remain seL4-compatible, but rel4 collapses any domain values or multi-domain setup into one effective scheduling domain with no domain queues, time slices, rotation, or domain-aware dispatch unless explicitly requested."
