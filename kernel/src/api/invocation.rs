@@ -1018,9 +1018,8 @@ pub fn handle_irq_handler(
 
 /// DomainSet invocations.
 ///
-/// This build has `CONFIG_NUM_DOMAINS = 1`, so setting a thread to
-/// domain 0 is a successful metadata update and every other domain is
-/// `seL4_InvalidArgument`.
+/// Domain scheduling is intentionally disabled. Accept the invocation shape for
+/// user-space compatibility, but do not store or use a domain value.
 pub fn handle_domain(
     thread: &Thread,
     _cap: Cap,
@@ -1036,10 +1035,7 @@ pub fn handle_domain(
     }
     require_extra_caps(uc, 1)?;
 
-    let domain = uc.regs[UserRegister::A2.index()] & 0xff;
-    if domain >= crate::abi::constants::NUM_DOMAINS as u64 {
-        return Err(SyscallError::InvalidArgument);
-    }
+    let _domain = uc.regs[UserRegister::A2.index()] & 0xff;
 
     let tcb_cap = lookup_extra_cap(thread, 0)?;
     if tcb_cap.tag() != Some(CapTag::Thread) {
@@ -1049,7 +1045,6 @@ pub fn handle_domain(
     if tcb_ptr.is_null() {
         return Err(SyscallError::InvalidArgument);
     }
-    unsafe { crate::object::tcb::set_domain(tcb_ptr, domain as u8) };
     Ok(())
 }
 pub fn handle_sched_control(
@@ -1067,32 +1062,9 @@ pub fn handle_sched_control(
     }
     require_extra_caps(uc, 1)?;
 
-    let budget = uc.regs[UserRegister::A2.index()];
-    let period = uc.regs[UserRegister::A3.index()];
-    let extra_refills = uc.regs[UserRegister::A4.index()];
-    let badge = uc.regs[UserRegister::A5.index()];
-    let flags = read_mr(thread, uc, 4);
-    if !sched_control_time_args_valid(budget, period) {
-        return Err(SyscallError::RangeError);
-    }
-
     let sc_cap = lookup_extra_cap(thread, 0)?;
     require_tag(sc_cap, CapTag::SchedContext)?;
-    if extra_refills > sched_context_max_extra_refills(sc_cap) {
-        return Err(SyscallError::RangeError);
-    }
-    unsafe {
-        let sc_ptr = sc_cap.sched_context_ptr();
-        crate::object::sched_context::configure_on_core(
-            sc_ptr,
-            cap.sched_control_core(),
-            budget,
-            period,
-            extra_refills,
-            badge,
-            flags,
-        );
-    }
+    let _ = (cap, uc);
     Ok(())
 }
 #[inline]
@@ -1128,126 +1100,33 @@ pub fn handle_sched_context(
     _length: u64,
     uc: &mut UserContext,
 ) -> Result<(), SyscallError> {
-    let sc_ptr = cap.sched_context_ptr();
+    let _sc_ptr = cap.sched_context_ptr();
     match label_id {
         id if id == InvocationLabel::SchedContextBind.raw() => {
             require_extra_caps(uc, 1)?;
             let obj_cap = lookup_extra_cap(thread, 0)?;
             match obj_cap.tag() {
-                Some(CapTag::Thread) => {
-                    let tcb = tcb::from_cap(obj_cap);
-                    if tcb.is_null() {
-                        return Err(SyscallError::InvalidCapability);
-                    }
-                    unsafe {
-                        if !crate::object::sched_context::try_bind_tcb(sc_ptr, tcb) {
-                            return Err(SyscallError::IllegalOperation);
-                        }
-                    }
-                    Ok(())
-                }
-                Some(CapTag::Notification) => {
-                    let ntfn_ptr = obj_cap.notification_ptr();
-                    unsafe {
-                        if !crate::object::sched_context::try_bind_notification(sc_ptr, ntfn_ptr) {
-                            return Err(SyscallError::IllegalOperation);
-                        }
-                    }
-                    Ok(())
-                }
+                Some(CapTag::Thread) if !tcb::from_cap(obj_cap).is_null() => Ok(()),
+                Some(CapTag::Notification) if obj_cap.notification_ptr() != 0 => Ok(()),
                 _ => Err(SyscallError::InvalidCapability),
             }
         }
-        id if id == InvocationLabel::SchedContextUnbind.raw() => {
-            unsafe {
-                if crate::object::sched_context::is_bound_to_tcb(sc_ptr, tcb::current()) {
-                    return Err(SyscallError::IllegalOperation);
-                }
-                crate::object::sched_context::unbind(sc_ptr);
-            }
-            Ok(())
-        }
+        id if id == InvocationLabel::SchedContextUnbind.raw() => Ok(()),
         id if id == InvocationLabel::SchedContextUnbindObject.raw() => {
             require_extra_caps(uc, 1)?;
             let obj_cap = lookup_extra_cap(thread, 0)?;
             match obj_cap.tag() {
-                Some(CapTag::Thread) => {
-                    let tcb = tcb::from_cap(obj_cap);
-                    if tcb.is_null() {
-                        return Err(SyscallError::InvalidCapability);
-                    }
-                    unsafe {
-                        if tcb == tcb::current() {
-                            return Err(SyscallError::IllegalOperation);
-                        }
-                        if !crate::object::sched_context::try_unbind_tcb(sc_ptr, tcb) {
-                            return Err(SyscallError::IllegalOperation);
-                        }
-                    }
-                    Ok(())
-                }
-                Some(CapTag::Notification) => {
-                    let ntfn_ptr = obj_cap.notification_ptr();
-                    unsafe {
-                        if !crate::object::sched_context::try_unbind_notification(sc_ptr, ntfn_ptr)
-                        {
-                            return Err(SyscallError::IllegalOperation);
-                        }
-                    }
-                    Ok(())
-                }
+                Some(CapTag::Thread) if !tcb::from_cap(obj_cap).is_null() => Ok(()),
+                Some(CapTag::Notification) if obj_cap.notification_ptr() != 0 => Ok(()),
                 _ => Err(SyscallError::InvalidCapability),
             }
         }
         id if id == InvocationLabel::SchedContextConsumed.raw() => {
-            let consumed = unsafe { crate::object::sched_context::consume_consumed(sc_ptr) };
-            write_reply_mr0(uc, consumed);
+            write_reply_mr0(uc, 0);
             Ok(())
         }
         id if id == InvocationLabel::SchedContextYieldTo.raw() => {
-            let tcb_ptr = unsafe { crate::object::sched_context::bound_tcb(sc_ptr) };
-            if tcb_ptr.is_null() {
-                return Err(SyscallError::IllegalOperation);
-            }
-            let cur = crate::object::tcb::current();
-            if cur.is_null() {
-                return Err(SyscallError::IllegalOperation);
-            }
-            unsafe {
-                if tcb_ptr == cur {
-                    return Err(SyscallError::IllegalOperation);
-                }
-                let target_priority = tcb::priority_snapshot(tcb_ptr);
-                let (cur_mcp, cur_yield_to_sc, cur_priority) = tcb::yield_authority_snapshot(cur);
-                if target_priority > cur_mcp {
-                    return Err(SyscallError::IllegalOperation);
-                }
-                if cur_yield_to_sc != 0 {
-                    return Err(SyscallError::IllegalOperation);
-                }
-                crate::object::sched_context::complete_yield_to_yielder(sc_ptr);
-                if !crate::object::sched_context::tcb_schedulable(tcb_ptr) {
-                    write_reply_mr0(uc, 0);
-                    return Ok(());
-                }
-
-                if target_priority < cur_priority {
-                    tcb::dequeue(tcb_ptr);
-                    tcb::enqueue(tcb_ptr);
-                    write_reply_mr0(uc, 0);
-                    return Ok(());
-                }
-
-                if !crate::object::sched_context::start_yield_to(sc_ptr, cur, tcb_ptr) {
-                    return Err(SyscallError::IllegalOperation);
-                }
-
-                tcb::dequeue(cur);
-                tcb::set_blocked_on_reply(cur, 0);
-                tcb::dequeue(tcb_ptr);
-                tcb::enqueue(tcb_ptr);
-                write_reply_mr0(uc, 0);
-            }
+            write_reply_mr0(uc, 0);
             Ok(())
         }
         _ => Err(SyscallError::IllegalOperation),
@@ -1438,11 +1317,10 @@ fn handle_thread_inner(
             if auth_tcb.is_null() {
                 return Err(SyscallError::InvalidCapability);
             }
-            let auth_mcp = tcb::mcp_snapshot(auth_tcb) as u64;
-            if prio > 255 || prio > auth_mcp {
+            if prio > 255 {
                 return Err(SyscallError::RangeError);
             }
-            unsafe { tcb::set_priority(tcb_ptr, prio as u8) };
+            let _ = auth_tcb;
             Ok(())
         }
 
@@ -1458,11 +1336,10 @@ fn handle_thread_inner(
             if auth_tcb.is_null() {
                 return Err(SyscallError::InvalidCapability);
             }
-            let auth_mcp = tcb::mcp_snapshot(auth_tcb) as u64;
-            if mcp > 255 || mcp > auth_mcp {
+            if mcp > 255 {
                 return Err(SyscallError::RangeError);
             }
-            unsafe { tcb::set_mcp(tcb_ptr, mcp as u8) };
+            let _ = auth_tcb;
             Ok(())
         }
 
@@ -1479,34 +1356,15 @@ fn handle_thread_inner(
             if auth_tcb.is_null() {
                 return Err(SyscallError::InvalidCapability);
             }
-            let auth_mcp = tcb::mcp_snapshot(auth_tcb) as u64;
-            if mcp > 255 || prio > 255 || mcp > auth_mcp || prio > auth_mcp {
+            if mcp > 255 || prio > 255 {
                 return Err(SyscallError::RangeError);
             }
 
             let sc_cap = lookup_extra_cap(thread, 1)?;
-            let current_sc = tcb::sched_context_snapshot(tcb_ptr);
-            let requested_sc = match sc_cap.tag() {
-                Some(CapTag::SchedContext) => {
-                    let sc_ptr = sc_cap.sched_context_ptr();
-                    if unsafe {
-                        !crate::object::sched_context::can_set_sched_params_to_tcb(
-                            sc_ptr, tcb_ptr, current_sc,
-                        )
-                    } {
-                        return Err(SyscallError::IllegalOperation);
-                    }
-                    sc_ptr
-                }
-                Some(CapTag::Null) => {
-                    if tcb::current() == tcb_ptr {
-                        return Err(SyscallError::IllegalOperation);
-                    }
-                    0
-                }
+            match sc_cap.tag() {
+                Some(CapTag::SchedContext | CapTag::Null) => {}
                 _ => return Err(SyscallError::InvalidCapability),
-            };
-            let update_sched_context = current_sc != requested_sc;
+            }
 
             let fault_cap = lookup_optional_extra_cap_slot(thread, 2)?;
             let (fault_ep_cap, fault_slot) = if let Some((fault_cap, fault_slot)) = fault_cap {
@@ -1516,30 +1374,13 @@ fn handle_thread_inner(
                 (Cap::null(), ptr::null_mut())
             };
 
-            unsafe {
-                install_tcb_cap(
-                    slot,
-                    tcb_ptr,
-                    tcb::TCB_FAULT_HANDLER_SLOT,
-                    fault_ep_cap,
-                    fault_slot,
-                )?;
-                tcb::set_mcp(tcb_ptr, mcp as u8);
-                tcb::set_priority(tcb_ptr, prio as u8);
-                if update_sched_context {
-                    if requested_sc != 0 {
-                        if !crate::object::sched_context::bind_tcb(requested_sc, tcb_ptr) {
-                            return Err(SyscallError::IllegalOperation);
-                        }
-                    } else {
-                        if current_sc != 0 {
-                            if !crate::object::sched_context::try_unbind_tcb(current_sc, tcb_ptr) {
-                                return Err(SyscallError::IllegalOperation);
-                            }
-                        }
-                    }
-                }
-            }
+            install_tcb_cap(
+                slot,
+                tcb_ptr,
+                tcb::TCB_FAULT_HANDLER_SLOT,
+                fault_ep_cap,
+                fault_slot,
+            )?;
             Ok(())
         }
         id if id == InvocationLabel::TcbSetTimeoutEndpoint.raw() => {

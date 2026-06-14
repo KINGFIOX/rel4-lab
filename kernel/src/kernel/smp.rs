@@ -101,7 +101,6 @@ struct HartState {
     current_tcb: AtomicUsize,
     thread: ThreadCell,
     next_timer_deadline: AtomicU64,
-    last_budget_account_ticks: AtomicU64,
 }
 
 impl HartState {
@@ -114,7 +113,6 @@ impl HartState {
             current_tcb: AtomicUsize::new(0),
             thread: ThreadCell::new(),
             next_timer_deadline: AtomicU64::new(0),
-            last_budget_account_ticks: AtomicU64::new(0),
         }
     }
 }
@@ -623,27 +621,6 @@ pub fn set_next_timer_deadline(deadline: u64) {
     current_hart()
         .next_timer_deadline
         .store(deadline, Ordering::Release);
-}
-
-#[inline]
-pub fn last_budget_account_ticks() -> u64 {
-    current_hart()
-        .last_budget_account_ticks
-        .load(Ordering::Acquire)
-}
-
-#[inline]
-pub fn set_last_budget_account_ticks(ticks: u64) {
-    current_hart()
-        .last_budget_account_ticks
-        .store(ticks, Ordering::Release);
-}
-
-#[inline]
-pub fn swap_last_budget_account_ticks(ticks: u64) -> u64 {
-    current_hart()
-        .last_budget_account_ticks
-        .swap(ticks, Ordering::AcqRel)
 }
 
 pub fn clear_current_state() {

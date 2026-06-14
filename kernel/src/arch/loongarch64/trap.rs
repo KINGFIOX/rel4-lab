@@ -483,66 +483,8 @@ unsafe fn finish_fault_ipc_receive(
 }
 
 pub(crate) fn send_timeout_fault_ipc_for(fault_tcb: *mut crate::object::tcb::Tcb) -> bool {
-    use crate::object::endpoint;
-    use crate::object::tcb;
-
-    if fault_tcb.is_null() {
-        return false;
-    }
-    let handler_cap = tcb::timeout_endpoint_snapshot(fault_tcb);
-    if handler_cap.tag() != Some(CapTag::Endpoint)
-        || !handler_cap.endpoint_can_send()
-        || !(handler_cap.endpoint_can_grant() || handler_cap.endpoint_can_grant_reply())
-    {
-        return false;
-    }
-    let ep = handler_cap.endpoint_ptr() as *mut endpoint::Endpoint;
-    if ep.is_null() {
-        return false;
-    }
-
-    let mut mrs = [0u64; 16];
-    unsafe {
-        let sc_kva = tcb::sched_context_snapshot(fault_tcb);
-        if sc_kva != 0 {
-            let (badge, consumed) =
-                crate::object::sched_context::badge_and_consume_consumed(sc_kva);
-            mrs[0] = badge;
-            mrs[1] = consumed;
-        }
-
-        tcb::record_fault_message(fault_tcb, FaultLabel::Timeout.raw(), 2, mrs);
-        let receiver = {
-            let _guard = endpoint::lock_queue(ep);
-            let receiver = endpoint::pop_receiver_locked(ep);
-            if receiver.is_null() {
-                block_fault_sender_locked(
-                    fault_tcb,
-                    ep,
-                    handler_cap.endpoint_badge(),
-                    handler_cap.endpoint_can_grant(),
-                    handler_cap.endpoint_can_grant_reply(),
-                    FaultLabel::Timeout.raw(),
-                    2,
-                    mrs,
-                );
-            }
-            receiver
-        };
-        if receiver.is_null() {
-            return true;
-        }
-
-        write_fault_ipc_message(
-            receiver,
-            handler_cap.endpoint_badge(),
-            FaultLabel::Timeout.raw(),
-            2,
-            &mrs,
-        );
-        finish_fault_ipc_receive(receiver, fault_tcb, handler_cap, false);
-    }
-    true
+    let _ = fault_tcb;
+    false
 }
 
 unsafe fn block_fault_sender_locked(
@@ -714,8 +656,6 @@ fn kernel_exit(
             tcb::enqueue_if_migrated_from_current_core(cur);
             if tcb::is_runnable_on_current_core(cur) {
                 tcb::enqueue(cur);
-            } else {
-                crate::object::sched_context::postpone_unreleased_tcb(cur);
             }
         }
 
@@ -847,7 +787,6 @@ pub fn install_trap_vector() {
 pub fn init_timer() {
     csr::set_ecfg(csr::ecfg() | ECFG_LIE_TIMER);
     let now = csr::time() as u64;
-    crate::kernel::smp::set_last_budget_account_ticks(now);
     if crate::kernel::smp::current_core_id() == 0 {
         NEXT_SYNTHETIC_TIMER_IRQ_DEADLINE.store(
             now.wrapping_add(SYNTHETIC_TIMER_IRQ_INTERVAL_TICKS),
@@ -872,18 +811,7 @@ fn synthetic_timer_irq_deadline(now: u64) -> Option<u64> {
 
 fn program_next_timer() {
     let now = csr::time() as u64;
-    let mut deadline = unsafe {
-        crate::object::sched_context::scheduler_timer_deadline(
-            now,
-            crate::kernel::smp::last_budget_account_ticks(),
-            crate::object::tcb::current(),
-        )
-    };
-    if let Some(synthetic_deadline) = synthetic_timer_irq_deadline(now) {
-        deadline = Some(deadline.map_or(synthetic_deadline, |current| {
-            current.min(synthetic_deadline)
-        }));
-    }
+    let deadline = synthetic_timer_irq_deadline(now);
     let deadline = deadline.unwrap_or_else(|| now.wrapping_add(TIMER_INTERVAL_TICKS));
     crate::kernel::smp::set_next_timer_deadline(deadline);
 
@@ -922,30 +850,9 @@ fn clear_timer_interrupt() {
 fn handle_timer_interrupt() {
     clear_timer_interrupt();
     let now = csr::time() as u64;
-    let budget_ticks = {
-        let last = crate::kernel::smp::swap_last_budget_account_ticks(now);
-        if last == 0 {
-            TIMER_INTERVAL_TICKS
-        } else {
-            now.saturating_sub(last)
-        }
-    };
     unsafe {
-        crate::object::sched_context::release_due(now);
         if should_signal_synthetic_timer_irq(now) {
             crate::object::irq::signal_irq(super::irq::KERNEL_TIMER_IRQ as u64);
-        }
-        let cur = crate::object::tcb::current();
-        let (cur_running, cur_sc) = crate::object::tcb::running_sched_context_snapshot(cur);
-        if cur_running {
-            if !crate::object::sched_context::charge_tcb(cur, budget_ticks) {
-                crate::object::sched_context::complete_yield_to_target(cur);
-                if crate::object::sched_context::is_round_robin(cur_sc) {
-                    crate::object::tcb::rotate_to_tail(cur);
-                } else {
-                    let _ = send_timeout_fault_ipc_for(cur);
-                }
-            }
         }
     }
     program_next_timer();

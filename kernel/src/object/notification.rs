@@ -160,28 +160,11 @@ pub(crate) unsafe fn lock_queue(ntfn: *const Notification) -> WaitQueueLockGuard
 }
 
 pub unsafe fn maybe_donate_sched_context(ntfn: *mut Notification, tcb: *mut Tcb) {
-    if ntfn.is_null() || tcb.is_null() {
-        return;
-    }
-    unsafe {
-        let sc_kva = (*ntfn).sched_context();
-        if sc_kva == 0 {
-            return;
-        }
-        crate::object::sched_context::donate_if_unbound(sc_kva, tcb);
-    }
+    let _ = (ntfn, tcb);
 }
 
 pub unsafe fn maybe_return_sched_context(ntfn: *mut Notification, tcb: *mut Tcb) {
-    if ntfn.is_null() || tcb.is_null() {
-        return;
-    }
-    unsafe {
-        let sc_kva = (*ntfn).sched_context();
-        if sc_kva != 0 {
-            crate::object::sched_context::return_if_bound_to(sc_kva, tcb);
-        }
-    }
+    let _ = (ntfn, tcb);
 }
 
 pub(crate) unsafe fn bound_tcb_snapshot(ntfn: *const Notification) -> *mut Tcb {
@@ -245,27 +228,15 @@ pub(crate) unsafe fn enqueue_waiter_locked(ntfn: *mut Notification, tcb: *mut Tc
         return;
     }
     unsafe {
-        let tcb_prio = tcb::priority_snapshot(tcb);
-        let mut before = (*ntfn).tail();
-        let mut after = core::ptr::null_mut::<Tcb>();
-        while !before.is_null() && tcb_prio > tcb::priority_snapshot(before) {
-            after = before;
-            before = tcb::wait_queue_links_snapshot(before).0;
-        }
-
-        if before.is_null() {
+        let tail = (*ntfn).tail();
+        if tail.is_null() {
             (*ntfn).set_head(tcb);
         } else {
-            tcb::set_wait_queue_next(before, tcb);
+            tcb::set_wait_queue_next(tail, tcb);
         }
 
-        if after.is_null() {
-            (*ntfn).set_tail(tcb);
-        } else {
-            tcb::set_wait_queue_prev(after, tcb);
-        }
-
-        tcb::set_wait_queue_links(tcb, before, after);
+        (*ntfn).set_tail(tcb);
+        tcb::set_wait_queue_links(tcb, core::ptr::null_mut(), tail);
     }
 }
 

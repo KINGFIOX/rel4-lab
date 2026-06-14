@@ -131,27 +131,15 @@ pub(crate) unsafe fn enqueue_waiter_locked(ep: *mut Endpoint, tcb: *mut Tcb, sta
         return;
     }
     unsafe {
-        let tcb_prio = tcb::priority_snapshot(tcb);
-        let mut before = (*ep).tail_ptr();
-        let mut after = core::ptr::null_mut::<Tcb>();
-        while !before.is_null() && tcb_prio > tcb::priority_snapshot(before) {
-            after = before;
-            before = tcb::wait_queue_links_snapshot(before).0;
-        }
-
-        if before.is_null() {
+        let tail = (*ep).tail_ptr();
+        if tail.is_null() {
             (*ep).set_head_state(tcb, state);
         } else {
-            tcb::set_wait_queue_next(before, tcb);
+            tcb::set_wait_queue_next(tail, tcb);
         }
 
-        if after.is_null() {
-            (*ep).set_tail(tcb);
-        } else {
-            tcb::set_wait_queue_prev(after, tcb);
-        }
-
-        tcb::set_wait_queue_links(tcb, before, after);
+        (*ep).set_tail(tcb);
+        tcb::set_wait_queue_links(tcb, core::ptr::null_mut(), tail);
     }
 }
 

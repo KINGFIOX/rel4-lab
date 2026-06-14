@@ -5,10 +5,10 @@
 //! is always `2 KiB`-aligned and bigger than `size_of::<Tcb>()`, we can
 //! safely treat the cap's pointer as a `*mut Tcb`.
 //!
-//! The scheduler is deliberately small: runnable TCBs live in per-core,
-//! priority-indexed ready queues, and affinity selects the queue a TCB can
-//! run on. A temporary big kernel lock still serialises most shared kernel state
-//! while the SMP path matures.
+//! The scheduler is deliberately small: runnable TCBs live in one FIFO
+//! round-robin queue per core, and affinity selects the queue a TCB can run on.
+//! A temporary big kernel lock still serialises most shared kernel state while
+//! the SMP path matures.
 //!
 //! Layout-load: every field must fit comfortably inside the 2 KiB slab
 //! the C kernel allocates, so the future C/Rust ABI swap stays valid.
@@ -37,25 +37,19 @@ pub fn current() -> *mut Tcb {
 pub fn set_current(tcb: *mut Tcb) -> *mut Tcb {
     let prev = crate::kernel::smp::set_current_tcb(tcb);
     unsafe { crate::api::thread::refresh_from_tcb(tcb) };
-    if !tcb.is_null() {
-        crate::kernel::smp::set_last_budget_account_ticks(crate::arch::current::csr::time() as u64);
-    }
     prev
 }
 
 // ---- Ready-queue runqueues ------------------------------------------------
 //
-// `CONFIG_NUM_PRIORITIES = 256` per `kernel/include/configurations/gen_config.h`.
-// One doubly-linked list per priority, all backed by `Tcb.queue_{next,prev}`
-// (stored as raw u64 ptrs because `Tcb` lives in user-controlled memory
-// and we want the field offsets to stay byte-identical across the C ↔ Rust
-// boundary).
+// One doubly-linked FIFO list per core, backed by `Tcb.queue_{next,prev}`
+// (stored as raw u64 ptrs because `Tcb` lives in user-controlled memory and we
+// want the field offsets to stay byte-identical across the C ↔ Rust boundary).
 //
 // User execution can now happen on more than one hart. Queue links, bitmaps,
 // and surrounding TCB/SC state transitions are serialized by the seL4-style
 // big kernel lock.
 
-pub const NUM_PRIORITIES: usize = 256;
 pub const DEFAULT_TIME_SLICE_TICKS: u8 = 5;
 pub const TCB_CNODE_RADIX: usize = 4;
 pub const TCB_CNODE_ENTRIES: usize = 1 << TCB_CNODE_RADIX;
@@ -86,8 +80,7 @@ impl Queue {
 }
 
 struct RunqueueCore {
-    queues: [Queue; NUM_PRIORITIES],
-    ready_bitmap: [u64; 4],
+    queue: Queue,
 }
 
 // Runqueue entries are kernel-owned TCB pointers, and all queue mutation is
@@ -97,63 +90,22 @@ unsafe impl Send for RunqueueCore {}
 impl RunqueueCore {
     const fn new() -> Self {
         Self {
-            queues: [const { Queue::empty() }; NUM_PRIORITIES],
-            ready_bitmap: [0; 4],
+            queue: Queue::empty(),
         }
     }
 
-    fn queue_mut(&mut self, prio: usize) -> &mut Queue {
-        debug_assert!(prio < NUM_PRIORITIES);
-        &mut self.queues[prio]
+    unsafe fn enqueue_tail(&mut self, tcb: *mut Tcb) -> bool {
+        unsafe { enqueue_tail_locked(&mut self.queue, tcb) }
     }
 
-    fn queue(&self, prio: usize) -> &Queue {
-        debug_assert!(prio < NUM_PRIORITIES);
-        &self.queues[prio]
-    }
-
-    fn set_ready_bit(&mut self, prio: usize) {
-        self.ready_bitmap[prio / 64] |= 1u64 << (prio % 64);
-    }
-
-    fn clear_ready_bit(&mut self, prio: usize) {
-        self.ready_bitmap[prio / 64] &= !(1u64 << (prio % 64));
-    }
-
-    unsafe fn enqueue_tail(&mut self, prio: usize, tcb: *mut Tcb) -> bool {
-        let inserted = unsafe { enqueue_tail_locked(self.queue_mut(prio), tcb) };
-        if inserted {
-            self.set_ready_bit(prio);
-        }
-        inserted
-    }
-
-    unsafe fn enqueue_head(&mut self, prio: usize, tcb: *mut Tcb) -> bool {
-        let inserted = unsafe { enqueue_head_locked(self.queue_mut(prio), tcb) };
-        if inserted {
-            self.set_ready_bit(prio);
-        }
-        inserted
-    }
-
-    unsafe fn dequeue_from_priority(&mut self, prio: usize, tcb: *mut Tcb) -> bool {
-        let became_empty = {
-            let queue = self.queue_mut(prio);
-            unsafe {
-                if !ready_queue_contains(queue, tcb) {
-                    return false;
-                }
-                unlink_from_ready_queue(queue, tcb)
+    unsafe fn dequeue(&mut self, tcb: *mut Tcb) -> bool {
+        unsafe {
+            if !ready_queue_contains(&self.queue, tcb) {
+                return false;
             }
-        };
-        if became_empty {
-            self.clear_ready_bit(prio);
+            unlink_from_ready_queue(&mut self.queue, tcb);
         }
         true
-    }
-
-    fn ready_bits(&self, word_idx: usize) -> u64 {
-        self.ready_bitmap[word_idx]
     }
 }
 
@@ -170,8 +122,6 @@ pub(crate) fn lock_state(_tcb: *const Tcb) -> TcbStateLockGuard {
 #[derive(Copy, Clone)]
 struct RunqueueSnapshot {
     core: usize,
-    prio: usize,
-    sched_context: u64,
     state: u8,
 }
 
@@ -213,63 +163,35 @@ fn runqueue_snapshot(tcb: *const Tcb) -> RunqueueSnapshot {
     if tcb.is_null() {
         return RunqueueSnapshot {
             core: 0,
-            prio: 0,
-            sched_context: 0,
             state: ThreadState::Inactive as u8,
         };
     }
-    let (affinity, priority, sched_context, state) = unsafe {
+    let (affinity, state) = unsafe {
         let _guard = lock_state(tcb);
-        (
-            (*tcb).affinity,
-            (*tcb).priority,
-            (*tcb).sched_context,
-            (*tcb).state,
-        )
+        ((*tcb).affinity, (*tcb).state)
     };
     RunqueueSnapshot {
         core: core_for_affinity(affinity),
-        prio: priority as usize,
-        sched_context,
         state,
     }
 }
 
 #[inline]
 pub(crate) fn priority_snapshot(tcb: *const Tcb) -> usize {
-    if tcb.is_null() {
-        return 0;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        (*tcb).priority as usize
-    }
+    let _ = tcb;
+    0
 }
 
 #[inline]
 pub(crate) fn mcp_snapshot(tcb: *const Tcb) -> usize {
-    if tcb.is_null() {
-        return 0;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        (*tcb).mcp as usize
-    }
+    let _ = tcb;
+    0
 }
 
 #[inline]
 pub(crate) fn yield_authority_snapshot(tcb: *const Tcb) -> (usize, u64, usize) {
-    if tcb.is_null() {
-        return (0, 0, 0);
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        (
-            (*tcb).mcp as usize,
-            (*tcb).yield_to_sc,
-            (*tcb).priority as usize,
-        )
-    }
+    let _ = tcb;
+    (0, 0, 0)
 }
 
 #[inline]
@@ -1730,78 +1652,40 @@ unsafe fn enqueue_tail_locked(q: &mut Queue, tcb: *mut Tcb) -> bool {
     true
 }
 
-/// Add `tcb` to the head of its priority's queue. No-op if already
-/// linked (i.e. `queue_next` or `queue_prev` non-zero, or `head == tcb`).
+/// Add `tcb` to the tail of its core's round-robin queue. No-op if already
+/// linked (i.e. `queue_next` or `queue_prev` non-zero, or queue head is `tcb`).
 pub unsafe fn enqueue(tcb: *mut Tcb) {
     if tcb.is_null() {
         return;
     }
     let snapshot = runqueue_snapshot(tcb);
-    let has_budget = snapshot.sched_context != 0
-        && unsafe { crate::object::sched_context::has_budget(snapshot.sched_context) };
-    if (snapshot.state != ThreadState::Running as u8
-        && snapshot.state != ThreadState::Restart as u8)
-        || snapshot.sched_context == 0
-        || !has_budget
+    if snapshot.state != ThreadState::Running as u8 && snapshot.state != ThreadState::Restart as u8
     {
         return;
     }
-    let enqueued = RUNQUEUES[snapshot.core]
-        .with_mut(|runqueue| unsafe { runqueue.enqueue_head(snapshot.prio, tcb) });
+    let enqueued =
+        RUNQUEUES[snapshot.core].with_mut(|runqueue| unsafe { runqueue.enqueue_tail(tcb) });
     if enqueued {
         crate::kernel::smp::wake_core(snapshot.core);
     }
 }
 
-unsafe fn enqueue_head_locked(q: &mut Queue, tcb: *mut Tcb) -> bool {
-    let tcb_u = tcb as u64;
-    unsafe {
-        if !can_enqueue_ready(q, tcb) {
-            return false;
-        }
-        (*tcb).queue_next = q.head as u64;
-        (*tcb).queue_prev = 0;
-        if q.head.is_null() {
-            q.tail = tcb;
-        } else {
-            (*(q.head)).queue_prev = tcb_u;
-        }
-        q.head = tcb;
-    }
-    true
-}
-
-/// Unlink `tcb` from its priority's queue. No-op if not currently linked.
+/// Unlink `tcb` from its core round-robin queue. No-op if not currently linked.
 pub unsafe fn dequeue(tcb: *mut Tcb) {
     if tcb.is_null() {
         return;
     }
-    let prio_hint = priority_snapshot(tcb);
     let mut core = 0;
     while core < MAX_NUM_NODES {
-        if unsafe { dequeue_from_priority(core, prio_hint, tcb) } {
+        if unsafe { dequeue_from_core(core, tcb) } {
             return;
         }
         core += 1;
     }
-
-    let mut prio = 0;
-    while prio < NUM_PRIORITIES {
-        if prio != prio_hint {
-            let mut core = 0;
-            while core < MAX_NUM_NODES {
-                if unsafe { dequeue_from_priority(core, prio, tcb) } {
-                    return;
-                }
-                core += 1;
-            }
-        }
-        prio += 1;
-    }
 }
 
-unsafe fn dequeue_from_priority(core: usize, prio: usize, tcb: *mut Tcb) -> bool {
-    RUNQUEUES[core].with_mut(|runqueue| unsafe { runqueue.dequeue_from_priority(prio, tcb) })
+unsafe fn dequeue_from_core(core: usize, tcb: *mut Tcb) -> bool {
+    RUNQUEUES[core].with_mut(|runqueue| unsafe { runqueue.dequeue(tcb) })
 }
 
 unsafe fn unlink_from_ready_queue(q: &mut Queue, tcb: *mut Tcb) -> bool {
@@ -1825,31 +1709,26 @@ unsafe fn unlink_from_ready_queue(q: &mut Queue, tcb: *mut Tcb) -> bool {
     }
 }
 
-/// Move `tcb` to the tail of its own priority's queue. Used by
-/// `seL4_Yield` to surrender the CPU to a same-priority peer.
+/// Move `tcb` to the tail of its core round-robin queue.
 pub unsafe fn rotate_to_tail(tcb: *mut Tcb) {
     if tcb.is_null() {
         return;
     }
     let snapshot = runqueue_snapshot(tcb);
-    let has_budget = snapshot.sched_context != 0
-        && unsafe { crate::object::sched_context::has_budget(snapshot.sched_context) };
     RUNQUEUES[snapshot.core].with_mut(|runqueue| unsafe {
-        let queue = runqueue.queue(snapshot.prio);
-        if has_budget && queue.head == tcb && queue.tail == tcb {
+        if runqueue.queue.head == tcb && runqueue.queue.tail == tcb {
             return; // singleton, nothing to do
         }
-        let _ = runqueue.dequeue_from_priority(snapshot.prio, tcb);
-        if has_budget {
-            let _ = runqueue.enqueue_tail(snapshot.prio, tcb);
+        let _ = runqueue.dequeue(tcb);
+        if snapshot.state == ThreadState::Running as u8
+            || snapshot.state == ThreadState::Restart as u8
+        {
+            let _ = runqueue.enqueue_tail(tcb);
         }
     });
 }
 
-/// Pick the highest-priority ready TCB, or `null` if all queues empty.
-///
-/// O(1) on the 256 priorities: scan the 4-word ready bitmap from MSB
-/// down, then `head` of the first bin we find.
+/// Pick the next round-robin ready TCB, or `null` if the queue is empty.
 pub fn schedule() -> *mut Tcb {
     let candidate = peek_schedule();
     if !candidate.is_null() {
@@ -1860,7 +1739,7 @@ pub fn schedule() -> *mut Tcb {
     candidate
 }
 
-/// Return the highest-priority ready TCB without consuming it from the ready
+/// Return the next round-robin ready TCB without consuming it from the ready
 /// queue. Stale non-runnable queue entries are still discarded.
 pub fn peek_schedule() -> *mut Tcb {
     loop {
@@ -1879,25 +1758,7 @@ pub fn peek_schedule() -> *mut Tcb {
 
 fn schedule_head() -> *mut Tcb {
     let core = crate::kernel::smp::current_core_id();
-    RUNQUEUES[core].with_mut(|runqueue| {
-        for word_idx in (0..4).rev() {
-            let mut bits = runqueue.ready_bits(word_idx);
-            while bits != 0 {
-                // Highest set bit in `bits` ⇒ highest priority in this word.
-                let bit = 63 - bits.leading_zeros() as usize;
-                let prio = word_idx * 64 + bit;
-                let head = runqueue.queue_mut(prio).head;
-                if !head.is_null() {
-                    return head;
-                }
-
-                let stale_bit = 1u64 << bit;
-                runqueue.clear_ready_bit(prio);
-                bits &= !stale_bit;
-            }
-        }
-        null_mut()
-    })
+    RUNQUEUES[core].with_mut(|runqueue| runqueue.queue.head)
 }
 
 #[inline]
@@ -1905,14 +1766,12 @@ pub unsafe fn is_runnable_on_current_core(tcb: *const Tcb) -> bool {
     if tcb.is_null() {
         return false;
     }
-    let (state, sched_context, affinity) = unsafe {
+    let (state, affinity) = unsafe {
         let _guard = lock_state(tcb);
-        ((*tcb).state, (*tcb).sched_context, (*tcb).affinity)
+        ((*tcb).state, (*tcb).affinity)
     };
     (state == ThreadState::Running as u8 || state == ThreadState::Restart as u8)
-        && sched_context != 0
         && core_for_affinity(affinity) == crate::kernel::smp::current_core_id()
-        && unsafe { crate::object::sched_context::has_budget(sched_context) }
 }
 
 #[inline]
@@ -1930,11 +1789,9 @@ pub unsafe fn enqueue_if_migrated_from_current_core(tcb: *mut Tcb) {
     if tcb.is_null() {
         return;
     }
-    let (state, sched_context, affinity) = unsafe { sched_snapshot(tcb) };
+    let (state, _sched_context, affinity) = unsafe { sched_snapshot(tcb) };
     if (state == ThreadState::Running as u8 || state == ThreadState::Restart as u8)
-        && sched_context != 0
         && core_for_affinity(affinity) != crate::kernel::smp::current_core_id()
-        && unsafe { crate::object::sched_context::has_budget(sched_context) }
     {
         unsafe { enqueue(tcb) };
     }
@@ -2210,56 +2067,15 @@ pub unsafe fn resume(tcb: *mut Tcb) {
 }
 
 pub unsafe fn set_priority(tcb: *mut Tcb, prio: u8) {
-    if tcb.is_null() {
-        return;
-    }
-    unsafe {
-        dequeue(tcb);
-        {
-            let _guard = lock_state(tcb);
-            (*tcb).priority = prio;
-        }
-        let (state, waiting_on) = {
-            let _guard = lock_state(tcb);
-            ((*tcb).state, (*tcb).waiting_on)
-        };
-        if waiting_on != 0
-            && (state == ThreadState::BlockedOnReceive as u8
-                || state == ThreadState::BlockedOnSend as u8)
-        {
-            crate::object::endpoint::reorder_waiter(
-                waiting_on as *mut crate::object::endpoint::Endpoint,
-                tcb,
-            );
-        } else if waiting_on != 0 && state == ThreadState::BlockedOnNotification as u8 {
-            crate::object::notification::reorder_waiter(
-                waiting_on as *mut crate::object::notification::Notification,
-                tcb,
-            );
-        } else if state == ThreadState::Running as u8 || state == ThreadState::Restart as u8 {
-            enqueue(tcb);
-        }
-    }
+    let _ = (tcb, prio);
 }
 
 pub unsafe fn set_mcp(tcb: *mut Tcb, mcp: u8) {
-    if tcb.is_null() {
-        return;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        (*tcb).mcp = mcp;
-    }
+    let _ = (tcb, mcp);
 }
 
 pub unsafe fn set_domain(tcb: *mut Tcb, domain: u8) {
-    if tcb.is_null() {
-        return;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        (*tcb).domain = domain;
-    }
+    let _ = (tcb, domain);
 }
 
 pub unsafe fn set_affinity(tcb: *mut Tcb, affinity: u8) {

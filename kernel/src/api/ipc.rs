@@ -511,14 +511,8 @@ pub(crate) unsafe fn set_reply_object_for(
     }
 }
 unsafe fn maybe_donate_sched_context(from: *mut tcb::Tcb, to: *mut tcb::Tcb) -> bool {
-    if from.is_null() || to.is_null() || from == to {
-        return false;
-    }
-    let sc = tcb::sched_context_snapshot(from);
-    if sc == 0 {
-        return false;
-    }
-    unsafe { crate::object::sched_context::donate(sc, to) }
+    let _ = (from, to);
+    false
 }
 
 unsafe fn consume_bound_notification_if_active(cur: *mut tcb::Tcb, uc: &mut UserContext) -> bool {
@@ -913,18 +907,7 @@ pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb) {
                 }
             }
         }
-        let sched_context = tcb::finish_reply_state(caller, was_fault, wake_caller);
-        if wake_caller
-            && sched_context != 0
-            && !crate::object::sched_context::has_budget(sched_context)
-        {
-            if fault_label != FaultLabel::Timeout.raw()
-                && crate::arch::current::trap::send_timeout_fault_ipc_for(caller)
-            {
-                return;
-            }
-            crate::object::sched_context::postpone(sched_context);
-        }
+        tcb::finish_reply_state(caller, was_fault, wake_caller);
         if wake_caller {
             tcb::enqueue(caller);
         }

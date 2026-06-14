@@ -282,19 +282,8 @@ pub unsafe fn push(
 
         tcb::dequeue(caller);
 
-        let donated_sc = tcb::set_blocked_on_reply(caller, reply_kva);
-        if can_donate && donated_sc != 0 {
-            let _stack_guard = lock_call_stack();
-            if let Some(old_head) =
-                crate::object::sched_context::push_reply_and_donate(donated_sc, callee, reply_kva)
-            {
-                if old_head != 0 {
-                    (*(old_head as *mut Reply)).next = call_stack_new(reply_kva, false);
-                }
-                (*reply).prev = call_stack_new(old_head, false);
-                (*reply).next = call_stack_new(donated_sc, true);
-            }
-        }
+        let _ = (can_donate, callee);
+        tcb::set_blocked_on_reply(caller, reply_kva);
     }
     true
 }
@@ -320,10 +309,6 @@ pub unsafe fn remove(reply_kva: u64, tcb: *mut Tcb) {
                     (*(prev as *mut Reply)).next = call_stack_new(next, true);
                 }
                 (*reply).next = 0;
-
-                if tcb::sched_context_snapshot(tcb) == 0 {
-                    let _ = crate::object::sched_context::donate(next, tcb);
-                }
             } else {
                 if next != 0 {
                     (*(next as *mut Reply)).prev = 0;

@@ -542,226 +542,35 @@ fn budget_remains(remaining: u64, charge_ticks: u64, margin_ticks: u64) -> bool 
     remaining > charge_ticks.saturating_add(margin_ticks)
 }
 
-#[inline]
-fn apply_timer_precision(deadline: u64, now: u64, precision_ticks: u64) -> u64 {
-    let earliest = now.saturating_add(precision_ticks);
-    if deadline <= earliest {
-        now
-    } else {
-        deadline - precision_ticks
-    }
-}
-
-#[inline]
-fn round_robin_precision_ticks(total_budget: u64) -> u64 {
-    if total_budget >= LONG_ROUND_ROBIN_BUDGET_THRESHOLD_TICKS {
-        ROUND_ROBIN_TIMER_PRECISION_TICKS
-    } else {
-        TIMER_PRECISION_TICKS
-    }
-}
-
-#[inline]
-fn round_robin_budget_margin_ticks(total_budget: u64) -> u64 {
-    if total_budget >= LONG_ROUND_ROBIN_BUDGET_THRESHOLD_TICKS {
-        ROUND_ROBIN_TIMER_PRECISION_TICKS
-    } else {
-        MIN_BUDGET_TICKS
-    }
-}
-
-unsafe fn current_budget_deadline(
-    now: u64,
-    last_budget_account_ticks: u64,
-    current_tcb: *const Tcb,
-) -> Option<u64> {
-    let sc_kva = unsafe { tcb_sched_context(current_tcb as *mut Tcb) };
-    if sc_kva == 0 || !is_kernel_pspace_kva(sc_kva) {
-        return None;
-    }
-    let sc = sc_kva as *mut SchedContext;
-    unsafe {
-        let _guard = lock(sc_kva);
-        if (*sc).refill_max == 0 {
-            return None;
-        }
-        let head = *refill_head_ptr(sc);
-        if head.time > now {
-            return Some(apply_timer_precision(head.time, now, TIMER_PRECISION_TICKS));
-        }
-        let elapsed = now.saturating_sub(last_budget_account_ticks);
-        let precision = if (*sc).period == 0 {
-            let head = refill_head_ptr(sc);
-            let tail = refill_tail_ptr(sc);
-            round_robin_precision_ticks((*head).amount.saturating_add((*tail).amount))
-        } else {
-            TIMER_PRECISION_TICKS
-        };
-        Some(apply_timer_precision(
-            now.saturating_add(head.amount.saturating_sub(elapsed)),
-            now,
-            precision,
-        ))
-    }
-}
-
-unsafe fn next_release_deadline(now: u64) -> Option<u64> {
-    let (contexts, count) = release_sched_context_snapshot();
-    let current_core = crate::kernel::smp::current_core_id();
-    let mut deadline: Option<u64> = None;
-    unsafe {
-        let mut i = 0;
-        while i < count {
-            let sc_kva = contexts[i];
-            if sc_kva != 0 && is_kernel_pspace_kva(sc_kva) {
-                let sc = sc_kva as *mut SchedContext;
-                let _guard = lock(sc_kva);
-                if (*sc).core as usize == current_core
-                    && (*sc).period != 0
-                    && (*sc).refill_max != 0
-                    && (*sc).tcb != 0
-                {
-                    let head = *refill_head_ptr(sc);
-                    let candidate = if head.time <= now { now } else { head.time };
-                    let candidate = apply_timer_precision(candidate, now, TIMER_PRECISION_TICKS);
-                    deadline = Some(deadline.map_or(candidate, |current| current.min(candidate)));
-                }
-            }
-            i += 1;
-        }
-    }
-    deadline
-}
-
 pub unsafe fn scheduler_timer_deadline(
-    now: u64,
-    last_budget_account_ticks: u64,
-    current_tcb: *const Tcb,
+    _now: u64,
+    _last_budget_account_ticks: u64,
+    _current_tcb: *const Tcb,
 ) -> Option<u64> {
-    let mut deadline =
-        unsafe { current_budget_deadline(now, last_budget_account_ticks, current_tcb) };
-    if let Some(release_deadline) = unsafe { next_release_deadline(now) } {
-        deadline = Some(deadline.map_or(release_deadline, |current| current.min(release_deadline)));
-    }
-    deadline
+    None
 }
 
-pub unsafe fn release_due(now: u64) {
-    let (contexts, count) = release_sched_context_snapshot();
-    let current_core = crate::kernel::smp::current_core_id();
-    let current = tcb::current();
-    unsafe {
-        let mut i = 0;
-        while i < count {
-            let sc_kva = contexts[i];
-            let mut wake_tcb = core::ptr::null_mut();
-            if sc_kva != 0 && is_kernel_pspace_kva(sc_kva) {
-                let sc = sc_kva as *mut SchedContext;
-                {
-                    let _guard = lock(sc_kva);
-                    if (*sc).core as usize == current_core
-                        && (*sc).tcb != 0
-                        && (*sc).tcb != current as u64
-                        && release_one(sc, now)
-                    {
-                        let tcb = (*sc).tcb as *mut Tcb;
-                        if tcb::runnable_sched_context_snapshot(tcb).0 {
-                            wake_tcb = tcb;
-                        }
-                    }
-                }
-                if !wake_tcb.is_null() {
-                    unregister_release(sc_kva);
-                    crate::object::tcb::enqueue(wake_tcb);
-                }
-            }
-            i += 1;
-        }
-    }
+pub unsafe fn release_due(_now: u64) {}
+
+pub unsafe fn postpone(_sc_kva: u64) {}
+
+pub unsafe fn postpone_unreleased_tcb(_tcb: *mut Tcb) -> bool {
+    false
 }
 
-pub unsafe fn postpone(sc_kva: u64) {
-    if sc_kva == 0 || !is_kernel_pspace_kva(sc_kva) {
-        return;
-    }
-    let tcb = unsafe {
-        let sc = sc_kva as *mut SchedContext;
-        let _guard = lock(sc_kva);
-        register_release(sc_kva);
-        (*sc).tcb as *mut Tcb
-    };
-    if !tcb.is_null() {
-        unsafe {
-            crate::object::tcb::dequeue(tcb);
-        }
-    }
+pub unsafe fn has_budget(_sc_kva: u64) -> bool {
+    true
 }
 
-pub unsafe fn postpone_unreleased_tcb(tcb: *mut Tcb) -> bool {
-    if tcb.is_null() {
-        return false;
-    }
-    let (runnable, sc_kva) = tcb::runnable_sched_context_snapshot(tcb);
-    if !runnable || sc_kva == 0 || !is_kernel_pspace_kva(sc_kva) {
-        return false;
-    }
-    let sc = sc_kva as *mut SchedContext;
-    let should_postpone = unsafe {
-        let _guard = lock(sc_kva);
-        if (*sc).refill_max == 0 || (*sc).period == 0 {
-            false
-        } else {
-            let now = now_ticks();
-            refill_unblock_check(sc, now);
-            !refill_ready(sc, now) || !refill_sufficient(sc, 0)
-        }
-    };
-    if should_postpone {
-        unsafe {
-            postpone(sc_kva);
-        }
-    }
-    should_postpone
-}
-
-pub unsafe fn has_budget(sc_kva: u64) -> bool {
-    if sc_kva == 0 {
-        return false;
-    }
-    if !is_kernel_pspace_kva(sc_kva) {
-        return true;
-    }
-    let sc = sc_kva as *mut SchedContext;
-    unsafe {
-        let _guard = lock(sc_kva);
-        if (*sc).refill_max == 0 {
-            return false;
-        }
-        let now = now_ticks();
-        if (*sc).period != 0 {
-            refill_unblock_check(sc, now);
-        }
-        (*sc).period == 0 || (refill_ready(sc, now) && refill_sufficient(sc, 0))
-    }
-}
-
-pub unsafe fn is_round_robin(sc_kva: u64) -> bool {
-    if sc_kva == 0 || !is_kernel_pspace_kva(sc_kva) {
-        return false;
-    }
-    let sc = sc_kva as *mut SchedContext;
-    unsafe {
-        let _guard = lock(sc_kva);
-        (*sc).refill_max != 0 && (*sc).period == 0
-    }
+pub unsafe fn is_round_robin(_sc_kva: u64) -> bool {
+    true
 }
 
 pub unsafe fn tcb_schedulable(tcb: *mut Tcb) -> bool {
     if tcb.is_null() {
         return false;
     }
-    let (runnable, sched_context) = tcb::runnable_sched_context_snapshot(tcb);
-    runnable && sched_context != 0 && unsafe { has_budget(sched_context) }
+    tcb::runnable_sched_context_snapshot(tcb).0
 }
 
 fn tcb_blocked(tcb: *mut Tcb) -> bool {
@@ -788,61 +597,8 @@ unsafe fn released_locked(sc: *mut SchedContext, sc_kva: u64) -> bool {
     }
 }
 
-pub unsafe fn charge(sc_kva: u64, ticks: u64) -> bool {
-    if sc_kva == 0 {
-        return false;
-    }
-    if !is_kernel_pspace_kva(sc_kva) {
-        return true;
-    }
-    let sc = sc_kva as *mut SchedContext;
-    unsafe {
-        let _guard = lock(sc_kva);
-        if (*sc).refill_max == 0 {
-            return false;
-        }
-        (*sc).consumed = (*sc).consumed.saturating_add(ticks);
-        if (*sc).period == 0 {
-            let head = refill_head_ptr(sc);
-            let tail = refill_tail_ptr(sc);
-            let total_budget = (*head).amount.saturating_add((*tail).amount);
-            if budget_remains(
-                (*head).amount,
-                ticks,
-                round_robin_budget_margin_ticks(total_budget),
-            ) {
-                (*head).amount -= ticks;
-                (*tail).amount = (*tail).amount.saturating_add(ticks);
-                return true;
-            }
-            (*head).amount = (*head).amount.saturating_add((*tail).amount);
-            (*tail).amount = 0;
-            return false;
-        }
-
-        let now = now_ticks();
-        if !refill_ready(sc, now) || !refill_sufficient(sc, 0) {
-            register_release(sc_kva);
-            if (*sc).tcb != 0 {
-                crate::object::tcb::dequeue((*sc).tcb as *mut Tcb);
-            }
-            return false;
-        }
-
-        let head_amount = (*refill_head_ptr(sc)).amount;
-        if budget_remains(head_amount, ticks, MIN_BUDGET_TICKS) {
-            refill_budget_check(sc, ticks);
-            return true;
-        }
-
-        refill_budget_check(sc, head_amount);
-        register_release(sc_kva);
-        if (*sc).tcb != 0 {
-            let tcb = (*sc).tcb as *mut Tcb;
-            crate::object::tcb::dequeue(tcb);
-        }
-        false
-    }
+pub unsafe fn charge(_sc_kva: u64, _ticks: u64) -> bool {
+    true
 }
 
 pub unsafe fn replenish(sc_kva: u64) {
@@ -859,38 +615,13 @@ pub unsafe fn replenish(sc_kva: u64) {
     }
 }
 
-pub unsafe fn yield_tcb(tcb: *mut Tcb) -> bool {
-    if tcb.is_null() {
-        return false;
-    }
-    let sc_kva = unsafe { tcb_sched_context(tcb) };
-    if sc_kva == 0 || !is_kernel_pspace_kva(sc_kva) {
-        return false;
-    }
-    let sc = sc_kva as *mut SchedContext;
-    unsafe {
-        let _guard = lock(sc_kva);
-        if (*sc).period == 0 {
-            return false;
-        }
-        let now = now_ticks();
-        refill_unblock_check(sc, now);
-        let head_amount = (*refill_head_ptr(sc)).amount;
-        refill_budget_check(sc, head_amount);
-        register_release(sc_kva);
-        if (*sc).tcb != 0 {
-            crate::object::tcb::dequeue((*sc).tcb as *mut Tcb);
-        }
-    }
-    true
+pub unsafe fn yield_tcb(_tcb: *mut Tcb) -> bool {
+    false
 }
 
 pub unsafe fn charge_tcb(tcb: *mut Tcb, ticks: u64) -> bool {
-    if tcb.is_null() {
-        return false;
-    }
-    let sc = unsafe { tcb_sched_context(tcb) };
-    unsafe { charge(sc, ticks) }
+    let _ = (tcb, ticks);
+    true
 }
 
 pub unsafe fn consume_consumed(sc_kva: u64) -> u64 {
