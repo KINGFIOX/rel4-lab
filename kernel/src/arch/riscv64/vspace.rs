@@ -41,6 +41,11 @@ pub const fn paddr_to_pptr(paddr: usize) -> usize {
     paddr - PADDR_BASE + PPTR_BASE
 }
 
+#[inline]
+pub const fn paddr_to_mmio(paddr: usize) -> usize {
+    paddr_to_pptr(paddr)
+}
+
 /// Convert a kernel-ELF VA (anything in the kernel image: text, rodata,
 /// data, bss) to its physical address. Valid for VAs in `[KERNEL_ELF_BASE,
 /// KERNEL_ELF_BASE + image_size)`. The kernel ELF window is set up by the

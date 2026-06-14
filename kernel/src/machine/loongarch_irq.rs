@@ -2,6 +2,7 @@ use core::ptr;
 
 use crate::arch::loongarch64::csr;
 use crate::arch::loongarch64::platform;
+use crate::arch::loongarch64::vspace::paddr_to_mmio;
 
 const PCH_PIC_INT_MASK: usize = 0x20;
 const PCH_PIC_HTMSI_VEC: usize = 0x200;
@@ -22,11 +23,11 @@ const CPU0_BITMAP_PER_BYTE: u32 = 0x0101_0101;
 const EXTIOI_CPU_IP0_PER_BYTE: u32 = 0x0101_0101;
 
 fn pch_reg8(offset: usize) -> *mut u8 {
-    (platform::PCH_PIC_BASE_PA + offset) as *mut u8
+    paddr_to_mmio(platform::PCH_PIC_BASE_PA + offset) as *mut u8
 }
 
 fn pch_reg64(offset: usize) -> *mut u64 {
-    (platform::PCH_PIC_BASE_PA + offset) as *mut u64
+    paddr_to_mmio(platform::PCH_PIC_BASE_PA + offset) as *mut u64
 }
 
 pub fn init() {

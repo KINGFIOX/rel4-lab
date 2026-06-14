@@ -8,7 +8,7 @@
 use core::ptr::{read_volatile, write_volatile};
 
 use crate::arch::current::platform;
-use crate::arch::current::vspace::paddr_to_pptr;
+use crate::arch::current::vspace::paddr_to_mmio;
 
 const PCI_QEMU_VENDOR_ID: u16 = 0x1b36;
 const PCI_SERIAL_DEVICE_ID: u16 = 0x0002;
@@ -36,8 +36,8 @@ const LSR_DR: u8 = 1 << 0;
 const LSR_THRE: u8 = 1 << 5;
 const UART_WAIT_SPINS: usize = 1_000_000;
 
-/// Called once the kernel has switched to a page table with the PSpace
-/// direct map. Before this point PA-based UART MMIO addresses are not safe.
+/// Called once the kernel has installed its MMIO mapping. Before this point
+/// PA-based UART MMIO addresses are not safe.
 pub fn init() {
     let _ = init_pci_debug_uart();
     crate::logger::init();
@@ -116,12 +116,12 @@ fn uart_try_putc(base_pa: usize, ch: u8) -> bool {
 
 #[inline]
 fn uart_reg(base_pa: usize, register: UartRegister) -> *mut u8 {
-    paddr_to_pptr(base_pa + register.offset()) as *mut u8
+    paddr_to_mmio(base_pa + register.offset()) as *mut u8
 }
 
 #[inline]
 fn pci_reg<T>(cfg_base_pa: usize, offset: usize) -> *mut T {
-    paddr_to_pptr(cfg_base_pa + offset) as *mut T
+    paddr_to_mmio(cfg_base_pa + offset) as *mut T
 }
 
 #[inline]

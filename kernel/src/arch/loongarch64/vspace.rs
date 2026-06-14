@@ -36,6 +36,11 @@ pub const fn paddr_to_pptr(paddr: usize) -> usize {
 }
 
 #[inline]
+pub const fn paddr_to_mmio(paddr: usize) -> usize {
+    (paddr - PADDR_BASE) | DMW_MMIO_ALIAS_BASE
+}
+
+#[inline]
 pub const fn kpptr_to_paddr(vaddr: usize) -> usize {
     vaddr - KERNEL_ELF_BASE + PHYS_BASE_RAW
 }
@@ -71,12 +76,16 @@ const CRMD_DA: usize = 1 << 3;
 const CRMD_PG: usize = 1 << 4;
 const DMW_PLV0: usize = 1 << 0;
 const DMW_MAT_SHIFT: usize = 4;
+const DMW_MAT_SUC: usize = 0b00 << DMW_MAT_SHIFT;
 const DMW_MAT_CC: usize = 0b01 << DMW_MAT_SHIFT;
 const DMW_PSEG_SHIFT: usize = 25;
 const DMW_VSEG_SHIFT: usize = 60;
 // Staging low-identity kernel layout: PLV0 sees VA[0x0...] as PA[0x0...].
 // PLV3 is deliberately not enabled here, so user mappings still use PGDL.
 const DMW_LOW_DIRECT: usize = DMW_PLV0 | DMW_MAT_CC;
+const DMW_MMIO_VSEG: usize = 0x8;
+const DMW_MMIO_ALIAS_BASE: usize = DMW_MMIO_VSEG << DMW_VSEG_SHIFT;
+const DMW_MMIO_DIRECT: usize = DMW_PLV0 | DMW_MAT_SUC | DMW_MMIO_ALIAS_BASE;
 
 #[inline]
 fn configure_page_walk() {
@@ -88,7 +97,7 @@ fn configure_page_walk() {
 #[inline]
 fn configure_kernel_direct_map() {
     csr::set_dmw0(DMW_LOW_DIRECT);
-    csr::set_dmw1(0);
+    csr::set_dmw1(DMW_MMIO_DIRECT);
     csr::set_dmw2(0);
     csr::set_dmw3(0);
 }
@@ -558,4 +567,6 @@ const _: () = {
     assert!(DMW_PSEG_SHIFT < DMW_VSEG_SHIFT);
     assert!(DMW_LOW_DIRECT & (0xfusize << DMW_PSEG_SHIFT) == 0);
     assert!(DMW_LOW_DIRECT & (0xfusize << DMW_VSEG_SHIFT) == 0);
+    assert!(DMW_MMIO_DIRECT & (0xfusize << DMW_PSEG_SHIFT) == 0);
+    assert!(DMW_MMIO_DIRECT & (0xfusize << DMW_VSEG_SHIFT) == DMW_MMIO_ALIAS_BASE);
 };
