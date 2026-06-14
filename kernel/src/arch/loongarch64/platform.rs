@@ -2,7 +2,6 @@
 
 pub const UART0_MMIO_BASE_PA: usize = 0x1fe0_01e0;
 pub const UART0_MMIO_SIZE: usize = 0x100;
-pub const UART0_MMIO_FRAME_BASE_PA: usize = 0x1fe0_0000;
 
 pub const PCI_ECAM_BASE_PA: usize = 0x2000_0000;
 // DTB maps PCI I/O child address 0x4000 to CPU PA 0x1800_4000.
@@ -23,13 +22,8 @@ pub const FREE_RAM_REGIONS: &[(u64, u64)] = &[
 ];
 
 pub const DEVICE_UNTYPED_REGIONS: &[(u64, u64)] = &[
-    // Keep the low memory bank [0, 0x1000_0000) reserved for boot/kernel
-    // staging, but expose the UART page that the userspace stack retypes and
-    // maps explicitly.
-    (
-        UART0_MMIO_FRAME_BASE_PA as u64,
-        (UART0_MMIO_FRAME_BASE_PA + 0x1000) as u64,
-    ),
-    // The rest of the user-visible QEMU virt MMIO range starts at the PCH PIC.
+    // QEMU virt MMIO lives below the high RAM base. Keep the low memory bank
+    // [0, 0x1000_0000) reserved for boot/kernel staging; the UART, PCH PIC,
+    // PCI I/O, ECAM, MSI, and PCI memory windows all sit in this range.
     (0x1000_0000, 0x8000_0000),
 ];
