@@ -129,7 +129,7 @@ pub extern "C" fn init_secondary_hart(
     }
     crate::arch::loongarch64::trap::install_trap_vector();
     crate::arch::loongarch64::trap::init_timer();
-    crate::arch::loongarch64::irq::init();
+    crate::arch::loongarch64::irq::init_current_core();
     crate::arch::loongarch64::trap::idle_scheduler_loop()
 }
 
