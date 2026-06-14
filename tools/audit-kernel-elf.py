@@ -44,6 +44,9 @@ RUST_USIZE_CONST_RE = re.compile(
 BOOT_STACK_IMMEDIATE_RE = re.compile(
     r'"li(?:\.d)?\s+(?:\$)?t1,\s*(?P<value>[0-9_]+)"'
 )
+BOOT_STACK_CONST_RE = re.compile(
+    r"kernel_stack_bytes\s*=\s*const\s+crate::kernel::smp::KERNEL_STACK_BYTES"
+)
 
 
 @dataclass(frozen=True)
@@ -185,15 +188,17 @@ def read_smp_stack_expectation() -> StackExpectation:
     )
 
 
-def boot_stack_immediate(arch: str) -> int:
+def validate_boot_stack_source(arch: str) -> list[str]:
     path = ROOT_DIR / "kernel" / "src" / "arch" / arch / "boot.rs"
-    matches = [
-        int(match.group("value").replace("_", ""))
-        for match in BOOT_STACK_IMMEDIATE_RE.finditer(path.read_text())
-    ]
-    if len(matches) != 1:
-        die(PREFIX, f"expected one boot stack immediate in {path}, found {len(matches)}")
-    return matches[0]
+    text = path.read_text()
+    errors: list[str] = []
+    if BOOT_STACK_IMMEDIATE_RE.search(text):
+        errors.append(f"{path.relative_to(ROOT_DIR)} still hard-codes the boot stack stride")
+    if not BOOT_STACK_CONST_RE.search(text):
+        errors.append(
+            f"{path.relative_to(ROOT_DIR)} does not bind boot stack stride to KERNEL_STACK_BYTES"
+        )
+    return errors
 
 
 def parse_header(data: bytes) -> ElfHeader:
@@ -462,17 +467,12 @@ def main(argv: list[str]) -> int:
     program_headers = parse_program_headers(data, header)
     sections = parse_section_headers(data, header)
     symbols = parse_symbols(data, sections)
-    stack_immediate = boot_stack_immediate(arch)
     errors = [
         *validate_header(header, expectation),
         *validate_load_segments(program_headers, expectation),
         *validate_symbols(symbols, program_headers, expectation, stack_expectation),
+        *validate_boot_stack_source(arch),
     ]
-    if stack_immediate != stack_expectation.per_hart_bytes:
-        errors.append(
-            f"boot stack stride is {stack_immediate:#x}, "
-            f"expected {stack_expectation.per_hart_bytes:#x}"
-        )
     if errors:
         for error in errors:
             log(PREFIX, f"FAIL: {error}")

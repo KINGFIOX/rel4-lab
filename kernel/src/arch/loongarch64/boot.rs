@@ -29,7 +29,7 @@ pub unsafe extern "C" fn _start() -> ! {
         // elfloader passes core_id in a7. Each hart gets a 64 KiB stack from
         // the linker-reserved stack region, counted down from __stack_top.
         "la.local $t0, __stack_top",
-        "li.d     $t1, 65536",
+        "li.d     $t1, {kernel_stack_bytes}",
         "mul.d    $t1, $a7, $t1",
         "sub.d    $sp, $t0, $t1",
 
@@ -73,6 +73,7 @@ pub unsafe extern "C" fn _start() -> ! {
         init_kernel = sym init_kernel,
         init_secondary_hart = sym init_secondary_hart,
         secondary_boot_ready = sym crate::kernel::smp::SECONDARY_BOOT_READY,
+        kernel_stack_bytes = const crate::kernel::smp::KERNEL_STACK_BYTES,
         secondary_boot_ready_magic = const crate::kernel::smp::SECONDARY_BOOT_READY_MAGIC,
     );
 }
