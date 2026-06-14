@@ -1,13 +1,15 @@
 ---
 name: microkernel-no-priority
-description: Keep this Rust RV64/LoongArch seL4-style microkernel free of priority scheduling semantics. Use when rolling back, reviewing, planning, or changing scheduler, TCB, runqueue, IPC donation, capability invocation, or thread-control code so priority fields, priority queues, priority donation/inheritance, and priority-based dispatch are removed or kept out of scope; prefer a single round-robin runnable policy unless the user explicitly asks for priority scheduling.
+description: Keep this Rust RV64/LoongArch seL4-style microkernel free of priority-based scheduling decisions while preserving seL4-compatible priority APIs for user-space portability. Use when rolling back, reviewing, planning, or changing scheduler, TCB, runqueue, IPC donation, capability invocation, thread-control code, or user-space assumptions so priority values may be set but do not affect dispatch, ordering, donation, inheritance, or correctness unless explicitly requested.
 ---
 
 # Microkernel No Priority
 
 ## Intent
 
-Use this skill to keep scheduling as simple round-robin among runnable threads. The kernel should not choose a thread because of a priority value, and IPC or reply paths should not donate, inherit, raise, lower, or compare priorities.
+Use this skill to keep scheduling as simple round-robin among runnable threads. User-space may set seL4-style priority and MCP values so the same code can build or run on seL4 and rel4, but rel4 must not choose a thread because of those values.
+
+IPC, reply, notification, and wakeup paths must not donate, inherit, raise, lower, compare, or otherwise interpret priorities for scheduler behavior.
 
 ## Remove Or Avoid
 
@@ -15,9 +17,14 @@ Treat these as out of scope unless the user explicitly requests priority schedul
 
 - Per-TCB priority and maximum-controlled-priority fields that influence dispatch.
 - Priority-indexed ready queues, ready bitmaps, and highest-priority selection logic.
-- Thread-control operations whose only purpose is setting priority or MCP.
 - Priority donation, priority inheritance, priority boosting, or priority-based IPC ordering.
 - Tests or compatibility shims that preserve priority behavior while pretending the scheduler is round-robin.
+
+## Compatibility Policy
+
+- Keep `TCBSetPriority`, `TCBSetMCPriority`, and `TCBSetSchedParams` source-compatible when user-space needs to run on both seL4 and rel4.
+- These calls may validate obvious shape/range errors and store metadata if useful for debugging, but they must not affect ready-queue placement, runqueue ordering, IPC delivery order, donation, or wakeup behavior.
+- User-space written for this project must not depend on priority values for correctness, progress, timing, IPC ordering, or fairness. If a program needs ordering, make it explicit in IPC/protocol logic rather than relying on priority.
 
 ## Preserve
 
@@ -27,6 +34,7 @@ Keep these behaviors available:
 - Blocking and unblocking through IPC, notifications, faults, IRQ delivery, suspend/resume, and explicit syscalls.
 - CPU affinity and SMP core selection if needed for multicore correctness.
 - Architecture-neutral scheduler interfaces shared by `riscv64` and `loongarch64`.
+- seL4 user-space source compatibility for priority-setting APIs, as long as rel4 semantics remain priority-insensitive.
 
 ## Workflow
 
@@ -36,6 +44,7 @@ Keep these behaviors available:
 4. Replace priority queues with a round-robin runnable queue. Enqueue newly runnable TCBs at the tail unless an existing non-priority IPC invariant requires a narrower choice.
 5. Preserve explicit `Yield` by rotating the current runnable TCB to the tail of the round-robin queue.
 6. Keep RISC-V and LoongArch behavior symmetric; priority removal should normally be shared scheduler code, not architecture-specific branches.
+7. When changing user-space, remove assumptions that higher priority makes a task run first or receive IPC first; keep priority calls only for seL4 portability.
 
 ## Validation
 
@@ -46,4 +55,4 @@ Use the smallest useful validation stage:
 - Architecture parity: run matching LoongArch build/test commands when shared scheduler code or LoongArch trap code changed.
 - xv6 impact: run a targeted xv6 program such as `tools/run-xv6-user.py forktest` before broad `usertests`.
 
-Do not claim priority scheduling removal is complete until temporary diagnostics are removed and relevant focused validations pass.
+Do not claim priority scheduling removal is complete until temporary diagnostics are removed, priority APIs are behaviorally no-op on rel4, user-space does not depend on priority semantics, and relevant focused validations pass.

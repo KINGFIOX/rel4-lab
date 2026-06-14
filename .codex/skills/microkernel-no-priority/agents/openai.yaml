@@ -1,4 +1,4 @@
 interface:
   display_name: "Microkernel No Priority"
-  short_description: "Use round-robin instead of priority scheduling"
-  default_prompt: "Use $microkernel-no-priority when rolling back or changing this microkernel so priority scheduling, priority queues, priority donation, and priority-based dispatch are removed or kept out of scope; prefer a single round-robin runnable queue unless explicitly requested."
+  short_description: "Ignore priority for scheduling"
+  default_prompt: "Use $microkernel-no-priority when rolling back or changing this microkernel so seL4-compatible priority APIs may exist but rel4 scheduling stays round-robin and priority-insensitive; user-space must not rely on priority for correctness, ordering, or progress unless explicitly requested."
