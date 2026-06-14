@@ -1,6 +1,6 @@
 ---
 name: microkernel-no-preempt
-description: Keep this Rust RV64/LoongArch seL4-style microkernel free of preemptive scheduler behavior while preserving user-space portability across seL4 and rel4. Use when reviewing, planning, maintaining, or changing timer, trap, scheduler, runqueue, context-switch code, or user-space assumptions so timer-driven preemption, timeslice expiry, quantum rotation, asynchronous budget charging, involuntary scheduler switches, and user-space reliance on preemption stay absent or kept out of scope unless the user explicitly asks for preemptive scheduling.
+description: Keep this Rust RV64/LoongArch seL4-style microkernel free of preemptive scheduler behavior while preserving seL4-compatible user-space source portability. Use when reviewing, planning, maintaining, or changing timer, trap, scheduler, runqueue, context-switch code, or user-space assumptions so timer-driven preemption, timeslice expiry, quantum rotation, asynchronous budget charging, involuntary scheduler switches, and project user-space reliance on preemption stay absent or kept out of scope unless the user explicitly asks for preemptive scheduling.
 ---
 
 # Microkernel No Preempt
@@ -35,7 +35,8 @@ Keep these behaviors available:
 
 - Prefer source compatibility with seL4 user programs: timer APIs, `Yield`, blocking IPC, notifications, sleeps, or related constants may exist if they are needed for the same user binary/source to build or run on seL4 and rel4.
 - These compatibility paths may expose time or interrupt services, but they must not make rel4 emulate seL4 quantum expiry, timer-driven ready-queue rotation, or involuntary preemption.
-- User-space written for this project must not depend on preemption for correctness, progress, timing, IPC ordering, or fairness, even when that same source is also expected to run on seL4. If a workflow needs interleaving, make it explicit with `Yield`, blocking IPC, notifications, sleeps, or protocol-level synchronization.
+- User-space written for this project may tolerate seL4 preemption, but it must remain correct when rel4 never preempts a running thread. Do not use CPU-bound busy loops, implicit time slicing, or assumed involuntary interleaving as part of the program's correctness, progress, timing, IPC ordering, or fairness story.
+- If a workflow needs another runnable thread to make progress, make that dependency explicit with `Yield`, blocking IPC, notifications, sleeps, or protocol-level synchronization.
 - Do not introduce tests, service loops, or user programs that assume a CPU-bound thread will be involuntarily preempted so another runnable thread can run.
 
 ## Workflow
