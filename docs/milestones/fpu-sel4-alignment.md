@@ -3,23 +3,24 @@
 This note is the requirement-by-requirement checklist for aligning the Rust
 RV64 FPU implementation with the vendored upstream seL4 baseline under
 `third_party/sel4-lab/sel4test/kernel`. It covers the current
-`riscv64gc-unknown-none-elf`, MCS, `KernelHaveFPU`, two-hart-capable build. It
-does not claim a formal proof and does not expand scope beyond seL4's RISC-V FPU
-semantics.
+`riscv64gc-unknown-none-elf`, `KernelHaveFPU`, two-hart-capable build for the
+single-domain rel4 scheduler. It does not claim a formal proof and does not
+expand scope beyond seL4's RISC-V FPU semantics.
 
 ## Status
 
 The implementation is source-audited as seL4-aligned for the active
-single-domain build. The local access shadow now follows upstream RISC-V seL4's
+single-domain rel4 build. The local access shadow now follows upstream RISC-V seL4's
 `enableFpu()` / `disableFpu()` split: access toggles update only the per-core
 shadow state, while explicit boot/trap boundaries clear supervisor `sstatus.FS`
 before ordinary Rust dispatch and the user restore path writes the selected
 TCB's saved `sstatus`.
 
-The current single-domain kernel intentionally has no live domain-rotation path.
-If multi-domain scheduling is enabled, the upstream `prepareSetDomain` /
-`prepareNextDomain` FPU-owner release points must be implemented before this
-matrix can remain green.
+The current single-domain kernel intentionally has no live domain-rotation path
+and no MCS scheduling-context handoff. If multi-domain scheduling or MCS-style
+scheduling contexts are reintroduced, the upstream `prepareSetDomain` /
+`prepareNextDomain` and related FPU-owner release points must be implemented
+before this matrix can remain green.
 
 ## Evidence Gates
 

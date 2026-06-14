@@ -1,12 +1,20 @@
 # microkernel
 
-`microkernel` is a Rust seL4-style kernel for RV64 `qemu-riscv-virt`, plus a
-user-space xv6 compatibility stack built on top of that seL4 ABI.
+`microkernel` is a Rust seL4-style kernel for RV64 `qemu-riscv-virt` and
+LoongArch64 build targets, plus a user-space xv6 compatibility stack built on
+top of a seL4-like capability ABI.
+
+The current rel4 scope intentionally keeps the scheduler simpler than upstream
+seL4 MCS: there are no `SchedContext`/`SchedControl` objects, dispatch is
+cooperative round-robin, priority values are accepted only as compatibility
+metadata, and all domain values collapse into one effective scheduling domain.
+Repository user-space should not depend on priority scheduling, multiple
+domains, or timer preemption for correctness.
 
 The repository has two main parts:
 
 - `kernel/`: the Rust kernel that boots through the upstream seL4 elfloader and
-  can run the upstream `sel4test-driver` rootserver.
+  implements the current rel4 seL4-style ABI subset.
 - `userspace/`: no_std seL4 user libraries and servers, including an xv6 stack
   that runs xv6 user programs through user-space services rather than an
   in-kernel Unix compatibility layer.
@@ -61,7 +69,7 @@ nix develop
 The examples below can also be run as `nix develop --command ...` from outside
 the shell.
 
-## Run seL4
+## Run rel4 / seL4-Style Images
 
 Build the Rust kernel explicitly:
 
@@ -69,7 +77,7 @@ Build the Rust kernel explicitly:
 cargo build --release --target riscv64gc-unknown-none-elf -p kernel
 ```
 
-Pack the Rust kernel into the upstream `sel4test` image:
+Pack the Rust kernel into an upstream seL4 elfloader image:
 
 ```sh
 ./tools/pack-image.py
@@ -81,19 +89,25 @@ Boot the packed image interactively under QEMU:
 ./tools/simulate.py
 ```
 
-Run the packed `sel4test` image headlessly:
+Run the packed image headlessly:
 
 ```sh
 ./tools/run-tests.py
 ```
 
-Useful variants:
+Useful variants for tests that still match the current rel4 ABI subset:
 
 ```sh
-SEL4TEST_REGEX='SCHED0003' ./tools/pack-image.py
+SEL4TEST_REGEX='Test that there are tests' ./tools/pack-image.py
 TIMEOUT=480 SMP=1 ./tools/run-tests.py
 SMP=OFF NUM_NODES=1 ./tools/pack-image.py
 ```
+
+The unmodified upstream `sel4test-driver` still assumes seL4's MCS
+`SchedContext`/`SchedControl` ABI. After the rel4 no-MCS rollback, successful
+image packing is useful, but upstream sel4test runs are not the default
+correctness signal unless the selected slice avoids the removed scheduler
+surface or the rootserver is adjusted.
 
 ## Run xv6 Programs
 
@@ -151,6 +165,13 @@ Build the kernel package explicitly:
 
 ```sh
 cargo build --release --target riscv64gc-unknown-none-elf -p kernel
+cargo build --release --target loongarch64-unknown-none -p kernel
+```
+
+Current smoke path:
+
+```sh
+TIMEOUT=90 ARCH=riscv64 ./tools/run-xv6-user.py echo hello
 ```
 
 Clean up a stuck QEMU test process if a run is interrupted:
