@@ -10,7 +10,17 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tool_common import ROOT_DIR, command_exists, die, getenv, log, output, run
+from tool_common import (
+    LOONGARCH64_EFLAGS_ABI_MASK,
+    LOONGARCH64_EFLAGS_ABI_SOFT_FLOAT,
+    ROOT_DIR,
+    command_exists,
+    die,
+    getenv,
+    log,
+    output,
+    run,
+)
 
 
 PREFIX = "audit-kernel-fpu"
@@ -221,6 +231,21 @@ def resolve_locations(addr2line: str, elf: Path, addresses: list[str]) -> list[s
     return locations.splitlines()
 
 
+def loongarch_abi_name(elf: Path) -> str:
+    data = elf.read_bytes()
+    if len(data) < 52:
+        die(PREFIX, f"ELF header too small: {elf}")
+    flags = int.from_bytes(data[48:52], "little")
+    abi = flags & LOONGARCH64_EFLAGS_ABI_MASK
+    if abi == LOONGARCH64_EFLAGS_ABI_SOFT_FLOAT:
+        return "soft-float"
+    if abi == 0x2:
+        return "single-float"
+    if abi == 0x3:
+        return "double-float"
+    return f"unknown({abi:#x})"
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -300,12 +325,16 @@ def main(argv: list[str]) -> int:
             print(f"  {address}: {location}", file=sys.stderr)
         return 1
 
+    arch = target_arch(args.target)
+    abi_suffix = (
+        f" (ELF ABI: {loongarch_abi_name(elf)})" if arch == "loongarch64" else ""
+    )
     if allowed_source_arg:
         print(
-            f"PASS: {len(addresses)} FP-register/FCSR instructions confined to {allowed_source_arg}"
+            f"PASS: {len(addresses)} FP-register/FCSR instructions confined to {allowed_source_arg}{abi_suffix}"
         )
     else:
-        print(f"PASS: no FP-register/FCSR instructions found for {args.target}")
+        print(f"PASS: no FP-register/FCSR instructions found for {args.target}{abi_suffix}")
     if args.verbose:
         for location in sorted(set(locations)):
             print(f"  {location}")
