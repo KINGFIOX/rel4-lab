@@ -10,7 +10,16 @@ members = [
     "userspace/xv6fs-server",
     "userspace/xv6-host",
 ]
-default-members = ["kernel"]
+default-members = [
+    "kernel",
+    "userspace/sel4-user",
+    "userspace/uart-server",
+    "userspace/virtio-disk-server",
+    "userspace/vfs-server",
+    "userspace/xv6-abi",
+    "userspace/xv6fs-server",
+    "userspace/xv6-host",
+]
 
 [profile.release]
 opt-level = 3
