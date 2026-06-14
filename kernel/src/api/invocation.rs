@@ -43,7 +43,6 @@ enum ObjectType {
     Endpoint = 2,
     Notification = 3,
     CapTable = 4,
-    SchedContext = 5,
     Reply = 6,
     GigaPage = 7,
     FourKPage = 8,
@@ -59,7 +58,6 @@ impl ObjectType {
             2 => Some(Self::Endpoint),
             3 => Some(Self::Notification),
             4 => Some(Self::CapTable),
-            5 => Some(Self::SchedContext),
             6 => Some(Self::Reply),
             7 => Some(Self::GigaPage),
             8 => Some(Self::FourKPage),
@@ -107,12 +105,6 @@ enum InvocationLabel {
     IrqSetHandler = 28,
     IrqClearHandler = 29,
     DomainSet = 30,
-    SchedControlConfigureFlags = 33,
-    SchedContextBind = 34,
-    SchedContextUnbind = 35,
-    SchedContextUnbindObject = 36,
-    SchedContextConsumed = 37,
-    SchedContextYieldTo = 38,
     RiscvPageTableMap = 39,
     RiscvPageTableUnmap = 40,
     RiscvPageMap = 41,
@@ -138,12 +130,6 @@ pub fn success_reply_length(tag: Option<CapTag>, label_id: u64) -> u64 {
     match tag {
         Some(CapTag::Thread) if label_id == InvocationLabel::TcbSetFlags.raw() => 1,
         Some(CapTag::Frame) if label_id == InvocationLabel::RiscvPageGetAddress.raw() => 1,
-        Some(CapTag::SchedContext)
-            if label_id == InvocationLabel::SchedContextConsumed.raw()
-                || label_id == InvocationLabel::SchedContextYieldTo.raw() =>
-        {
-            1
-        }
         _ => 0,
     }
 }
@@ -166,7 +152,6 @@ fn object_size_bits(ty: ObjectType, user_size: u64) -> u64 {
         ObjectType::Endpoint => SEL4_ENDPOINT_BITS as u64,
         ObjectType::Notification => SEL4_NOTIFICATION_BITS as u64,
         ObjectType::CapTable => user_size + SEL4_SLOT_BITS as u64,
-        ObjectType::SchedContext => user_size,
         ObjectType::Reply => crate::abi::constants::SEL4_REPLY_BITS as u64,
         ObjectType::FourKPage | ObjectType::PageTable => 12,
         ObjectType::MegaPage => 21,
@@ -179,9 +164,7 @@ fn validate_retype_object_size(
     user_size: u64,
     uc: &mut UserContext,
 ) -> Result<(ObjectType, u64), SyscallError> {
-    use crate::abi::constants::{
-        SEL4_MAX_UNTYPED_BITS, SEL4_MIN_SCHED_CONTEXT_BITS, SEL4_MIN_UNTYPED_BITS, WORD_BITS,
-    };
+    use crate::abi::constants::{SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, WORD_BITS};
 
     let object_type = ObjectType::from_raw(ty).ok_or(SyscallError::InvalidArgument)?;
     let obj_bits = object_size_bits(object_type, user_size);
@@ -194,9 +177,6 @@ fn validate_retype_object_size(
     match object_type {
         ObjectType::CapTable if user_size == 0 => Err(SyscallError::InvalidArgument),
         ObjectType::Untyped if user_size < SEL4_MIN_UNTYPED_BITS as u64 => {
-            Err(SyscallError::InvalidArgument)
-        }
-        ObjectType::SchedContext if user_size < SEL4_MIN_SCHED_CONTEXT_BITS as u64 => {
             Err(SyscallError::InvalidArgument)
         }
         _ => Ok((object_type, obj_bits)),
@@ -243,7 +223,6 @@ fn create_object_cap(ty: ObjectType, region_base: u64, user_size: u64, is_device
         ObjectType::Endpoint => Cap::new_endpoint(region_base),
         ObjectType::Notification => Cap::new_notification(region_base),
         ObjectType::Tcb => Cap::new_thread(region_base),
-        ObjectType::SchedContext => Cap::new_sched_context(region_base, user_size),
         ObjectType::Reply => Cap::new_reply_object(region_base, true),
     }
 }
@@ -407,9 +386,6 @@ pub fn handle_untyped(
                 ObjectType::Tcb => unsafe { crate::object::tcb::init(obj_base) },
                 ObjectType::Endpoint => unsafe { crate::object::endpoint::init(obj_base) },
                 ObjectType::Notification => unsafe { crate::object::notification::init(obj_base) },
-                ObjectType::SchedContext => unsafe {
-                    crate::object::sched_context::init(obj_base, 0)
-                },
                 ObjectType::Reply => unsafe { crate::object::reply::init(obj_base) },
                 _ => {}
             }
@@ -1016,10 +992,8 @@ pub fn handle_irq_handler(
     }
 }
 
-/// DomainSet invocations.
-///
-/// Domain scheduling is intentionally disabled. Accept the invocation shape for
-/// user-space compatibility, but do not store or use a domain value.
+/// DomainSet is accepted for seL4 source compatibility, but rel4 collapses
+/// every requested value into the single effective scheduling domain.
 pub fn handle_domain(
     thread: &Thread,
     _cap: Cap,
@@ -1035,76 +1009,14 @@ pub fn handle_domain(
     }
     require_extra_caps(uc, 1)?;
 
-    let _domain = uc.regs[UserRegister::A2.index()] & 0xff;
-
+    let _requested_domain = uc.regs[UserRegister::A2.index()];
     let tcb_cap = lookup_extra_cap(thread, 0)?;
-    if tcb_cap.tag() != Some(CapTag::Thread) {
-        return Err(SyscallError::InvalidArgument);
-    }
+    require_tag(tcb_cap, CapTag::Thread)?;
     let tcb_ptr = crate::object::tcb::from_cap(tcb_cap);
     if tcb_ptr.is_null() {
-        return Err(SyscallError::InvalidArgument);
+        return Err(SyscallError::InvalidCapability);
     }
     Ok(())
-}
-pub fn handle_sched_control(
-    thread: &Thread,
-    cap: Cap,
-    label_id: u64,
-    length: u64,
-    uc: &UserContext,
-) -> Result<(), SyscallError> {
-    if label_id != InvocationLabel::SchedControlConfigureFlags.raw() {
-        return Err(SyscallError::IllegalOperation);
-    }
-    if length < 5 {
-        return Err(SyscallError::TruncatedMessage);
-    }
-    require_extra_caps(uc, 1)?;
-
-    let sc_cap = lookup_extra_cap(thread, 0)?;
-    require_tag(sc_cap, CapTag::SchedContext)?;
-    let _ = (cap, uc);
-    Ok(())
-}
-pub fn handle_sched_context(
-    thread: &Thread,
-    cap: Cap,
-    label_id: u64,
-    _length: u64,
-    uc: &mut UserContext,
-) -> Result<(), SyscallError> {
-    let _sc_ptr = cap.sched_context_ptr();
-    match label_id {
-        id if id == InvocationLabel::SchedContextBind.raw() => {
-            require_extra_caps(uc, 1)?;
-            let obj_cap = lookup_extra_cap(thread, 0)?;
-            match obj_cap.tag() {
-                Some(CapTag::Thread) if !tcb::from_cap(obj_cap).is_null() => Ok(()),
-                Some(CapTag::Notification) if obj_cap.notification_ptr() != 0 => Ok(()),
-                _ => Err(SyscallError::InvalidCapability),
-            }
-        }
-        id if id == InvocationLabel::SchedContextUnbind.raw() => Ok(()),
-        id if id == InvocationLabel::SchedContextUnbindObject.raw() => {
-            require_extra_caps(uc, 1)?;
-            let obj_cap = lookup_extra_cap(thread, 0)?;
-            match obj_cap.tag() {
-                Some(CapTag::Thread) if !tcb::from_cap(obj_cap).is_null() => Ok(()),
-                Some(CapTag::Notification) if obj_cap.notification_ptr() != 0 => Ok(()),
-                _ => Err(SyscallError::InvalidCapability),
-            }
-        }
-        id if id == InvocationLabel::SchedContextConsumed.raw() => {
-            write_reply_mr0(uc, 0);
-            Ok(())
-        }
-        id if id == InvocationLabel::SchedContextYieldTo.raw() => {
-            write_reply_mr0(uc, 0);
-            Ok(())
-        }
-        _ => Err(SyscallError::IllegalOperation),
-    }
 }
 
 /// TCB invocations.
@@ -1321,7 +1233,7 @@ fn handle_thread_inner(
             if length < 2 {
                 return Err(SyscallError::TruncatedMessage);
             }
-            require_extra_caps(uc, 3)?;
+            require_extra_caps(uc, 1)?;
             let mcp = uc.regs[UserRegister::A2.index()];
             let prio = uc.regs[UserRegister::A3.index()];
             let auth_cap = lookup_extra_cap(thread, 0)?;
@@ -1334,27 +1246,6 @@ fn handle_thread_inner(
                 return Err(SyscallError::RangeError);
             }
 
-            let sc_cap = lookup_extra_cap(thread, 1)?;
-            match sc_cap.tag() {
-                Some(CapTag::SchedContext | CapTag::Null) => {}
-                _ => return Err(SyscallError::InvalidCapability),
-            }
-
-            let fault_cap = lookup_optional_extra_cap_slot(thread, 2)?;
-            let (fault_ep_cap, fault_slot) = if let Some((fault_cap, fault_slot)) = fault_cap {
-                require_endpoint_send_grant(fault_cap)?;
-                (fault_cap, fault_slot)
-            } else {
-                (Cap::null(), ptr::null_mut())
-            };
-
-            install_tcb_cap(
-                slot,
-                tcb_ptr,
-                tcb::TCB_FAULT_HANDLER_SLOT,
-                fault_ep_cap,
-                fault_slot,
-            )?;
             Ok(())
         }
         id if id == InvocationLabel::TcbSetTimeoutEndpoint.raw() => {
@@ -2235,7 +2126,7 @@ fn is_pspace_kva(va: u64) -> bool {
     v >= crate::abi::constants::PPTR_BASE && v < crate::abi::constants::PPTR_TOP
 }
 
-/// Rootserver TCB/CNode/SchedContext storage is boot-allocated outside the
+/// Rootserver TCB/CNode storage is boot-allocated outside the
 /// normal PSpace window, while later objects come from PSpace. Both are mutable
 /// kernel object storage and should follow seL4's final-cap path.
 #[inline]
@@ -2856,15 +2747,10 @@ fn same_object_as(a: Cap, b: Cap) -> bool {
         }
         (Some(CapTag::Thread), Some(CapTag::Thread)) => a.thread_ptr() == b.thread_ptr(),
         (Some(CapTag::Reply), Some(CapTag::Reply)) => a.reply_object_ptr() == b.reply_object_ptr(),
-        (Some(CapTag::SchedContext), Some(CapTag::SchedContext)) => {
-            a.sched_context_ptr() == b.sched_context_ptr()
-                && a.sched_context_size_bits() == b.sched_context_size_bits()
-        }
         (Some(CapTag::IrqHandler), Some(CapTag::IrqHandler)) => {
             a.irq_handler_irq() == b.irq_handler_irq()
         }
         (Some(CapTag::Domain), Some(CapTag::Domain)) => true,
-        (Some(CapTag::SchedControl), Some(CapTag::SchedControl)) => true,
         (Some(CapTag::AsidControl), Some(CapTag::AsidControl)) => true,
         (Some(CapTag::PageTable), Some(CapTag::PageTable)) => {
             a.page_table_base_ptr() == b.page_table_base_ptr()
@@ -3053,20 +2939,6 @@ fn finalize_cap(
                     tcb::TCB_ARCH_CNODE_ENTRIES as u64,
                     cte_base,
                 )));
-            }
-        }
-        Some(CapTag::SchedContext) => {
-            let sc = cap.sched_context_ptr();
-            if is_final {
-                if sc == 0 || !is_boot_or_pspace_object_kva(sc) {
-                    debug_assert!(
-                        false,
-                        "final SchedContext cap must point at a sched context",
-                    );
-                    panic!("final SchedContext cap must point at a sched context");
-                }
-                unsafe { crate::object::sched_context::finalize(sc) };
-                return Ok(FinaliseCapResult::null());
             }
         }
         Some(CapTag::Zombie) => {

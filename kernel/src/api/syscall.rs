@@ -126,12 +126,6 @@ pub fn do_call(uc: &mut UserContext) {
                 Some(CapTag::IrqHandler) => {
                     invocation::handle_irq_handler(t, cap, label, length, uc)
                 }
-                Some(CapTag::SchedControl) => {
-                    invocation::handle_sched_control(t, cap, label, length, uc)
-                }
-                Some(CapTag::SchedContext) => {
-                    invocation::handle_sched_context(t, cap, label, length, uc)
-                }
                 None => Err(SyscallError::InvalidCapability),
                 _ => Err(SyscallError::IllegalOperation),
             };

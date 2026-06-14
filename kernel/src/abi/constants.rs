@@ -60,12 +60,10 @@ pub const SEL4_TCB_BITS: usize = 11; // 2 KiB TCB
 pub const SEL4_ENDPOINT_BITS: usize = 4;
 pub const SEL4_NOTIFICATION_BITS: usize = 6;
 pub const SEL4_REPLY_BITS: usize = 5;
-pub const SEL4_MIN_SCHED_CONTEXT_BITS: usize = 7;
 pub const SEL4_MIN_BUDGET_US: u64 = 20;
 pub const SEL4_TIMER_TICKS_PER_US: u64 = 10;
 pub const SEL4_MAX_PERIOD_US: u64 = u64::MAX / SEL4_TIMER_TICKS_PER_US / 8;
 pub const SEL4_MIN_REFILLS: u64 = 2;
-pub const SEL4_CORE_SCHED_CONTEXT_BYTES: u64 = 128;
 pub const SEL4_REFILL_SIZE_BYTES: u64 = 16;
 pub const SEL4_ASID_POOL_BITS: usize = 12;
 

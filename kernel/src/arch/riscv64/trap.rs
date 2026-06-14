@@ -1000,9 +1000,7 @@ fn handle_syscall(uc: &mut UserContext) {
         Some(SyscallNumber::Yield) => unsafe {
             let cur = crate::object::tcb::current();
             if !cur.is_null() {
-                if !crate::object::sched_context::yield_tcb(cur) {
-                    crate::object::tcb::rotate_to_tail(cur);
-                }
+                crate::object::tcb::rotate_to_tail(cur);
             }
         },
         Some(SyscallNumber::Call) => {

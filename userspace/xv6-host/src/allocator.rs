@@ -1,10 +1,10 @@
 use core::cell::UnsafeCell;
 
 use crate::consts::{
-    CHILD_SCHED_BUDGET_US, LABEL_CNODE_COPY, LABEL_CNODE_DELETE, LABEL_CNODE_MINT,
-    LABEL_CNODE_REVOKE, LABEL_SCHED_CONTROL_CONFIGURE_FLAGS, LABEL_UNTYPED_RETYPE, MAX_PROCS,
-    MAX_RECYCLED_SLOTS, OBJ_UNTYPED, PROCESS_UNTYPED_BITS, PROCESS_UNTYPED_PARENT_BITS, ROOT_CNODE,
-    ROOT_CNODE_DEPTH, XV6_DEVICE_MMIO_BASE, XV6_DEVICE_MMIO_SIZE,
+    LABEL_CNODE_COPY, LABEL_CNODE_DELETE, LABEL_CNODE_MINT, LABEL_CNODE_REVOKE,
+    LABEL_UNTYPED_RETYPE, MAX_PROCS, MAX_RECYCLED_SLOTS, OBJ_UNTYPED, PROCESS_UNTYPED_BITS,
+    PROCESS_UNTYPED_PARENT_BITS, ROOT_CNODE, ROOT_CNODE_DEPTH, XV6_DEVICE_MMIO_BASE,
+    XV6_DEVICE_MMIO_SIZE,
 };
 use crate::types::BootInfo;
 use crate::util::{halt_loop, warn};
@@ -18,7 +18,6 @@ pub(crate) struct Allocator {
     untyped_slot: u64,
     device_regions: [DeviceRegion; MAX_DEVICE_REGIONS],
     device_region_count: usize,
-    sched_control: u64,
     process_untyped_slots: [u64; MAX_PROCS],
     recycled_len: usize,
 }
@@ -129,17 +128,12 @@ impl Allocator {
             );
             halt_loop();
         }
-        if bi.schedcontrol.start == bi.schedcontrol.end {
-            warn!("xv6-host: no schedcontrol cap");
-            halt_loop();
-        }
         let mut alloc = Self {
             next_slot: bi.empty.start,
             empty_end: bi.empty.end,
             untyped_slot: selected,
             device_regions,
             device_region_count,
-            sched_control: bi.schedcontrol.start,
             process_untyped_slots: [0; MAX_PROCS],
             recycled_len: 0,
         };
@@ -179,15 +173,6 @@ impl Allocator {
         let mrs = [ty, user_size, 0, 0, slot, 1];
         call_checked(untyped_slot, LABEL_UNTYPED_RETYPE, &[ROOT_CNODE], &mrs);
         slot
-    }
-
-    pub(crate) fn configure_sched_context(&mut self, sched_context: u64, badge: u64) {
-        call_checked(
-            self.sched_control,
-            LABEL_SCHED_CONTROL_CONFIGURE_FLAGS,
-            &[sched_context],
-            &[CHILD_SCHED_BUDGET_US, CHILD_SCHED_BUDGET_US, 0, badge, 0],
-        );
     }
 
     pub(crate) fn retype_device_4k_at(&mut self, paddr: u64) -> u64 {

@@ -76,6 +76,7 @@ pub const LABEL_TCB_WRITE_REGISTERS: u64 = 3;
 pub const LABEL_TCB_CONFIGURE: u64 = 5;
 pub const LABEL_TCB_SET_PRIORITY: u64 = 6;
 pub const LABEL_TCB_SET_SCHED_PARAMS: u64 = 8;
+pub const LABEL_TCB_SET_SPACE: u64 = 11;
 pub const LABEL_TCB_SUSPEND: u64 = 12;
 pub const LABEL_TCB_BIND_NOTIFICATION: u64 = 14;
 pub const LABEL_TCB_SET_FLAGS: u64 = 17;
@@ -87,7 +88,6 @@ pub const LABEL_CNODE_SAVE_CALLER: u64 = 255;
 pub const LABEL_IRQ_ISSUE_IRQ_HANDLER: u64 = 26;
 pub const LABEL_IRQ_ACK: u64 = 27;
 pub const LABEL_IRQ_SET_NOTIFICATION: u64 = 28;
-pub const LABEL_SCHED_CONTROL_CONFIGURE_FLAGS: u64 = 33;
 pub const LABEL_RISCV_PAGE_TABLE_MAP: u64 = 39;
 pub const LABEL_RISCV_PAGE_TABLE_UNMAP: u64 = 40;
 pub const LABEL_RISCV_PAGE_MAP: u64 = 41;
@@ -106,7 +106,6 @@ pub const OBJ_TCB: u64 = 1;
 pub const OBJ_ENDPOINT: u64 = 2;
 pub const OBJ_NOTIFICATION: u64 = 3;
 pub const OBJ_CAP_TABLE: u64 = 4;
-pub const OBJ_SCHED_CONTEXT: u64 = 5;
 pub const OBJ_REPLY: u64 = 6;
 pub const OBJ_GIGA_PAGE: u64 = 7;
 pub const OBJ_4K: u64 = 8;
@@ -166,7 +165,6 @@ pub struct BootInfo {
     pub init_thread_cnode_size_bits: u64,
     pub init_thread_domain: u8,
     pub _pad_domain: [u8; 7],
-    pub schedcontrol: SlotRegion,
     pub untyped: SlotRegion,
     pub untyped_list: [UntypedDesc; 230],
 }

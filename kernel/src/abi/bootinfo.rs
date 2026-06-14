@@ -23,11 +23,7 @@ pub enum RootCNodeCapSlot {
     BootInfoFrame = 9,
     InitThreadIpcBuffer = 10,
     Domain = 11,
-    SmmuSidControl = 12,
-    SmmuCbControl = 13,
-    InitThreadSchedContext = 14,
-    Smc = 15,
-    NumInitialCaps = 16,
+    NumInitialCaps = 12,
 }
 
 impl RootCNodeCapSlot {
@@ -60,7 +56,7 @@ const _: () = {
     assert!(core::mem::size_of::<UntypedDesc>() == 16);
 };
 
-/// `seL4_BootInfo` for the MCS ABI. Field order is load-bearing.
+/// `seL4_BootInfo`. Field order is load-bearing.
 #[repr(C)]
 pub struct BootInfo {
     pub extra_len: Word,
@@ -78,7 +74,6 @@ pub struct BootInfo {
     pub init_thread_cnode_size_bits: Word,
     pub init_thread_domain: Domain,
     pub _pad_domain: [u8; 7],
-    pub schedcontrol: SlotRegion,
     pub untyped: SlotRegion,
     pub untyped_list: [UntypedDesc; MAX_NUM_BOOTINFO_UNTYPED_CAPS],
 }

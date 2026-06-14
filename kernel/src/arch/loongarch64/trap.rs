@@ -553,7 +553,7 @@ fn handle_syscall(uc: &mut UserContext) {
         Some(SyscallNumber::DebugDumpScheduler | SyscallNumber::DebugSnapshot) => {}
         Some(SyscallNumber::Yield) => unsafe {
             let cur = crate::object::tcb::current();
-            if !cur.is_null() && !crate::object::sched_context::yield_tcb(cur) {
+            if !cur.is_null() {
                 crate::object::tcb::rotate_to_tail(cur);
             }
         },

@@ -14,7 +14,8 @@ pub type CPtr = Word;
 /// `seL4_NodeId`.
 pub type NodeId = Word;
 
-/// `seL4_Domain`.
+/// `seL4_Domain`. rel4 accepts domain metadata for source compatibility but
+/// collapses all values to one effective scheduling domain.
 pub type Domain = u8;
 
 /// `seL4_SlotPos` — position of a slot in a CNode.

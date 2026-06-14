@@ -75,8 +75,6 @@ pub enum CapTag {
     IrqHandler = 16,
     Zombie = 18,
     Domain = 20,
-    SchedContext = 22,
-    SchedControl = 24,
 }
 
 impl CapTag {
@@ -97,8 +95,6 @@ impl CapTag {
             16 => Self::IrqHandler,
             18 => Self::Zombie,
             20 => Self::Domain,
-            22 => Self::SchedContext,
-            24 => Self::SchedControl,
             _ => return None,
         })
     }
@@ -254,13 +250,6 @@ impl Cap {
     pub const fn new_irq_control() -> Cap {
         let mut c = Cap::null();
         c.words[0] = (CapTag::IrqControl as u64) << 59;
-        c
-    }
-    #[inline]
-    pub const fn new_sched_control(core: u64) -> Cap {
-        let mut c = Cap::null();
-        c.words[0] = (CapTag::SchedControl as u64) << 59;
-        c.words[1] = core;
         c
     }
 
@@ -543,14 +532,6 @@ impl Cap {
         c
     }
     #[inline]
-    pub const fn new_sched_context(ptr: u64, size_bits: u64) -> Cap {
-        let mut c = Cap::null();
-        c.words[0] = (CapTag::SchedContext as u64) << 59;
-        c.words[1] = ((ptr & PTR_LOW_MASK) << 16) | ((size_bits & 0x3F) << 10);
-        c
-    }
-
-    #[inline]
     pub const fn endpoint_ptr(self) -> u64 {
         sign_extend_ptr(self.words[0] & PTR_LOW_MASK)
     }
@@ -601,19 +582,6 @@ impl Cap {
         self.words[0] &= !(1u64 << 58);
         self.words[0] |= ((can_grant as u64) & 0x1) << 58;
     }
-    #[inline]
-    pub const fn sched_context_ptr(self) -> u64 {
-        sign_extend_ptr((self.words[1] >> 16) & PTR_LOW_MASK)
-    }
-    #[inline]
-    pub const fn sched_context_size_bits(self) -> u64 {
-        (self.words[1] >> 10) & 0x3F
-    }
-    #[inline]
-    pub const fn sched_control_core(self) -> u64 {
-        self.words[1]
-    }
-
     #[inline]
     pub const fn notification_ptr(self) -> u64 {
         sign_extend_ptr(self.words[0] & PTR_LOW_MASK)

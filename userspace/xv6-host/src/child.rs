@@ -284,7 +284,6 @@ pub(crate) fn create_child_from_untyped(
     let cnode = alloc.retype_one_from(untyped, OBJ_CAP_TABLE, CHILD_CNODE_BITS);
     let vspace = alloc.retype_one_from(untyped, OBJ_PAGE_TABLE, 0);
     let ipc_frame = alloc.retype_one_from(untyped, OBJ_4K, 0);
-    let sched_context = alloc.retype_one_from(untyped, OBJ_SCHED_CONTEXT, SCHED_CONTEXT_BITS);
     let fault_ep_cap = alloc.mint_cap(fault_ep, cap_rights(true, true, true, true), pid);
 
     call_checked(INIT_ASID_POOL, LABEL_ASID_POOL_ASSIGN, &[vspace], &[]);
@@ -304,11 +303,17 @@ pub(crate) fn create_child_from_untyped(
     let cspace_data = cnode_cap_data(0, WORD_BITS - CHILD_CNODE_BITS);
     let mrs = [cspace_data, 0, CHILD_IPC_BUFFER];
     call_checked(tcb, LABEL_TCB_CONFIGURE, &[cnode, vspace, ipc_frame], &mrs);
-    alloc.configure_sched_context(sched_context, pid);
+    let mrs = [cspace_data, 0];
+    call_checked(
+        tcb,
+        LABEL_TCB_SET_SPACE,
+        &[fault_ep_cap, cnode, vspace],
+        &mrs,
+    );
     call_checked(
         tcb,
         LABEL_TCB_SET_SCHED_PARAMS,
-        &[INIT_TCB, sched_context, fault_ep_cap],
+        &[INIT_TCB],
         &[CHILD_MCP, CHILD_PRIORITY],
     );
 
@@ -322,7 +327,6 @@ pub(crate) fn create_child_from_untyped(
         cnode,
         vspace,
         ipc_frame,
-        sched_context,
         untyped,
         fault_ep,
         fault_ep_cap,
@@ -367,7 +371,6 @@ pub(crate) fn destroy_child_objects(alloc: &mut Allocator, child: &TaskStruct) {
     alloc.delete_cap_slot(child.tcb);
     alloc.delete_cap_slot(child.ipc_frame);
     CHILD_PAGE_TABLES.clear_pid(alloc, child.pid);
-    alloc.delete_cap_slot(child.sched_context);
     alloc.delete_cap_slot(child.fault_ep_cap);
     alloc.delete_cap_slot(child.cnode);
     alloc.delete_cap_slot(child.vspace);

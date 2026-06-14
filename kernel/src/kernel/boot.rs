@@ -7,7 +7,6 @@ use core::ptr;
 use log_crate::{info, warn};
 
 use crate::abi::bootinfo::{BootInfo, RootCNodeCapSlot, SlotRegion, UntypedDesc};
-use crate::abi::constants::SEL4_MIN_SCHED_CONTEXT_BITS;
 use crate::abi::constants::{
     KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, MAX_NUM_NODES, ROOT_CNODE_SIZE_BITS,
     SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
@@ -95,28 +94,6 @@ impl RootTcbCell {
 
 #[unsafe(no_mangle)]
 static ROOTSERVER_TCB: RootTcbCell = RootTcbCell::new();
-
-#[repr(align(128))]
-struct RootSchedContext([u8; 1 << SEL4_MIN_SCHED_CONTEXT_BITS]);
-
-#[repr(transparent)]
-struct RootSchedContextCell(UnsafeCell<RootSchedContext>);
-
-unsafe impl Sync for RootSchedContextCell {}
-
-impl RootSchedContextCell {
-    const fn new() -> Self {
-        Self(UnsafeCell::new(RootSchedContext(
-            [0; 1 << SEL4_MIN_SCHED_CONTEXT_BITS],
-        )))
-    }
-
-    fn kva(&self) -> u64 {
-        self.0.get() as u64
-    }
-}
-
-static ROOTSERVER_SC: RootSchedContextCell = RootSchedContextCell::new();
 
 #[derive(Copy, Clone)]
 struct BootUserPageTableCap {
@@ -227,12 +204,6 @@ fn align_down(value: usize, bits: usize) -> usize {
 const _: () = {
     assert!(core::mem::size_of::<RootTcbCell>() == core::mem::size_of::<Tcb>());
     assert!(core::mem::align_of::<RootTcbCell>() == core::mem::align_of::<Tcb>());
-    assert!(
-        core::mem::size_of::<RootSchedContextCell>() == core::mem::size_of::<RootSchedContext>()
-    );
-    assert!(
-        core::mem::align_of::<RootSchedContextCell>() == core::mem::align_of::<RootSchedContext>()
-    );
 };
 
 /// Translate a kernel VA (either the kernel-ELF window or the PSpace
@@ -336,10 +307,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     let cnode_slots = 1usize << ROOT_CNODE_SIZE_BITS;
 
     struct RootCnodeInit {
-        root_sc_kva: u64,
         next_slot: usize,
-        schedcontrol_start_slot: usize,
-        schedcontrol_end_slot: usize,
         user_image_paging_start: usize,
         user_image_paging_end: usize,
         untyped_start_slot: usize,
@@ -455,38 +423,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
                 );
             });
         }
-        let root_sc_kva = {
-            let sc_kva = ROOTSERVER_SC.kva();
-            unsafe {
-                crate::object::sched_context::init(sc_kva, 0);
-                crate::object::sched_context::configure(
-                    sc_kva,
-                    (crate::abi::constants::TIME_SLICE_TICKS
-                        * crate::abi::constants::TIMER_TICK_MS
-                        * 1000) as u64,
-                    0,
-                    0,
-                    0,
-                    0,
-                );
-            }
-            install_initial_cap(
-                cnode,
-                RootCNodeCapSlot::InitThreadSchedContext.index(),
-                Cap::new_sched_context(sc_kva, SEL4_MIN_SCHED_CONTEXT_BITS as u64),
-            );
-            sc_kva
-        };
-
         let mut next_slot = RootCNodeCapSlot::NumInitialCaps.index();
-        let (schedcontrol_start_slot, schedcontrol_end_slot) = {
-            let start = next_slot;
-            for core in 0..MAX_NUM_NODES {
-                install_initial_cap(cnode, next_slot, Cap::new_sched_control(core as u64));
-                next_slot += 1;
-            }
-            (start, next_slot)
-        };
 
         let (user_image_paging_start, user_image_paging_end) =
             install_boot_user_paging_caps(cnode, &boot_user_paging, &mut next_slot);
@@ -591,10 +528,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         let user_image_frames_end = next_slot;
 
         RootCnodeInit {
-            root_sc_kva,
             next_slot,
-            schedcontrol_start_slot,
-            schedcontrol_end_slot,
             user_image_paging_start,
             user_image_paging_end,
             untyped_start_slot,
@@ -610,10 +544,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     };
 
     let RootCnodeInit {
-        root_sc_kva: _,
         next_slot,
-        schedcontrol_start_slot,
-        schedcontrol_end_slot,
         user_image_paging_start,
         user_image_paging_end,
         untyped_start_slot,
@@ -698,12 +629,6 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         (*bi).extra_bi_pages = SlotRegion { start: 0, end: 0 };
         (*bi).init_thread_cnode_size_bits = ROOT_CNODE_SIZE_BITS as u64;
         (*bi).init_thread_domain = 0;
-        {
-            (*bi).schedcontrol = SlotRegion {
-                start: schedcontrol_start_slot as u64,
-                end: schedcontrol_end_slot as u64,
-            };
-        }
         (*bi).untyped = SlotRegion {
             start: untyped_start_slot as u64,
             end: untyped_end_slot as u64,

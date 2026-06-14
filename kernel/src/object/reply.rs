@@ -304,7 +304,6 @@ pub unsafe fn remove(reply_kva: u64, tcb: *mut Tcb) {
         {
             let _stack_guard = lock_call_stack();
             if next != 0 && call_stack_is_head((*reply).next) {
-                crate::object::sched_context::set_reply_head(next, prev);
                 if prev != 0 {
                     (*(prev as *mut Reply)).next = call_stack_new(next, true);
                 }
@@ -340,9 +339,7 @@ pub unsafe fn remove_tcb(tcb: *mut Tcb) {
                 {
                     let _stack_guard = lock_call_stack();
                     if next != 0 {
-                        if call_stack_is_head((*reply).next) {
-                            crate::object::sched_context::clear_reply_head(next);
-                        } else {
+                        if !call_stack_is_head((*reply).next) {
                             (*(next as *mut Reply)).prev = 0;
                         }
                     }

@@ -343,11 +343,6 @@ unsafe fn is_mdb_parent_of(a: *mut Cte, b: *mut Cte) -> bool {
                 && cap_a.cnode_radix() == cap_b.cnode_radix()
         }
         CapTag::Thread => tag_b == CapTag::Thread && cap_a.thread_ptr() == cap_b.thread_ptr(),
-        CapTag::SchedContext => {
-            tag_b == CapTag::SchedContext
-                && cap_a.sched_context_ptr() == cap_b.sched_context_ptr()
-                && cap_a.sched_context_size_bits() == cap_b.sched_context_size_bits()
-        }
         CapTag::Reply => {
             tag_b == CapTag::Reply && cap_a.reply_object_ptr() == cap_b.reply_object_ptr()
         }
@@ -375,7 +370,6 @@ unsafe fn is_mdb_parent_of(a: *mut Cte, b: *mut Cte) -> bool {
             tag_b == CapTag::PageTable && cap_a.page_table_base_ptr() == cap_b.page_table_base_ptr()
         }
         CapTag::Domain => tag_b == CapTag::Domain,
-        CapTag::SchedControl => tag_b == CapTag::SchedControl,
         CapTag::AsidControl => tag_b == CapTag::AsidControl,
         CapTag::AsidPool => {
             tag_b == CapTag::AsidPool && cap_a.asid_pool_ptr() == cap_b.asid_pool_ptr()
@@ -410,7 +404,6 @@ fn physical_cap_region(cap: Cap) -> Option<(u64, u64)> {
         CapTag::Frame => Some((cap.frame_base_ptr(), frame_size_bits(cap.frame_size())?)),
         CapTag::PageTable => Some((cap.page_table_base_ptr(), SEL4_PAGE_TABLE_BITS as u64)),
         CapTag::AsidPool => Some((cap.asid_pool_ptr(), SEL4_ASID_POOL_BITS as u64)),
-        CapTag::SchedContext => Some((cap.sched_context_ptr(), cap.sched_context_size_bits())),
         _ => None,
     }
 }

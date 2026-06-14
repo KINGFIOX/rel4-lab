@@ -20,7 +20,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use sel4_user::{call_checked, msg_info, sel4_yield};
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(2);
-const SYNTHETIC_INIT_CHILD_PRIORITY: u64 = 255;
 
 pub(crate) fn sys_fork(
     alloc: &mut Allocator,
@@ -289,15 +288,6 @@ fn yield_synthetic_init_child(procs: &[TaskStruct; MAX_PROCS]) {
             && procs[i].state != PROC_UNUSED
             && procs[i].state != PROC_ZOMBIE
         {
-            // The standalone root payload acts as synthetic init at priority
-            // 255, so reparented children must become same-priority peers
-            // before seL4_Yield can hand execution to them.
-            call_checked(
-                procs[i].tcb,
-                LABEL_TCB_SET_PRIORITY,
-                &[INIT_TCB],
-                &[SYNTHETIC_INIT_CHILD_PRIORITY],
-            );
             unsafe {
                 sel4_yield();
             }
