@@ -260,7 +260,20 @@ pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> *mut UserContext {
     match ecode {
         EXCCODE_SYSCALL => handle_syscall(uc),
         EXCCODE_INTERRUPT => {
-            if !service_pending_interrupt(record.estat as usize) {
+            let estat = record.estat as usize;
+            let mut serviced_remote_op = false;
+            if ipi_pending(estat) {
+                match crate::kernel::smp::service_pending_remote_core_op() {
+                    crate::kernel::smp::RemoteCoreOpResult::StalledCurrent => {
+                        return kernel_exit_after_remote_stall(kernel_lock);
+                    }
+                    crate::kernel::smp::RemoteCoreOpResult::Serviced => {
+                        serviced_remote_op = true;
+                    }
+                    crate::kernel::smp::RemoteCoreOpResult::None => {}
+                }
+            }
+            if !service_pending_interrupt(estat) && !serviced_remote_op {
                 warn!(
                     "loongarch64 unhandled interrupt: estat={:#x} era={:#x}",
                     record.estat, record.era
@@ -305,6 +318,10 @@ fn timer_pending(estat: usize) -> bool {
 #[inline]
 fn external_irq_pending(estat: usize) -> bool {
     estat & ESTAT_IS_EXTIOI0 != 0
+}
+
+fn ipi_pending(estat: usize) -> bool {
+    estat & ESTAT_IS_IPI != 0
 }
 
 fn fault_message(
@@ -871,11 +888,6 @@ fn service_pending_interrupt(estat: usize) -> bool {
         serviced |= service_pending_external_interrupt();
     }
     serviced
-}
-
-#[inline]
-fn ipi_pending(estat: usize) -> bool {
-    estat & ESTAT_IS_IPI != 0
 }
 
 fn service_pending_external_interrupt() -> bool {

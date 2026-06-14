@@ -147,6 +147,13 @@ pub struct SpinLockGuard<'a> {
     remote_stalled_current: bool,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RemoteCoreOpResult {
+    None,
+    Serviced,
+    StalledCurrent,
+}
+
 impl SpinLock {
     pub const fn new() -> Self {
         Self {
@@ -162,7 +169,8 @@ impl SpinLock {
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            remote_stalled_current |= handle_remote_stall_while_waiting_for_kernel_lock();
+            remote_stalled_current |=
+                service_pending_remote_core_op() == RemoteCoreOpResult::StalledCurrent;
             hint::spin_loop();
         }
         SpinLockGuard {
@@ -441,15 +449,20 @@ fn assert_remote_tlb_flush_supported(context: &str) {
     );
 }
 
-fn handle_remote_stall_while_waiting_for_kernel_lock() -> bool {
+/// Service a pending remote operation for the current core.
+///
+/// This is used both while spinning for the BKL and after a LoongArch IPI trap
+/// has acquired it; in the latter case a remote TCB stall must avoid resuming
+/// the just-interrupted user context.
+pub(crate) fn service_pending_remote_core_op() -> RemoteCoreOpResult {
     let Some(bit) = core_bit(current_core_id()) else {
-        return false;
+        return RemoteCoreOpResult::None;
     };
     if REMOTE_STALL_PENDING_MASK.load(Ordering::Acquire) & bit == 0 {
-        return false;
+        return RemoteCoreOpResult::None;
     }
     if REMOTE_STALL_DONE_MASK.load(Ordering::Acquire) & bit != 0 {
-        return false;
+        return RemoteCoreOpResult::None;
     }
 
     let target = REMOTE_STALL_TARGET_VALUE.load(Ordering::Acquire);
@@ -463,17 +476,17 @@ fn handle_remote_stall_while_waiting_for_kernel_lock() -> bool {
                 crate::arch::current::fpu::release_on_current_core(target as *mut Tcb);
             }
             complete_remote_core_op(bit);
-            return false;
+            return RemoteCoreOpResult::Serviced;
         }
         REMOTE_OP_FLUSH_VMA_ALL => {
             crate::arch::current::csr::sfence_vma_all();
             complete_remote_core_op(bit);
-            return false;
+            return RemoteCoreOpResult::Serviced;
         }
         REMOTE_OP_FLUSH_VMA_ASID => {
             crate::arch::current::csr::sfence_vma_asid(target);
             complete_remote_core_op(bit);
-            return false;
+            return RemoteCoreOpResult::Serviced;
         }
         _ => {}
     }
@@ -487,7 +500,11 @@ fn handle_remote_stall_while_waiting_for_kernel_lock() -> bool {
         }
     }
     complete_remote_core_op(bit);
-    stalled_current
+    if stalled_current {
+        RemoteCoreOpResult::StalledCurrent
+    } else {
+        RemoteCoreOpResult::Serviced
+    }
 }
 
 fn complete_remote_core_op(bit: usize) {
