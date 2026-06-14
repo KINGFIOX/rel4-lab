@@ -10,8 +10,8 @@ use crate::abi::constants::{
 };
 use crate::arch::loongarch64::csr;
 use crate::arch::loongarch64::paging::{
-    PAGE_SHIFT, PAGE_SIZE, PTE_D, PTE_MAT_CC, PTE_NR, PTE_NX, PTE_PLV_USER, PTE_PRESENT, PTE_V,
-    PTE_W, PageTable, Pte, pt_index,
+    PAGE_SHIFT, PAGE_SIZE, PTE_D, PTE_MAT_CC, PTE_MAT_SUC, PTE_NR, PTE_NX, PTE_PLV_USER,
+    PTE_PRESENT, PTE_V, PTE_W, PageTable, Pte, pt_index,
 };
 use crate::kernel::smp::{BklCell, BklObjectGuard};
 
@@ -275,7 +275,7 @@ unsafe fn prepare_user_frame_map_at(
     if !user_range_aligned(vaddr, bits) || paddr & ((1usize << bits) - 1) != 0 {
         return Err(UserMapError::InvalidArgument);
     }
-    flags |= PTE_PRESENT | PTE_V | PTE_PLV_USER | PTE_MAT_CC;
+    flags |= PTE_PRESENT | PTE_V | PTE_PLV_USER;
 
     let _guard = lock_vspace(root);
     let lookup = unsafe { lookup_pt_slot_user(root, vaddr)? };
@@ -510,7 +510,12 @@ fn try_switch_to_tcb_root(tcb: *const crate::object::tcb::Tcb) -> bool {
 }
 
 pub fn user_flags(read: bool, write: bool, exec: bool) -> u64 {
-    let mut f = PTE_PRESENT | PTE_V | PTE_PLV_USER | PTE_MAT_CC;
+    user_frame_flags(read, write, exec, false)
+}
+
+pub fn user_frame_flags(read: bool, write: bool, exec: bool, is_device: bool) -> u64 {
+    let mat = if is_device { PTE_MAT_SUC } else { PTE_MAT_CC };
+    let mut f = PTE_PRESENT | PTE_V | PTE_PLV_USER | mat;
     if !read {
         f |= PTE_NR;
     }

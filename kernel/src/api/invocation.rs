@@ -566,7 +566,12 @@ pub fn handle_frame(
                     return Err(SyscallError::InvalidCapability);
                 }
                 let root_pt = root_pt_kva as *mut PageTable;
-                let flags = vspace::user_flags(can_read, can_write, !exec_never);
+                let flags = vspace::user_frame_flags(
+                    can_read,
+                    can_write,
+                    !exec_never,
+                    current_cap.frame_is_device(),
+                );
                 let prepared_map = if current_cap.frame_is_mapped() {
                     if current_cap.frame_mapped_asid() != asid {
                         return Err(SyscallError::InvalidCapability);

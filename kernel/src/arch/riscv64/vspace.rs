@@ -466,6 +466,14 @@ pub fn set_current_vspace_root() {
 
 /// `seL4` user permissions ⇒ Sv39 PTE flag bits (for U-mode, 4K page).
 pub fn user_flags(read: bool, write: bool, exec: bool) -> u64 {
+    user_frame_flags(read, write, exec, false)
+}
+
+/// `seL4` user permissions ⇒ Sv39 PTE flag bits for frame caps.
+///
+/// RISC-V Sv39 does not encode a device/cacheability attribute in the leaf PTE,
+/// so device frames use the same flags as regular frames.
+pub fn user_frame_flags(read: bool, write: bool, exec: bool, _is_device: bool) -> u64 {
     let mut f = PTE_V | PTE_U | PTE_A | PTE_D;
     if read {
         f |= PTE_R;
