@@ -16,7 +16,7 @@ use crate::abi::types::MessageInfo;
 use crate::arch::loongarch64::csr;
 use crate::object::cap::CapTag;
 
-/// User-mode register snapshot shape for the future LoongArch64 trap entry.
+/// User-mode register snapshot shape for the LoongArch64 trap entry.
 ///
 /// `regs[0]` is hardwired zero. The remaining indexes are architectural GPR
 /// numbers, matching the LoongArch psABI register names.

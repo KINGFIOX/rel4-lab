@@ -1,9 +1,9 @@
-//! LoongArch64 VSpace backend staging.
+//! LoongArch64 VSpace backend.
 //!
 //! User paging objects follow the same seL4-style explicit page-table model as
 //! the RISC-V backend. Page-table entries now use LoongArch EntryLo-compatible
-//! bits and root switching publishes the hardware page-walk context, but the
-//! boot path still leaves full TLB refill bring-up as follow-up work.
+//! bits, root switching publishes the hardware page-walk context, and DMW
+//! windows provide PLV0-only kernel and MMIO direct maps.
 
 use crate::abi::constants::{
     KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE, PPTR_TOP, PT_INDEX_BITS,
@@ -565,6 +565,7 @@ const _: () = {
     assert!(PAGE_WALK_DIR2_BASE < 32);
     assert!(PAGE_WALK_PTE_WIDTH_64 < 4);
     assert!(DMW_PSEG_SHIFT < DMW_VSEG_SHIFT);
+    assert!(USER_TOP <= DMW_MMIO_ALIAS_BASE);
     assert!(DMW_LOW_DIRECT & (0xfusize << DMW_PSEG_SHIFT) == 0);
     assert!(DMW_LOW_DIRECT & (0xfusize << DMW_VSEG_SHIFT) == 0);
     assert!(DMW_MMIO_DIRECT & (0xfusize << DMW_PSEG_SHIFT) == 0);

@@ -50,7 +50,7 @@ const MAX_BOOT_USER_PAGING_CAPS: usize = 256;
 #[cfg(target_arch = "riscv64")]
 const KERNEL_BOOT_PROFILE: &str = "S-mode, Sv39";
 #[cfg(target_arch = "loongarch64")]
-const KERNEL_BOOT_PROFILE: &str = "LoongArch64 staging";
+const KERNEL_BOOT_PROFILE: &str = "LoongArch64 PGDL";
 
 #[repr(C)]
 pub struct BootArgs {
