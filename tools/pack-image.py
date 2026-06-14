@@ -238,6 +238,30 @@ def rust_kernel_env(build_dir: Path, target) -> dict[str, str]:
     return env
 
 
+def audit_rust_kernel(target, rust_target: str, rust_kernel_elf: Path, env: dict[str, str]) -> None:
+    audit_env = env.copy()
+    audit_env["ARCH"] = target.name
+    audit_env["RUST_TARGET"] = rust_target
+    log(PREFIX, "auditing Rust kernel ELF layout...")
+    run(
+        [sys.executable, "tools/audit-kernel-elf.py", str(rust_kernel_elf)],
+        cwd=ROOT_DIR,
+        env=audit_env,
+    )
+    log(PREFIX, "auditing Rust kernel FPU instructions...")
+    run(
+        [
+            sys.executable,
+            "tools/audit-kernel-fpu.py",
+            "--target",
+            rust_target,
+            str(rust_kernel_elf),
+        ],
+        cwd=ROOT_DIR,
+        env=audit_env,
+    )
+
+
 def ensure_sel4_configured(build_dir: Path, target) -> None:
     tree_dir = sel4_tree_dir_from_env(build_dir)
     source_dir = tree_dir / "projects" / "sel4test"
@@ -287,7 +311,6 @@ def main() -> int:
     tmp_stripped = make_temp("rust-kernel.elf.")
     tmp_rootserver_stripped: Path | None = None
     try:
-        ensure_sel4_arch_available(sel4_build_dir, target)
         cargo_env = rust_kernel_env(sel4_build_dir, target)
         log(
             PREFIX,
@@ -302,7 +325,9 @@ def main() -> int:
             env=cargo_env,
         )
         require_file(PREFIX, rust_kernel_elf, f"Rust kernel ELF missing: {rust_kernel_elf}")
+        audit_rust_kernel(target, rust_target, rust_kernel_elf, cargo_env)
 
+        ensure_sel4_arch_available(sel4_build_dir, target)
         require_dir(PREFIX, sel4_build_dir, f"SEL4_BUILD_DIR not found: {sel4_build_dir}")
         ensure_sel4_configured(sel4_build_dir, target)
         if rootserver_elf is not None:
