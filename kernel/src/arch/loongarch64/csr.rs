@@ -4,6 +4,7 @@ use core::arch::asm;
 
 pub const CSR_CRMD: usize = 0x000;
 pub const CSR_PRMD: usize = 0x001;
+pub const CSR_EUEN: usize = 0x002;
 pub const CSR_ECFG: usize = 0x004;
 pub const CSR_ESTAT: usize = 0x005;
 pub const CSR_ERA: usize = 0x006;
@@ -73,6 +74,7 @@ macro_rules! rw_csr {
 
 rw_csr!(crmd, set_crmd, CSR_CRMD);
 rw_csr!(prmd, set_prmd, CSR_PRMD);
+rw_csr!(euen, set_euen, CSR_EUEN);
 rw_csr!(ecfg, set_ecfg, CSR_ECFG);
 rw_csr!(estat, set_estat, CSR_ESTAT);
 rw_csr!(era, set_era, CSR_ERA);
