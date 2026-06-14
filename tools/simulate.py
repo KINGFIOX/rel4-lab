@@ -18,6 +18,14 @@ from target_config import (
 )
 
 
+def default_mode_for(target_name: str, packed_image: Path) -> str:
+    if packed_image.is_file():
+        return "image"
+    if target_name == "loongarch64":
+        return "image"
+    return "standalone"
+
+
 def main(argv: list[str]) -> int:
     target = target_from_env("simulate")
     rust_target = rust_target_from_env(target)
@@ -27,7 +35,7 @@ def main(argv: list[str]) -> int:
 
     mode = os.environ.get("MODE", "")
     if not mode:
-        mode = "image" if packed_image.is_file() else "standalone"
+        mode = default_mode_for(target.name, packed_image)
 
     if mode == "standalone":
         if not kernel_elf.is_file():
