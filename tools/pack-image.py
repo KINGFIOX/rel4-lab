@@ -242,6 +242,12 @@ def audit_rust_kernel(target, rust_target: str, rust_kernel_elf: Path, env: dict
     audit_env = env.copy()
     audit_env["ARCH"] = target.name
     audit_env["RUST_TARGET"] = rust_target
+    log(PREFIX, "auditing trap layout constants...")
+    run(
+        [sys.executable, "tools/audit-trap-layout.py"],
+        cwd=ROOT_DIR,
+        env=audit_env,
+    )
     log(PREFIX, "auditing Rust kernel ELF layout...")
     run(
         [sys.executable, "tools/audit-kernel-elf.py", str(rust_kernel_elf)],

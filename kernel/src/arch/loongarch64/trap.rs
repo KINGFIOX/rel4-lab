@@ -32,11 +32,16 @@ pub struct UserContext {
 
 const _: () = {
     assert!(core::mem::size_of::<UserContext>() == 39 * 8);
+    assert!(core::mem::size_of::<TrapRecord>() == 4 * 8);
     assert!(core::mem::offset_of!(UserContext, regs) == 0);
     assert!(core::mem::offset_of!(UserContext, pc) == 32 * 8);
     assert!(core::mem::offset_of!(UserContext, sstatus) == 33 * 8);
     assert!(core::mem::offset_of!(UserContext, restart_pc) == 34 * 8);
     assert!(core::mem::offset_of!(UserContext, trap_record) == 35 * 8);
+    assert!(core::mem::offset_of!(TrapRecord, era) == 0);
+    assert!(core::mem::offset_of!(TrapRecord, prmd) == 1 * 8);
+    assert!(core::mem::offset_of!(TrapRecord, estat) == 2 * 8);
+    assert!(core::mem::offset_of!(TrapRecord, badv) == 3 * 8);
 };
 
 impl UserContext {

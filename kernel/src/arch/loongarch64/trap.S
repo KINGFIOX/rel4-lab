@@ -6,6 +6,14 @@
     .equ TRAP_SCRATCH_SAVED_USER_SP, 16
     .equ TRAP_SCRATCH_SAVED_USER_T1, 24
     .equ TRAP_SCRATCH_SAVED_USER_T2, 32
+    .equ USER_CONTEXT_PC, 32*8
+    .equ USER_CONTEXT_SSTATUS, 33*8
+    .equ USER_CONTEXT_RESTART_PC, 34*8
+    .equ USER_CONTEXT_TRAP_RECORD, 35*8
+    .equ USER_CONTEXT_TRAP_RECORD_ERA, USER_CONTEXT_TRAP_RECORD + 0*8
+    .equ USER_CONTEXT_TRAP_RECORD_PRMD, USER_CONTEXT_TRAP_RECORD + 1*8
+    .equ USER_CONTEXT_TRAP_RECORD_ESTAT, USER_CONTEXT_TRAP_RECORD + 2*8
+    .equ USER_CONTEXT_TRAP_RECORD_BADV, USER_CONTEXT_TRAP_RECORD + 3*8
     .equ CSR_PRMD, 0x001
     .equ CSR_ESTAT, 0x005
     .equ CSR_ERA, 0x006
@@ -76,19 +84,19 @@ trap_entry:
     st.d    $t1, $sp, 14*8
 
     csrrd   $t1, CSR_ERA
-    st.d    $t1, $sp, 32*8
-    st.d    $t1, $sp, 34*8
+    st.d    $t1, $sp, USER_CONTEXT_PC
+    st.d    $t1, $sp, USER_CONTEXT_RESTART_PC
     csrrd   $t1, CSR_PRMD
-    st.d    $t1, $sp, 33*8
+    st.d    $t1, $sp, USER_CONTEXT_SSTATUS
 
     csrrd   $t2, CSR_ERA
-    st.d    $t2, $sp, 35*8
+    st.d    $t2, $sp, USER_CONTEXT_TRAP_RECORD_ERA
     csrrd   $t2, CSR_PRMD
-    st.d    $t2, $sp, 36*8
+    st.d    $t2, $sp, USER_CONTEXT_TRAP_RECORD_PRMD
     csrrd   $t2, CSR_ESTAT
-    st.d    $t2, $sp, 37*8
+    st.d    $t2, $sp, USER_CONTEXT_TRAP_RECORD_ESTAT
     csrrd   $t2, CSR_BADV
-    st.d    $t2, $sp, 38*8
+    st.d    $t2, $sp, USER_CONTEXT_TRAP_RECORD_BADV
 
     ld.d    $t2, $t0, TRAP_SCRATCH_KERNEL_STACK_TOP
     csrwr   $t0, CSR_KS0
@@ -115,9 +123,9 @@ restore_user_context:
     beqz    $t1, kernel_trap_panic
     st.d    $t0, $t1, TRAP_SCRATCH_USER_CONTEXT
 
-    ld.d    $t1, $t0, 32*8
+    ld.d    $t1, $t0, USER_CONTEXT_PC
     csrwr   $t1, CSR_ERA
-    ld.d    $t1, $t0, 33*8
+    ld.d    $t1, $t0, USER_CONTEXT_SSTATUS
     csrwr   $t1, CSR_PRMD
 
     ld.d    $ra, $t0,  1*8
