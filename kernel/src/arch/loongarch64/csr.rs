@@ -146,6 +146,32 @@ pub fn iocsr_write32(addr: usize, value: u32) {
 }
 
 #[inline]
+pub fn iocsr_read64(addr: usize) -> u64 {
+    let value: usize;
+    unsafe {
+        asm!(
+            "iocsrrd.d {value}, {addr}",
+            value = out(reg) value,
+            addr = in(reg) addr,
+            options(nostack)
+        );
+    }
+    value as u64
+}
+
+#[inline]
+pub fn iocsr_write64(addr: usize, value: u64) {
+    unsafe {
+        asm!(
+            "iocsrwr.d {value}, {addr}",
+            value = in(reg) value as usize,
+            addr = in(reg) addr,
+            options(nostack)
+        );
+    }
+}
+
+#[inline]
 pub fn sfence_vma_all() {
     unsafe {
         asm!("invtlb {op}, $zero, $zero", op = const INVTLB_ALL, options(nostack, nomem));

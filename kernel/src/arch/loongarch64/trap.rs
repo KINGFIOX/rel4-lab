@@ -212,6 +212,7 @@ const ESTAT_ESUBCODE_SHIFT: usize = 22;
 const ESTAT_ESUBCODE_MASK: usize = 0x1ff;
 const ESTAT_IS_EXTIOI0: usize = 1 << 2;
 const ESTAT_IS_TIMER: usize = 1 << 11;
+const ESTAT_IS_IPI: usize = 1 << 12;
 const ECFG_LIE_TIMER: usize = 1 << 11;
 const TCFG_ENABLE: usize = 1 << 0;
 const TCFG_INITVAL_SHIFT: usize = 2;
@@ -957,10 +958,18 @@ fn service_pending_interrupt(estat: usize) -> bool {
         handle_timer_interrupt();
         serviced = true;
     }
+    if ipi_pending(estat) {
+        serviced |= super::sbi::ack_ipi();
+    }
     if external_irq_pending(estat) {
         serviced |= service_pending_external_interrupt();
     }
     serviced
+}
+
+#[inline]
+fn ipi_pending(estat: usize) -> bool {
+    estat & ESTAT_IS_IPI != 0
 }
 
 fn service_pending_external_interrupt() -> bool {

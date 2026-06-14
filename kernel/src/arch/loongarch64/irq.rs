@@ -1,12 +1,14 @@
 const CRMD_IE: usize = 1 << 2;
 const ECFG_LIE_EXTIOI0: usize = 1 << 2;
+const ECFG_LIE_IPI: usize = 1 << 12;
 
 pub const MAX_IRQ: usize = 256;
 pub const KERNEL_TIMER_IRQ: usize = MAX_IRQ;
 
 pub fn init() {
     crate::machine::loongarch_irq::init();
-    super::csr::set_ecfg(super::csr::ecfg() | ECFG_LIE_EXTIOI0);
+    super::sbi::init_ipi();
+    super::csr::set_ecfg(super::csr::ecfg() | ECFG_LIE_EXTIOI0 | ECFG_LIE_IPI);
 }
 
 #[inline]

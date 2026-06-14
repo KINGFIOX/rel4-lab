@@ -125,12 +125,14 @@ static KERNEL_LOCK_OWNER: AtomicUsize = AtomicUsize::new(NO_KERNEL_LOCK_OWNER);
 static KERNEL_SATP: AtomicU64 = AtomicU64::new(0);
 static REMOTE_STALL_PENDING_MASK: AtomicUsize = AtomicUsize::new(0);
 static REMOTE_STALL_DONE_MASK: AtomicUsize = AtomicUsize::new(0);
-static REMOTE_STALL_TARGET_TCB: AtomicUsize = AtomicUsize::new(0);
+static REMOTE_STALL_TARGET_VALUE: AtomicUsize = AtomicUsize::new(0);
 static REMOTE_STALL_OP: AtomicUsize = AtomicUsize::new(REMOTE_OP_STALL_TCB);
 
 const NO_KERNEL_LOCK_OWNER: usize = usize::MAX;
 const REMOTE_OP_STALL_TCB: usize = 1;
 const REMOTE_OP_RELEASE_FPU_OWNER: usize = 2;
+const REMOTE_OP_FLUSH_VMA_ALL: usize = 3;
+const REMOTE_OP_FLUSH_VMA_ASID: usize = 4;
 pub const SECONDARY_BOOT_WAIT_MAGIC: usize = 0x534d_5057_4149_5421;
 pub const SECONDARY_BOOT_READY_MAGIC: usize = 0x534d_5052_4541_4459;
 
@@ -402,7 +404,7 @@ fn remote_core_op(core: usize, tcb: *const Tcb, op: usize) {
     }
     assert_remote_ipi_supported("remote_core_op");
 
-    REMOTE_STALL_TARGET_TCB.store(tcb as usize, Ordering::Release);
+    REMOTE_STALL_TARGET_VALUE.store(tcb as usize, Ordering::Release);
     REMOTE_STALL_OP.store(op, Ordering::Release);
     REMOTE_STALL_DONE_MASK.store(0, Ordering::Release);
     REMOTE_STALL_PENDING_MASK.store(bit, Ordering::Release);
@@ -413,7 +415,7 @@ fn remote_core_op(core: usize, tcb: *const Tcb, op: usize) {
     }
 
     REMOTE_STALL_PENDING_MASK.store(0, Ordering::Release);
-    REMOTE_STALL_TARGET_TCB.store(0, Ordering::Release);
+    REMOTE_STALL_TARGET_VALUE.store(0, Ordering::Release);
     REMOTE_STALL_OP.store(REMOTE_OP_STALL_TCB, Ordering::Release);
 }
 
@@ -464,17 +466,30 @@ fn handle_remote_stall_while_waiting_for_kernel_lock() -> bool {
         return false;
     }
 
-    let target = REMOTE_STALL_TARGET_TCB.load(Ordering::Acquire);
+    let target = REMOTE_STALL_TARGET_VALUE.load(Ordering::Acquire);
     let op = REMOTE_STALL_OP.load(Ordering::Acquire);
     // seL4 keeps ordinary remote TCB stall separate from the remote FPU
     // owner switch; the latter saves and clears the FPU owner without
     // descheduling the target TCB.
-    if op == REMOTE_OP_RELEASE_FPU_OWNER {
-        if target != 0 {
-            crate::arch::current::fpu::release_on_current_core(target as *mut Tcb);
+    match op {
+        REMOTE_OP_RELEASE_FPU_OWNER => {
+            if target != 0 {
+                crate::arch::current::fpu::release_on_current_core(target as *mut Tcb);
+            }
+            complete_remote_core_op(bit);
+            return false;
         }
-        REMOTE_STALL_DONE_MASK.fetch_or(bit, Ordering::AcqRel);
-        return false;
+        REMOTE_OP_FLUSH_VMA_ALL => {
+            crate::arch::current::csr::sfence_vma_all();
+            complete_remote_core_op(bit);
+            return false;
+        }
+        REMOTE_OP_FLUSH_VMA_ASID => {
+            crate::arch::current::csr::sfence_vma_asid(target);
+            complete_remote_core_op(bit);
+            return false;
+        }
+        _ => {}
     }
     let hart = current_hart();
     let stalled_current = target != 0 && hart.current_tcb.load(Ordering::Acquire) == target;
@@ -485,21 +500,21 @@ fn handle_remote_stall_while_waiting_for_kernel_lock() -> bool {
             (*hart.trap_scratch.get()).user_context = 0;
         }
     }
-    REMOTE_STALL_DONE_MASK.fetch_or(bit, Ordering::AcqRel);
+    complete_remote_core_op(bit);
     stalled_current
+}
+
+fn complete_remote_core_op(bit: usize) {
+    #[cfg(target_arch = "loongarch64")]
+    crate::arch::current::sbi::ack_ipi();
+    REMOTE_STALL_DONE_MASK.fetch_or(bit, Ordering::AcqRel);
 }
 
 pub fn remote_sfence_vma_all() {
     let mut core = 0;
     while core < MAX_NUM_NODES {
         if let Some(hart_id) = remote_online_hart_id(core) {
-            assert_remote_tlb_flush_supported("remote_sfence_vma_all");
-            let ret = crate::arch::current::sbi::remote_sfence_vma(1, hart_id, 0, 0);
-            assert!(
-                ret.error == 0,
-                "SBI remote_sfence_vma failed for core {core} hart {hart_id}: error={}",
-                ret.error
-            );
+            remote_sfence_vma_core(core, hart_id);
         }
         core += 1;
     }
@@ -509,16 +524,62 @@ pub fn remote_sfence_vma_asid_all(asid: usize) {
     let mut core = 0;
     while core < MAX_NUM_NODES {
         if let Some(hart_id) = remote_online_hart_id(core) {
-            assert_remote_tlb_flush_supported("remote_sfence_vma_asid_all");
-            let ret = crate::arch::current::sbi::remote_sfence_vma_asid(1, hart_id, 0, 0, asid);
-            assert!(
-                ret.error == 0,
-                "SBI remote_sfence_vma_asid failed for core {core} hart {hart_id}: error={}",
-                ret.error
-            );
+            remote_sfence_vma_asid_core(core, hart_id, asid);
         }
         core += 1;
     }
+}
+
+#[cfg(target_arch = "riscv64")]
+fn remote_sfence_vma_core(core: usize, hart_id: usize) {
+    assert_remote_tlb_flush_supported("remote_sfence_vma_all");
+    let ret = crate::arch::current::sbi::remote_sfence_vma(1, hart_id, 0, 0);
+    assert!(
+        ret.error == 0,
+        "SBI remote_sfence_vma failed for core {core} hart {hart_id}: error={}",
+        ret.error
+    );
+}
+
+#[cfg(target_arch = "riscv64")]
+fn remote_sfence_vma_asid_core(core: usize, hart_id: usize, asid: usize) {
+    assert_remote_tlb_flush_supported("remote_sfence_vma_asid_all");
+    let ret = crate::arch::current::sbi::remote_sfence_vma_asid(1, hart_id, 0, 0, asid);
+    assert!(
+        ret.error == 0,
+        "SBI remote_sfence_vma_asid failed for core {core} hart {hart_id}: error={}",
+        ret.error
+    );
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn remote_sfence_vma_core(core: usize, _hart_id: usize) {
+    remote_core_op(core, null_mut(), REMOTE_OP_FLUSH_VMA_ALL);
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn remote_sfence_vma_asid_core(core: usize, _hart_id: usize, asid: usize) {
+    let Some(bit) = core_bit(core) else {
+        return;
+    };
+    if remote_online_hart_id(core).is_none() {
+        return;
+    }
+    assert_remote_ipi_supported("remote_sfence_vma_asid_core");
+
+    REMOTE_STALL_TARGET_VALUE.store(asid, Ordering::Release);
+    REMOTE_STALL_OP.store(REMOTE_OP_FLUSH_VMA_ASID, Ordering::Release);
+    REMOTE_STALL_DONE_MASK.store(0, Ordering::Release);
+    REMOTE_STALL_PENDING_MASK.store(bit, Ordering::Release);
+    wake_core(core);
+
+    while REMOTE_STALL_DONE_MASK.load(Ordering::Acquire) & bit == 0 {
+        hint::spin_loop();
+    }
+
+    REMOTE_STALL_PENDING_MASK.store(0, Ordering::Release);
+    REMOTE_STALL_TARGET_VALUE.store(0, Ordering::Release);
+    REMOTE_STALL_OP.store(REMOTE_OP_STALL_TCB, Ordering::Release);
 }
 
 pub fn sfence_vma_all_harts() {
