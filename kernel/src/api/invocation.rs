@@ -1590,18 +1590,12 @@ fn handle_thread_inner(
             }
             let resume_target = (flag_word & 1) != 0;
 
-            // Remaining regs (mr4..) live in the IPC buffer. The RISC-V
-            // `seL4_UserContext` layout — and the corresponding C
-            // kernel `frameRegisters[]` ++ `gpRegisters[]` flattening
-            // that libsel4's stub marshals via
-            // `((seL4_Word*)&regs->sp)[i-2]` — is:
-            //   0:pc, 1:ra, 2:sp, 3:gp,
-            //   4..15:s0..s11, 16..23:a0..a7,
-            //   24..30:t0..t6, 31:tp
-            // Note `tp` sits at the END of the struct on RISC-V, *not*
-            // at position 4 — a layout quirk vs. the standard ABI
-            // ordering. Slots 0/1 are not read from the IPC buffer because
-            // pc/ra are handled above.
+            // Remaining regs (mr4..) live in the IPC buffer. libsel4 flattens
+            // each architecture's frameRegisters[] and gpRegisters[] arrays
+            // after pc/ra; SEL4_USER_CONTEXT_REGS maps that seL4_UserContext
+            // word order back to our local UserContext.regs[] indexes. Slots
+            // 0/1 are not read from the IPC buffer because pc/ra are handled
+            // above.
             let mut reg_updates = [0u64; 32];
             let mut reg_update_valid = [false; 32];
             if length >= 5 && count >= 3 {
@@ -1660,8 +1654,8 @@ fn handle_thread_inner(
             //   mr0 = pc, mr1 = ra, mr2 = sp, mr3 = gp
             //   mr4.. = s0..s11, a0..a7, t0..t6, tp  (in that order)
             //
-            // Same RISC-V `seL4_UserContext` layout as TCB_WriteRegisters
-            // — share the same architecture ABI table.
+            // Same per-architecture seL4_UserContext order as
+            // TCB_WriteRegisters — share the same architecture ABI table.
             if length < 2 {
                 return Err(SyscallError::TruncatedMessage);
             }

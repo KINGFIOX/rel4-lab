@@ -1,9 +1,8 @@
-//! LoongArch64 user-context ABI skeleton.
+//! LoongArch64 trap handling, user-context ABI, and syscall/fault IPC path.
 //!
-//! This module fixes the kernel-visible register naming and TCB register
-//! ordering, and provides the first executable user-restore, trap-entry, and
-//! syscall/fault IPC path. Timer, external IRQ, and real VSpace switching are
-//! still staging work.
+//! This module defines the kernel-visible register naming and TCB register
+//! ordering, then connects user restore, trap entry, timer/external/IPI
+//! interrupts, and user fault delivery.
 
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicU64, Ordering};
