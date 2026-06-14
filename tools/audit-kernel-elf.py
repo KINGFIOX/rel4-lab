@@ -26,14 +26,18 @@ PREFIX = "audit-kernel-elf"
 
 ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
 PROGRAM_HEADER = struct.Struct("<IIQQQQQQ")
+SECTION_HEADER = struct.Struct("<IIQQQQIIQQ")
+SYMBOL = struct.Struct("<IBBHQQ")
 
 ELFCLASS64 = 2
 ELFDATA2LSB = 1
 PT_LOAD = 1
+SHT_SYMTAB = 2
 PF_X = 1 << 0
 PF_W = 1 << 1
 PF_R = 1 << 2
 PAGE_SIZE = 4096
+KERNEL_STACK_BYTES = 512 * 1024
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,30 @@ class ProgramHeader:
     @property
     def end_paddr(self) -> int:
         return self.paddr + self.memsz
+
+
+@dataclass(frozen=True)
+class SectionHeader:
+    name_offset: int
+    sh_type: int
+    flags: int
+    addr: int
+    offset: int
+    size: int
+    link: int
+    info: int
+    addralign: int
+    entsize: int
+
+
+@dataclass(frozen=True)
+class Symbol:
+    name: str
+    value: int
+    size: int
+    info: int
+    other: int
+    shndx: int
 
 
 @dataclass(frozen=True)
@@ -131,6 +159,63 @@ def parse_program_headers(data: bytes, header: ElfHeader) -> list[ProgramHeader]
         offset = header.phoff + index * header.phentsize
         headers.append(ProgramHeader(*PROGRAM_HEADER.unpack_from(data, offset)))
     return headers
+
+
+def parse_section_headers(data: bytes, header: ElfHeader) -> list[SectionHeader]:
+    if header.shnum == 0:
+        return []
+    if header.shentsize != SECTION_HEADER.size:
+        die(PREFIX, f"unexpected section-header entry size: {header.shentsize}")
+    end = header.shoff + header.shnum * header.shentsize
+    if header.shoff > len(data) or end > len(data):
+        die(PREFIX, "section-header table extends past end of file")
+    sections = []
+    for index in range(header.shnum):
+        offset = header.shoff + index * header.shentsize
+        sections.append(SectionHeader(*SECTION_HEADER.unpack_from(data, offset)))
+    return sections
+
+
+def c_string(data: bytes, offset: int) -> str:
+    if offset >= len(data):
+        return ""
+    end = data.find(b"\0", offset)
+    if end == -1:
+        end = len(data)
+    return data[offset:end].decode(errors="replace")
+
+
+def section_bytes(data: bytes, section: SectionHeader) -> bytes:
+    end = section.offset + section.size
+    if section.offset > len(data) or end > len(data):
+        die(PREFIX, "section extends past end of file")
+    return data[section.offset:end]
+
+
+def parse_symbols(data: bytes, sections: list[SectionHeader]) -> dict[str, Symbol]:
+    symbols: dict[str, Symbol] = {}
+    for section in sections:
+        if section.sh_type != SHT_SYMTAB:
+            continue
+        if section.entsize != SYMBOL.size:
+            die(PREFIX, f"unexpected symbol entry size: {section.entsize}")
+        if section.link >= len(sections):
+            die(PREFIX, "symbol table references a missing string table")
+        strings = section_bytes(data, sections[section.link])
+        table = section_bytes(data, section)
+        for offset in range(0, len(table), SYMBOL.size):
+            name_offset, info, other, shndx, value, size = SYMBOL.unpack_from(table, offset)
+            name = c_string(strings, name_offset)
+            if name:
+                symbols[name] = Symbol(
+                    name=name,
+                    value=value,
+                    size=size,
+                    info=info,
+                    other=other,
+                    shndx=shndx,
+                )
+    return symbols
 
 
 def is_power_of_two(value: int) -> bool:
@@ -214,6 +299,75 @@ def validate_load_segments(
     return errors
 
 
+def validate_symbols(
+    symbols: dict[str, Symbol],
+    program_headers: list[ProgramHeader],
+    expectation: LayoutExpectation,
+) -> list[str]:
+    errors: list[str] = []
+    required = (
+        "_start",
+        "__kernel_start",
+        "__boot_bss_start",
+        "__boot_bss_end",
+        "__boot_end",
+        "__bss_start",
+        "__stack_bottom",
+        "__stack_top",
+        "__bss_end",
+        "__kernel_end",
+    )
+    for name in required:
+        if name not in symbols:
+            errors.append(f"missing linker symbol {name}")
+    if errors:
+        return errors
+
+    def sym(name: str) -> int:
+        return symbols[name].value
+
+    if sym("_start") != expectation.entry:
+        errors.append(f"_start={sym('_start'):#x}, expected {expectation.entry:#x}")
+    if sym("__kernel_start") != expectation.entry:
+        errors.append(
+            f"__kernel_start={sym('__kernel_start'):#x}, expected {expectation.entry:#x}"
+        )
+    if sym("__boot_bss_start") > sym("__boot_bss_end"):
+        errors.append("__boot_bss_start is after __boot_bss_end")
+    if sym("__boot_bss_end") > sym("__boot_end"):
+        errors.append("__boot_bss_end is after __boot_end")
+    if sym("__boot_end") % PAGE_SIZE != 0:
+        errors.append(f"__boot_end is not page-aligned: {sym('__boot_end'):#x}")
+    if sym("__bss_start") % PAGE_SIZE != 0:
+        errors.append(f"__bss_start is not page-aligned: {sym('__bss_start'):#x}")
+    if not (
+        sym("__bss_start")
+        <= sym("__stack_bottom")
+        < sym("__stack_top")
+        <= sym("__bss_end")
+        <= sym("__kernel_end")
+    ):
+        errors.append("BSS/stack/kernel-end linker symbols are not ordered")
+    stack_bytes = sym("__stack_top") - sym("__stack_bottom")
+    if stack_bytes != KERNEL_STACK_BYTES:
+        errors.append(
+            f"kernel stack reserve is {stack_bytes:#x}, expected {KERNEL_STACK_BYTES:#x}"
+        )
+    if sym("__bss_end") % 8 != 0:
+        errors.append(f"__bss_end is not 8-byte aligned: {sym('__bss_end'):#x}")
+    if sym("__kernel_end") % PAGE_SIZE != 0:
+        errors.append(f"__kernel_end is not page-aligned: {sym('__kernel_end'):#x}")
+
+    loads = [ph for ph in program_headers if ph.is_load]
+    for name in required:
+        value = sym(name)
+        if name == "__kernel_end":
+            continue
+        if not any(segment.vaddr <= value <= segment.end_vaddr for segment in loads):
+            errors.append(f"{name}={value:#x} is not covered by a PT_LOAD memory range")
+    return errors
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         description="Check Rust kernel ELF layout invariants used by boot and packing."
@@ -248,9 +402,12 @@ def main(argv: list[str]) -> int:
     data = elf.read_bytes()
     header = parse_header(data)
     program_headers = parse_program_headers(data, header)
+    sections = parse_section_headers(data, header)
+    symbols = parse_symbols(data, sections)
     errors = [
         *validate_header(header, expectation),
         *validate_load_segments(program_headers, expectation),
+        *validate_symbols(symbols, program_headers, expectation),
     ]
     if errors:
         for error in errors:
