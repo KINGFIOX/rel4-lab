@@ -386,10 +386,10 @@ pub fn remote_fpu_owner_release(core: usize, tcb: *const Tcb) {
     if tcb.is_null() || core >= MAX_NUM_NODES || core == current_core_id() {
         return;
     }
-    remote_core_op(core, tcb, REMOTE_OP_RELEASE_FPU_OWNER);
+    remote_core_op(core, REMOTE_OP_RELEASE_FPU_OWNER, tcb as usize);
 }
 
-fn remote_core_op(core: usize, tcb: *const Tcb, op: usize) {
+fn remote_core_op(core: usize, op: usize, target_value: usize) {
     let Some(bit) = core_bit(core) else {
         return;
     };
@@ -398,7 +398,7 @@ fn remote_core_op(core: usize, tcb: *const Tcb, op: usize) {
     }
     assert_remote_ipi_supported("remote_core_op");
 
-    REMOTE_STALL_TARGET_VALUE.store(tcb as usize, Ordering::Release);
+    REMOTE_STALL_TARGET_VALUE.store(target_value, Ordering::Release);
     REMOTE_STALL_OP.store(op, Ordering::Release);
     REMOTE_STALL_DONE_MASK.store(0, Ordering::Release);
     REMOTE_STALL_PENDING_MASK.store(bit, Ordering::Release);
@@ -557,32 +557,12 @@ fn remote_sfence_vma_asid_core(core: usize, hart_id: usize, asid: usize) {
 
 #[cfg(target_arch = "loongarch64")]
 fn remote_sfence_vma_core(core: usize, _hart_id: usize) {
-    remote_core_op(core, null_mut(), REMOTE_OP_FLUSH_VMA_ALL);
+    remote_core_op(core, REMOTE_OP_FLUSH_VMA_ALL, 0);
 }
 
 #[cfg(target_arch = "loongarch64")]
 fn remote_sfence_vma_asid_core(core: usize, _hart_id: usize, asid: usize) {
-    let Some(bit) = core_bit(core) else {
-        return;
-    };
-    if remote_online_hart_id(core).is_none() {
-        return;
-    }
-    assert_remote_ipi_supported("remote_sfence_vma_asid_core");
-
-    REMOTE_STALL_TARGET_VALUE.store(asid, Ordering::Release);
-    REMOTE_STALL_OP.store(REMOTE_OP_FLUSH_VMA_ASID, Ordering::Release);
-    REMOTE_STALL_DONE_MASK.store(0, Ordering::Release);
-    REMOTE_STALL_PENDING_MASK.store(bit, Ordering::Release);
-    wake_core(core);
-
-    while REMOTE_STALL_DONE_MASK.load(Ordering::Acquire) & bit == 0 {
-        hint::spin_loop();
-    }
-
-    REMOTE_STALL_PENDING_MASK.store(0, Ordering::Release);
-    REMOTE_STALL_TARGET_VALUE.store(0, Ordering::Release);
-    REMOTE_STALL_OP.store(REMOTE_OP_STALL_TCB, Ordering::Release);
+    remote_core_op(core, REMOTE_OP_FLUSH_VMA_ASID, asid);
 }
 
 pub fn sfence_vma_all_harts() {
