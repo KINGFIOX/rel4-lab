@@ -27,14 +27,16 @@ pub struct UserContext {
     pub pc: u64,
     pub sstatus: u64,
     pub restart_pc: u64,
+    pub trap_record: TrapRecord,
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<UserContext>() == 35 * 8);
+    assert!(core::mem::size_of::<UserContext>() == 39 * 8);
     assert!(core::mem::offset_of!(UserContext, regs) == 0);
     assert!(core::mem::offset_of!(UserContext, pc) == 32 * 8);
     assert!(core::mem::offset_of!(UserContext, sstatus) == 33 * 8);
     assert!(core::mem::offset_of!(UserContext, restart_pc) == 34 * 8);
+    assert!(core::mem::offset_of!(UserContext, trap_record) == 35 * 8);
 };
 
 impl UserContext {
@@ -44,6 +46,7 @@ impl UserContext {
             pc: 0,
             sstatus: 0,
             restart_pc: 0,
+            trap_record: TrapRecord::zero(),
         }
     }
 }
@@ -67,9 +70,6 @@ impl TrapRecord {
         }
     }
 }
-
-#[unsafe(no_mangle)]
-static mut LOONGARCH64_TRAP_RECORD: TrapRecord = TrapRecord::zero();
 
 /// Register name -> index in `UserContext.regs`.
 #[repr(usize)]
@@ -245,7 +245,6 @@ unsafe extern "C" {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> *mut UserContext {
-    let record = unsafe { LOONGARCH64_TRAP_RECORD };
     let kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
     if kernel_lock.remote_stalled_current() {
         return kernel_exit_after_remote_stall(kernel_lock);
@@ -254,6 +253,7 @@ pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> *mut UserContext {
         panic!("trap entry passed a null user context");
     }
     let uc = unsafe { &mut *uc };
+    let record = uc.trap_record;
     uc.restart_pc = uc.pc;
 
     let ecode = estat_ecode(record.estat as usize);

@@ -81,15 +81,14 @@ trap_entry:
     csrrd   $t1, CSR_PRMD
     st.d    $t1, $sp, 33*8
 
-    la.local $t1, LOONGARCH64_TRAP_RECORD
     csrrd   $t2, CSR_ERA
-    st.d    $t2, $t1, 0*8
+    st.d    $t2, $sp, 35*8
     csrrd   $t2, CSR_PRMD
-    st.d    $t2, $t1, 1*8
+    st.d    $t2, $sp, 36*8
     csrrd   $t2, CSR_ESTAT
-    st.d    $t2, $t1, 2*8
+    st.d    $t2, $sp, 37*8
     csrrd   $t2, CSR_BADV
-    st.d    $t2, $t1, 3*8
+    st.d    $t2, $sp, 38*8
 
     ld.d    $t2, $t0, TRAP_SCRATCH_KERNEL_STACK_TOP
     csrwr   $t0, CSR_KS0
