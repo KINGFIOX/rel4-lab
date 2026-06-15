@@ -199,8 +199,26 @@ def audit_loongarch64(errors: list[str]) -> None:
         ("PTE_NR", 1 << 61),
         ("PTE_NX", 1 << 62),
         ("PTE_RPLV", 1 << 63),
+        ("PTE_KERNEL_RWX", (1 << 7) | (1 << 0) | (1 << 1) | (1 << 8) | (1 << 6) | (0b01 << 4)),
+        (
+            "PTE_USER_RW",
+            (1 << 7) | (1 << 0) | (1 << 1) | (1 << 8) | (0b11 << 2) | (0b01 << 4) | (1 << 62),
+        ),
+        ("PTE_USER_RX", (1 << 7) | (1 << 0) | (0b11 << 2) | (0b01 << 4)),
+        (
+            "PTE_USER_RWX",
+            (1 << 7) | (1 << 0) | (1 << 1) | (1 << 8) | (0b11 << 2) | (0b01 << 4),
+        ),
     ):
         expect(errors, f"loongarch64 {name}", paging.get(name), value)
+    require_regex(
+        errors,
+        paging_rs,
+        r"pub\s+const\s+fn\s+ppn\(self\)\s*->\s*u64\s*\{\s*"
+        r"\(self\.0\s*>>\s*PTE_PFN_SHIFT\)\s*&\s*PTE_PFN_MASK\s*"
+        r"\}",
+        "LoongArch PTE PFN decode uses PTE_PFN_MASK",
+    )
 
     expect(errors, "loongarch64 ASID_MASK", csr.get("ASID_MASK"), 0x3ff)
     require_regex(
