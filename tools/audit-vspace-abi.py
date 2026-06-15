@@ -294,6 +294,16 @@ def audit_loongarch64(errors: list[str]) -> None:
         r"fn\s+copy_kernel_mappings_to\([^)]*\)\s*\{[^}]*LoongArch keeps kernel access",
         "no-op kernel mapping copy rationale",
     )
+    require_regex(
+        errors,
+        boot_rs,
+        r"let\s+satp\s*=\s*satp_for\(root_pt,\s*ROOTSERVER_ASID\s+as\s+u64\);.*?"
+        r"crate::kernel::smp::publish_kernel_satp\(satp\);.*?"
+        r"unsafe\s*\{\s*switch_satp\(satp\)\s*\};.*?"
+        r"crate::machine::console::init\(\);.*?"
+        r"crate::arch::current::irq::init\(\);",
+        "LoongArch boot configures DMW/MMIO access before console and IRQ init",
+    )
     audit_kva_to_pa_helpers(errors, abi_consts, (boot_rs, invocation_rs), "loongarch64")
 
     # Ensure the parsed symbol graph includes all imported constants used above.
