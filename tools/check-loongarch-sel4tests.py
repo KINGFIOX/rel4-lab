@@ -27,6 +27,57 @@ def print_check(label: str, ok: bool, detail: str) -> None:
     print(f"[{PREFIX}] {status}: {label}: {detail}")
 
 
+def print_manifest(tree_dir: Path, build_dir: Path) -> None:
+    target = TARGETS["loongarch64"]
+    status = target.sel4_arch_source_status(tree_dir)
+
+    print("# LoongArch64 sel4tests Port Manifest")
+    print()
+    print("This repository can build and audit the Rust kernel for LoongArch64,")
+    print("but `ARCH=loongarch64` sel4tests also require an external seL4 tree")
+    print("with LoongArch64 support in the upstream C kernel, libsel4, and")
+    print("elfloader.")
+    print()
+    print("## Expected Tree")
+    print()
+    print(f"- seL4 tree: `{tree_dir}`")
+    print(f"- build dir: `{build_dir}`")
+    print(f"- repository arch: `ARCH=loongarch64`")
+    print(f"- Rust target: `{target.rust_target}`")
+    print(f"- seL4 arch: `{target.sel4_arch}`")
+    print(f"- seL4 platform: `{target.platform}`")
+    print(f"- image name: `{target.image_name}`")
+    print()
+    print("## Required Upstream Port Pieces")
+    print()
+    for path in status.kernel_arch_dirs:
+        print(f"- one kernel arch source directory: `{path.relative_to(tree_dir)}`")
+    print(f"- libsel4 arch include directory: `{status.libsel4_dir.relative_to(tree_dir)}`")
+    for path in status.elfloader_src_dirs:
+        print(f"- one elfloader arch source directory: `{path.relative_to(tree_dir)}`")
+    for path in status.elfloader_include_dirs:
+        print(f"- one elfloader arch include directory: `{path.relative_to(tree_dir)}`")
+    print()
+    print("## Repository Commands")
+    print()
+    print("```sh")
+    print(
+        f"SEL4_TREE_DIR={tree_dir} SEL4_BUILD_DIR={build_dir} "
+        "ARCH=loongarch64 ./tools/check-loongarch-sel4tests.py --strict"
+    )
+    print(
+        f"SEL4_TREE_DIR={tree_dir} SEL4_BUILD_DIR={build_dir} "
+        "ARCH=loongarch64 ./tools/pack-image.py"
+    )
+    print("ARCH=loongarch64 ./tools/run-tests.py")
+    print("```")
+    print()
+    print("Without those upstream port pieces, `pack-image.py` still builds and")
+    print("audits the Rust kernel first, then stops before trying to configure")
+    print("an unsupported sel4test image.")
+    print()
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -49,6 +100,11 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="return non-zero when required LoongArch sel4test pieces are missing",
     )
+    parser.add_argument(
+        "--manifest",
+        action="store_true",
+        help="print the external seL4 tree requirements for LoongArch64 sel4tests",
+    )
     args = parser.parse_args(argv)
 
     target = TARGETS["loongarch64"]
@@ -61,6 +117,10 @@ def main(argv: list[str]) -> int:
     source_dir = tree_dir / "projects" / "sel4test"
     init_build = tree_dir / "init-build.sh"
     status = target.sel4_arch_source_status(tree_dir)
+
+    if args.manifest:
+        print_manifest(tree_dir, build_dir)
+        return 0
 
     print(f"[{PREFIX}] target: ARCH=loongarch64 RUST_TARGET={target.rust_target}")
     print(f"[{PREFIX}] sel4 tree: {tree_dir}")

@@ -172,11 +172,15 @@ Check whether a LoongArch64-capable sel4tests tree is available:
 
 ```sh
 ./tools/check-loongarch-sel4tests.py
+./tools/check-loongarch-sel4tests.py --manifest
 SEL4_TREE_DIR=/path/to/loongarch64-sel4test \
   SEL4_BUILD_DIR=/path/to/loongarch64-sel4test/build-loongarch64 \
   ARCH=loongarch64 ./tools/pack-image.py
 ARCH=loongarch64 ./tools/run-tests.py
 ```
+
+See [docs/loongarch64-sel4tests.md](docs/loongarch64-sel4tests.md) for the
+external seL4/libsel4/elfloader port pieces required by `ARCH=loongarch64`.
 
 Current smoke path:
 
