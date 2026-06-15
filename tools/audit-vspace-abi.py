@@ -168,6 +168,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     paging_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "paging.rs"
     csr_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "csr.rs"
     vspace_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "vspace.rs"
+    asid_rs = ROOT_DIR / "kernel" / "src" / "object" / "asid.rs"
     boot_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "boot.rs"
     invocation_rs = ROOT_DIR / "kernel" / "src" / "api" / "invocation.rs"
     paging = parse_consts(paging_rs, abi_consts)
@@ -196,6 +197,25 @@ def audit_loongarch64(errors: list[str]) -> None:
         expect(errors, f"loongarch64 {name}", paging.get(name), value)
 
     expect(errors, "loongarch64 ASID_MASK", csr.get("ASID_MASK"), 0x3ff)
+    require_regex(
+        errors,
+        asid_rs,
+        r"#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
+        r"const\s+ARCH_ASID_BITS\s*:\s*usize\s*=\s*10\s*;",
+        "LoongArch hardware ASID width",
+    )
+    require_text(
+        errors,
+        asid_rs,
+        "const ASID_TABLE_LEN: usize = 1 << ARCH_ASID_BITS;",
+        "ASID table sized by architecture ASID width",
+    )
+    require_text(
+        errors,
+        asid_rs,
+        "const ASID_POOL_COUNT: usize = ASID_TABLE_LEN / ASID_POOL_ENTRY_COUNT;",
+        "ASID pool count derived from architecture ASID width",
+    )
     for name, value in (
         ("CSR_ASID", 0x018),
         ("CSR_PGDL", 0x019),

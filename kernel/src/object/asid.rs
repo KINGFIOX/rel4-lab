@@ -1,21 +1,34 @@
 //! Minimal ASID → root-page-table-PA table.
 //!
-//! The real seL4 kernel uses a 16-bit ASID stored on every Frame /
-//! PageTable cap so that a cap-only `Page_Unmap` can find the right
-//! VSpace without help from the caller. `ASIDPool_Assign` allocates
-//! within user-visible pool ranges; `Page_Map` and context switch paths
-//! require the destination VSpace cap to already carry such an ASID.
+//! The real seL4 RISC-V kernel uses a 16-bit ASID stored on every Frame /
+//! PageTable cap so that a cap-only `Page_Unmap` can find the right VSpace
+//! without help from the caller. The cap field stays 16-bit across our
+//! backends, but allocation is capped to the hardware-distinguishable ASID
+//! range for the current architecture. `ASIDPool_Assign` allocates within
+//! user-visible pool ranges; `Page_Map` and context switch paths require the
+//! destination VSpace cap to already carry such an ASID.
 //!
 //! ASID 0 is reserved as "unassigned" — Page_Unmap on a cap whose
 //! `capFMappedASID` is zero is a no-op, so we never read slot 0.
 
 use crate::kernel::smp::BklCell;
 
-/// Total ASID slots in seL4's 16-bit ASID namespace.
-const ASID_TABLE_LEN: usize = 1 << 16;
-const ASID_POOL_COUNT: usize = 1 << 7;
+#[cfg(target_arch = "loongarch64")]
+const ARCH_ASID_BITS: usize = 10;
+#[cfg(not(target_arch = "loongarch64"))]
+const ARCH_ASID_BITS: usize = 16;
+
+/// Total ASID slots usable by the current hardware backend.
+const ASID_TABLE_LEN: usize = 1 << ARCH_ASID_BITS;
 pub const ASID_POOL_ENTRY_COUNT: usize = 1 << 9;
+const ASID_POOL_COUNT: usize = ASID_TABLE_LEN / ASID_POOL_ENTRY_COUNT;
 const ASID_POOL_SIZE: u16 = 1 << 9;
+
+const _: () = {
+    assert!(ASID_TABLE_LEN <= 1 << 16);
+    assert!(ASID_TABLE_LEN % ASID_POOL_ENTRY_COUNT == 0);
+    assert!(ASID_POOL_COUNT > 0);
+};
 
 #[derive(Copy, Clone)]
 struct AsidEntry {
