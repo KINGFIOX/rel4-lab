@@ -389,6 +389,14 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
 
     require_regex(
         errors,
+        csr_rs,
+        r"pub\s+fn\s+set_sscratch\(value:\s*usize\)\s*\{\s*"
+        r"set_ks0\(value\);"
+        r"\s*dbar\(\);\s*\}",
+        "LoongArch TrapScratch CSR write barrier",
+    )
+    require_regex(
+        errors,
         trap_rs,
         r"fn\s+clear_timer_interrupt\(\)\s*\{\s*csr::set_ticlr\(TICLR_CLR_TIMER\);"
         r"\s*csr::dbar\(\);\s*\}",

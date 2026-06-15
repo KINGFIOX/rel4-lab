@@ -119,6 +119,7 @@ pub fn sscratch() -> usize {
 #[inline]
 pub fn set_sscratch(value: usize) {
     set_ks0(value);
+    dbar();
 }
 
 #[inline]
