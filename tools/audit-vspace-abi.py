@@ -297,6 +297,15 @@ def audit_loongarch64(errors: list[str]) -> None:
     require_regex(
         errors,
         vspace_rs,
+        r"configure_kernel_direct_map\(\);\s*"
+        r"configure_page_walk\(\);\s*"
+        r"csr::dbar\(\);\s*"
+        r"if\s+current_satp\(\)\s*==\s*satp_val",
+        "LoongArch page-walk/direct-map config barrier before paging decisions",
+    )
+    require_regex(
+        errors,
+        vspace_rs,
         r"if\s+current_satp\(\)\s*==\s*satp_val\s*\{\s*"
         r"enable_paging\(\);\s*"
         r"csr::dbar\(\);\s*"

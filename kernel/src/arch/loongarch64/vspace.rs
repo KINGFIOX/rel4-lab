@@ -458,6 +458,7 @@ pub unsafe fn switch_satp(satp_val: u64) {
     }
     configure_kernel_direct_map();
     configure_page_walk();
+    csr::dbar();
     if current_satp() == satp_val {
         enable_paging();
         csr::dbar();
