@@ -10,6 +10,7 @@ const EUEN_FPE: usize = 1 << 0;
 const EUEN_SXE: usize = 1 << 1;
 const EUEN_ASXE: usize = 1 << 2;
 const EUEN_FPU_STATE_MASK: usize = EUEN_FPE | EUEN_SXE | EUEN_ASXE;
+pub(crate) const EUEN_FPU_STATE_CLEAR_MASK: i64 = !(EUEN_FPU_STATE_MASK as i64);
 
 #[inline]
 fn clear_fpu_enable() {

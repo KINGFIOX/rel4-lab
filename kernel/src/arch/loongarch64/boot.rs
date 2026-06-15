@@ -40,7 +40,7 @@ pub unsafe extern "C" fn _start() -> ! {
         // Disable FPU/LSX/LASX access before any hart enters Rust or parks.
         // The LoongArch staging backend does not preserve that user state.
         "csrrd    $t0, {csr_euen}",
-        "li.d     $t1, -8",
+        "li.d     $t1, {euen_fpu_state_clear_mask}",
         "and      $t0, $t0, $t1",
         "csrwr    $t0, {csr_euen}",
         "dbar     0",
@@ -84,6 +84,7 @@ pub unsafe extern "C" fn _start() -> ! {
         secondary_boot_ready = sym crate::kernel::smp::SECONDARY_BOOT_READY,
         csr_euen = const crate::arch::loongarch64::csr::CSR_EUEN,
         csr_ks0 = const crate::arch::loongarch64::csr::CSR_KS0,
+        euen_fpu_state_clear_mask = const crate::arch::loongarch64::fpu::EUEN_FPU_STATE_CLEAR_MASK,
         kernel_stack_bytes = const crate::kernel::smp::KERNEL_STACK_BYTES,
         secondary_boot_ready_magic = const crate::kernel::smp::SECONDARY_BOOT_READY_MAGIC,
     );

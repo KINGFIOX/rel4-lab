@@ -253,6 +253,13 @@ def validate_loongarch_fpu_source() -> None:
     require_source_regex(
         errors,
         fpu_rs,
+        r"pub\(crate\)\s+const\s+EUEN_FPU_STATE_CLEAR_MASK\s*:\s*i64\s*="
+        r"\s*!\(EUEN_FPU_STATE_MASK\s+as\s+i64\)\s*;",
+        "derived FPU/LSX/LASX clear mask",
+    )
+    require_source_regex(
+        errors,
+        fpu_rs,
         r"fn\s+clear_fpu_enable\(\)\s*\{.*?"
         r"set_euen\(euen\s*&\s*!EUEN_FPU_STATE_MASK\);.*?"
         r"csr::dbar\(\);.*?\}",
@@ -282,12 +289,14 @@ def validate_loongarch_fpu_source() -> None:
         errors,
         boot_rs,
         r'"csrrd\s+\$t0,\s+\{csr_euen\}".*?'
-        r'"li\.d\s+\$t1,\s+-8".*?'
+        r'"li\.d\s+\$t1,\s+\{euen_fpu_state_clear_mask\}".*?'
         r'"and\s+\$t0,\s+\$t0,\s+\$t1".*?'
         r'"csrwr\s+\$t0,\s+\{csr_euen\}".*?'
         r'"dbar\s+0".*?'
-        r"csr_euen\s*=\s*const\s+crate::arch::loongarch64::csr::CSR_EUEN",
-        "early EUEN FPU/LSX/LASX clear barrier before Rust entry using CSR constant",
+        r"csr_euen\s*=\s*const\s+crate::arch::loongarch64::csr::CSR_EUEN.*?"
+        r"euen_fpu_state_clear_mask\s*=\s*const\s+"
+        r"crate::arch::loongarch64::fpu::EUEN_FPU_STATE_CLEAR_MASK",
+        "early EUEN FPU/LSX/LASX clear barrier before Rust entry using CSR and mask constants",
     )
 
     if errors:

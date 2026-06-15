@@ -310,12 +310,14 @@ def validate_arch_boot_source(arch: str) -> list[str]:
             path,
             text,
             r'"csrrd\s+\$t0,\s+\{csr_euen\}".*?'
-            r'"li\.d\s+\$t1,\s+-8".*?'
+            r'"li\.d\s+\$t1,\s+\{euen_fpu_state_clear_mask\}".*?'
             r'"and\s+\$t0,\s+\$t0,\s+\$t1".*?'
             r'"csrwr\s+\$t0,\s+\{csr_euen\}".*?'
             r'"dbar\s+0".*?'
-            r"csr_euen\s*=\s*const\s+crate::arch::loongarch64::csr::CSR_EUEN",
-            "LoongArch early FPU/LSX/LASX disable barrier before Rust entry using CSR constant",
+            r"csr_euen\s*=\s*const\s+crate::arch::loongarch64::csr::CSR_EUEN.*?"
+            r"euen_fpu_state_clear_mask\s*=\s*const\s+"
+            r"crate::arch::loongarch64::fpu::EUEN_FPU_STATE_CLEAR_MASK",
+            "LoongArch early FPU/LSX/LASX disable barrier before Rust entry using CSR and mask constants",
         )
         require_source_regex(
             errors,
