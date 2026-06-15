@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from tool_common import ROOT_DIR, getenv, qemu_smp_arg, run
+from tool_common import ROOT_DIR, getenv, qemu_smp_arg, require_target_executable_elf, run
 from target_config import (
     image_name_from_env,
     rust_target_from_env,
@@ -41,6 +41,7 @@ def main(argv: list[str]) -> int:
         if not kernel_elf.is_file():
             print("kernel ELF not found, building...", file=sys.stderr)
             run(["cargo", "build", "--release", "--target", rust_target, "-p", "kernel"], cwd=ROOT_DIR)
+        require_target_executable_elf("simulate", target, kernel_elf, "kernel ELF")
         cmd = [
             *target.qemu_base_cmd(smp, "128M"),
             "-kernel",
@@ -56,6 +57,7 @@ def main(argv: list[str]) -> int:
             print(f"packed image not found at {packed_image}", file=sys.stderr)
             print("run tools/pack-image.py first", file=sys.stderr)
             return 1
+        require_target_executable_elf("simulate", target, packed_image, "packed image")
         cmd = [
             *target.qemu_base_cmd(smp, "3072"),
             "-kernel",

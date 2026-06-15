@@ -160,6 +160,34 @@ def require_xv6_user_elf(prefix: str, target, path: Path) -> None:
         )
 
 
+def require_target_executable_elf(prefix: str, target, path: Path, description: str) -> None:
+    expected_machines = {
+        "riscv64": RISCV_ELF_MACHINE,
+        "loongarch64": LOONGARCH64_ELF_MACHINE,
+    }
+    expected_machine = expected_machines.get(target.name)
+    if expected_machine is None:
+        die(prefix, f"unsupported ELF target: {target.name}")
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        die(prefix, f"{description} not found: {path}")
+    if len(data) < 64 or data[0:4] != b"\x7fELF":
+        die(prefix, f"expected an ELF64 {description} for ARCH={target.name}: {path}")
+    if data[4] != 2 or data[5] != 1:
+        die(prefix, f"expected a little-endian ELF64 {description} for ARCH={target.name}: {path}")
+    elf_type = int.from_bytes(data[16:18], "little")
+    machine = int.from_bytes(data[18:20], "little")
+    if elf_type != ELF_TYPE_EXECUTABLE or machine != expected_machine:
+        die(
+            prefix,
+            (
+                f"expected an executable {target.name} {description}: {path} "
+                f"has e_type={elf_type:#x} e_machine={machine:#x}"
+            ),
+        )
+
+
 def command_exists(command: str) -> bool:
     return shutil.which(command) is not None
 

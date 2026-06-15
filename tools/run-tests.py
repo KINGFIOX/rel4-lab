@@ -17,6 +17,7 @@ from tool_common import (
     getenv,
     last_regex_line,
     qemu_smp_arg,
+    require_target_executable_elf,
     tail_lines,
 )
 from target_config import (
@@ -64,6 +65,7 @@ def main(argv: list[str]) -> int:
         print(f"packed image not found at {packed_image}", file=sys.stderr)
         print("run tools/pack-image.py first", file=sys.stderr)
         return 3
+    require_target_executable_elf(PREFIX, target, packed_image, "packed sel4test image")
     target.require_qemu(PREFIX)
 
     cmd = [
