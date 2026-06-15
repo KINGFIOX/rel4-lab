@@ -64,7 +64,8 @@ pub unsafe extern "C" fn _start() -> ! {
         "idle     0",
         "b        3b",
 
-        // Secondary hart path: wait until core 0 has finished global init.
+        // Secondary hart path: wait until core 0's Release store has published
+        // global boot state, then pair it with dbar before entering Rust.
         "4:",
         "la.local $t0, {secondary_boot_ready}",
         "li.d     $t2, {secondary_boot_ready_magic}",

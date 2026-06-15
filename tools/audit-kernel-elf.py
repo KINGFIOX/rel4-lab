@@ -320,8 +320,9 @@ def validate_arch_boot_source(arch: str) -> list[str]:
             text,
             r'"ld\.d\s+\$t1,\s+\$t0,\s+0".*?'
             r'"bne\s+\$t1,\s+\$t2,\s+5b".*?'
-            r'"dbar\s+0"',
-            "LoongArch secondary ready wait barrier",
+            r'"dbar\s+0".*?'
+            r'"bl\s+\{init_secondary_hart\}"',
+            "LoongArch secondary ready acquire barrier before Rust entry",
         )
         require_source_regex(
             errors,
