@@ -176,6 +176,7 @@ pub fn iocsr_write64(addr: usize, value: u64) {
 
 #[inline]
 pub fn sfence_vma_all() {
+    dbar();
     unsafe {
         asm!("invtlb {op}, $zero, $zero", op = const INVTLB_ALL, options(nostack, nomem));
     }
@@ -185,6 +186,7 @@ pub fn sfence_vma_all() {
 #[inline]
 pub fn sfence_vma_va(vaddr: usize) {
     let asid = asid() & ASID_MASK;
+    dbar();
     unsafe {
         asm!(
             "invtlb {op}, {asid}, {vaddr}",
@@ -199,6 +201,7 @@ pub fn sfence_vma_va(vaddr: usize) {
 
 #[inline]
 pub fn sfence_vma_asid(asid: usize) {
+    dbar();
     unsafe {
         asm!(
             "invtlb {op}, {asid}, $zero",

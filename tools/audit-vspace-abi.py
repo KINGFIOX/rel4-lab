@@ -282,29 +282,32 @@ def audit_loongarch64(errors: list[str]) -> None:
         errors,
         csr_rs,
         r"pub\s+fn\s+sfence_vma_all\(\)\s*\{.*?"
+        r"dbar\(\);.*?"
         r"asm!\(\"invtlb \{op\}, \$zero, \$zero\",\s*op\s*=\s*const\s*INVTLB_ALL,.*?"
         r"dbar\(\);",
-        "LoongArch full TLB flush uses INVTLB_ALL and barrier",
+        "LoongArch full TLB flush uses INVTLB_ALL with pre/post barriers",
     )
     require_regex(
         errors,
         csr_rs,
         r"pub\s+fn\s+sfence_vma_va\(vaddr:\s*usize\)\s*\{.*?"
         r"let\s+asid\s*=\s*asid\(\)\s*&\s*ASID_MASK;.*?"
+        r"dbar\(\);.*?"
         r"op\s*=\s*const\s*INVTLB_ADDR_G_OR_ASID,.*?"
         r"asid\s*=\s*in\(reg\)\s*asid,.*?"
         r"vaddr\s*=\s*in\(reg\)\s*vaddr,.*?"
         r"dbar\(\);",
-        "LoongArch VA TLB flush uses current ASID and barrier",
+        "LoongArch VA TLB flush uses current ASID with pre/post barriers",
     )
     require_regex(
         errors,
         csr_rs,
         r"pub\s+fn\s+sfence_vma_asid\(asid:\s*usize\)\s*\{.*?"
+        r"dbar\(\);.*?"
         r"op\s*=\s*const\s*INVTLB_ASID,.*?"
         r"asid\s*=\s*in\(reg\)\s*asid\s*&\s*ASID_MASK,.*?"
         r"dbar\(\);",
-        "LoongArch ASID TLB flush masks ASID and uses barrier",
+        "LoongArch ASID TLB flush masks ASID with pre/post barriers",
     )
 
     expect(errors, "loongarch64 USER_ROOT_ENTRIES", vspace.get("USER_ROOT_ENTRIES"), 256)
