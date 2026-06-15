@@ -808,6 +808,7 @@ pub fn install_trap_vector() {
 }
 
 pub fn init_timer() {
+    clear_timer_interrupt();
     csr::set_ecfg(csr::ecfg() | ECFG_LIE_TIMER);
     let now = csr::time() as u64;
     if crate::kernel::smp::current_core_id() == 0 {
