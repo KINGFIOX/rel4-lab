@@ -20,6 +20,27 @@ USER_SYSCALL_RE = re.compile(
     r"pub\s+const\s+(SYS_[A-Z0-9_]+)\s*:\s*isize\s*=\s*(-?\d+)\s*;"
 )
 
+KERNEL_SYSCALLS = {
+    "Call": -1,
+    "ReplyRecv": -2,
+    "NonBlockingSendRecv": -3,
+    "NonBlockingSendWait": -4,
+    "Send": -5,
+    "NonBlockingSend": -6,
+    "Recv": -7,
+    "NonBlockingRecv": -8,
+    "Wait": -9,
+    "NonBlockingWait": -10,
+    "Yield": -11,
+    "DebugPutChar": -12,
+    "DebugDumpScheduler": -13,
+    "DebugHalt": -14,
+    "DebugCapIdentify": -15,
+    "DebugSnapshot": -16,
+    "DebugNameThread": -17,
+    "DebugSendIpi": -18,
+}
+
 USER_TO_KERNEL_SYSCALLS = {
     "SYS_CALL": "Call",
     "SYS_REPLY_RECV": "ReplyRecv",
@@ -66,10 +87,32 @@ def require_regex(errors: list[str], path: Path, pattern: str, description: str)
 
 
 def audit_syscall_numbers(errors: list[str]) -> None:
-    kernel_syscalls = parse_kernel_syscalls(ROOT_DIR / "kernel" / "src" / "abi" / "syscall.rs")
+    kernel_path = ROOT_DIR / "kernel" / "src" / "abi" / "syscall.rs"
+    kernel_syscalls = parse_kernel_syscalls(kernel_path)
     userspace_syscalls = parse_userspace_syscalls(
         ROOT_DIR / "userspace" / "sel4-user" / "src" / "lib.rs"
     )
+    kernel_source = kernel_path.read_text()
+    for kernel_name, expected_value in KERNEL_SYSCALLS.items():
+        kernel_value = kernel_syscalls.get(kernel_name)
+        if kernel_value is None:
+            errors.append(f"kernel SyscallNumber::{kernel_name} is missing")
+        elif kernel_value != expected_value:
+            errors.append(
+                f"SyscallNumber::{kernel_name}={kernel_value}, expected {expected_value}"
+            )
+        require_text(
+            errors,
+            kernel_path,
+            f"{expected_value} => Some(Self::{kernel_name})",
+            f"from_raw mapping for SyscallNumber::{kernel_name}",
+        )
+    extra_kernel_syscalls = set(kernel_syscalls) - set(KERNEL_SYSCALLS)
+    for kernel_name in sorted(extra_kernel_syscalls):
+        errors.append(f"kernel SyscallNumber::{kernel_name} is not in audited seL4 MCS set")
+    if "MCS" not in kernel_source or "api-master" not in kernel_source:
+        errors.append("kernel syscall source no longer documents the seL4 MCS api-master ABI")
+
     for user_name, kernel_name in USER_TO_KERNEL_SYSCALLS.items():
         kernel_value = kernel_syscalls.get(kernel_name)
         user_value = userspace_syscalls.get(user_name)
@@ -133,7 +176,7 @@ def audit_kernel_trap(errors: list[str], target_name: str) -> None:
     require_text(errors, path, "uc.pc = uc.pc.wrapping_add(4);", "4-byte syscall PC advance")
     require_text(errors, path, "uc.regs[UserRegister::A0.index()]", "A0 syscall argument/result use")
 
-    for kernel_name in set(USER_TO_KERNEL_SYSCALLS.values()):
+    for kernel_name in KERNEL_SYSCALLS:
         if f"SyscallNumber::{kernel_name}" not in source:
             errors.append(f"{rel} does not dispatch SyscallNumber::{kernel_name}")
     require_regex(
