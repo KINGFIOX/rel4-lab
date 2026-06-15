@@ -324,6 +324,8 @@ pub fn init_current_hart(hart_id: usize, core_id: usize) {
 
 pub fn release_secondary_harts() {
     SECONDARY_BOOT_READY.store(SECONDARY_BOOT_READY_MAGIC, Ordering::Release);
+    #[cfg(target_arch = "loongarch64")]
+    crate::arch::current::csr::dbar();
 }
 
 pub fn publish_kernel_satp(satp: u64) {

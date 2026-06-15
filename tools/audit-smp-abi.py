@@ -148,6 +148,15 @@ def audit_loongarch64(errors: list[str]) -> None:
     require_regex(
         errors,
         smp_rs,
+        r"pub\s+fn\s+release_secondary_harts\(\)\s*\{\s*"
+        r"SECONDARY_BOOT_READY\.store\(SECONDARY_BOOT_READY_MAGIC,\s*Ordering::Release\);"
+        r"\s*#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
+        r"crate::arch::current::csr::dbar\(\);",
+        "LoongArch secondary-hart release write barrier",
+    )
+    require_regex(
+        errors,
+        smp_rs,
         r"REMOTE_OP_FLUSH_VMA_ALL\s*=>\s*\{\s*"
         r"crate::arch::current::csr::sfence_vma_all\(\);",
         "remote full TLB flush service",
