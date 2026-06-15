@@ -120,6 +120,11 @@ def require_symbol(symbols: dict[str, int], name: str, errors: list[str], contex
     return value
 
 
+def require_regex(errors: list[str], path: Path, pattern: str, description: str) -> None:
+    if re.search(pattern, path.read_text(), re.S) is None:
+        errors.append(f"{path.relative_to(ROOT_DIR)} is missing {description}")
+
+
 def expect_equal(errors: list[str], label: str, got: int, expected: int) -> None:
     if got != expected:
         errors.append(f"{label}=0x{got:x}, expected 0x{expected:x}")
@@ -203,6 +208,7 @@ def audit_loongarch64(
     platform_consts: dict[str, int],
     pci_consts: dict[str, int],
     irq_consts: dict[str, int],
+    irq_rs: Path,
     regions: list[tuple[int, int]],
     free_regions: list[tuple[int, int]],
 ) -> list[str]:
@@ -301,6 +307,18 @@ def audit_loongarch64(
         platform_consts, "LOONGARCH64_PCIE_LEGACY_IRQ_COUNT", errors, "userspace"
     )
     extioi_irqs = require_symbol(irq_consts, "EXTIOI_IRQS", errors, "kernel")
+    extioi_group_bits = require_symbol(irq_consts, "EXTIOI_GROUP_BITS", errors, "kernel")
+    extioi_groups = require_symbol(irq_consts, "EXTIOI_GROUPS", errors, "kernel")
+    expect_equal(errors, "EXTIOI_IRQS", extioi_irqs, 256)
+    expect_equal(errors, "EXTIOI_GROUP_BITS", extioi_group_bits, 32)
+    expected_extioi_groups = extioi_irqs // extioi_group_bits if extioi_group_bits != 0 else 0
+    expect_equal(errors, "EXTIOI_GROUPS", extioi_groups, expected_extioi_groups)
+    expect_equal(
+        errors,
+        "PCH_PIC_IRQ_NUM",
+        require_symbol(irq_consts, "PCH_PIC_IRQ_NUM", errors, "kernel"),
+        32,
+    )
     if legacy_irq_base == 0 or legacy_irq_base + legacy_irq_count > extioi_irqs:
         errors.append(
             "LOONGARCH64_PCIE_LEGACY_IRQ range "
@@ -317,6 +335,15 @@ def audit_loongarch64(
             "LOONGARCH64_PCH_MSI vector range "
             f"[{msi_base_vector}, {msi_base_vector + msi_vectors}) exceeds EXTIOI_IRQS={extioi_irqs}"
         )
+    require_regex(
+        errors,
+        irq_rs,
+        r"for\s+group\s+in\s+0\.\.EXTIOI_GROUPS\s*\{\s*"
+        r"let\s+offset\s*=\s*group\s*\*\s*4;\s*"
+        r"csr::iocsr_write32\(EXTIOI_ENABLE_START\s*\+\s*offset,\s*0\);\s*"
+        r"csr::iocsr_write32\(EXTIOI_COREISR_START\s*\+\s*offset,\s*u32::MAX\);",
+        "LoongArch EXTIOI disable-and-clear during init",
+    )
 
     return errors
 
@@ -376,9 +403,10 @@ def main(argv: list[str]) -> int:
         pci_consts = parse_consts(
             ROOT_DIR / "userspace" / "virtio-disk-server" / "src" / "device" / "pci.rs"
         )
-        irq_consts = parse_consts(ROOT_DIR / "kernel" / "src" / "machine" / "loongarch_irq.rs")
+        irq_rs = ROOT_DIR / "kernel" / "src" / "machine" / "loongarch_irq.rs"
+        irq_consts = parse_consts(irq_rs)
         errors = audit_loongarch64(
-            kernel_consts, platform_consts, pci_consts, irq_consts, regions, free_regions
+            kernel_consts, platform_consts, pci_consts, irq_consts, irq_rs, regions, free_regions
         )
     elif target.name == "riscv64":
         errors = audit_riscv64(kernel_consts, platform_consts, regions)

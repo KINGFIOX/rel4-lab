@@ -39,6 +39,11 @@ pub fn init() {
         }
     }
 
+    for group in 0..EXTIOI_GROUPS {
+        let offset = group * 4;
+        csr::iocsr_write32(EXTIOI_ENABLE_START + offset, 0);
+        csr::iocsr_write32(EXTIOI_COREISR_START + offset, u32::MAX);
+    }
     for index in 0..(EXTIOI_GROUPS / 4) {
         csr::iocsr_write32(EXTIOI_IPMAP_START + index * 4, EXTIOI_CPU_IP0_PER_BYTE);
     }
