@@ -261,6 +261,62 @@ def audit_loongarch_gpr_save_restore(errors: list[str], asm_path: Path) -> int:
     return len(direct_saves) + len(direct_restores) + len(scratch_moves) + 1
 
 
+def audit_loongarch_trap_control_flow(errors: list[str], asm_path: Path) -> int:
+    require_regex(
+        errors,
+        asm_path,
+        r"\btrap_entry:\s+"
+        r"csrwr\s+\$t0,\s+CSR_KS0\s+"
+        r"beqz\s+\$t0,\s+kernel_trap_panic",
+        "LoongArch trap entry obtains TrapScratch from KS0",
+    )
+    require_regex(
+        errors,
+        asm_path,
+        r"\bcsrrd\s+\$t1,\s+CSR_PRMD\s+"
+        r"andi\s+\$t1,\s+\$t1,\s+PRMD_PPLV_MASK\s+"
+        r"li\.w\s+\$t2,\s+PRMD_PPLV_USER\s+"
+        r"beq\s+\$t1,\s+\$t2,\s+1f\s+"
+        r"csrwr\s+\$t0,\s+CSR_KS0\s+"
+        r"b\s+kernel_trap_panic",
+        "LoongArch trap entry rejects non-user traps before user-context save",
+    )
+    require_regex(
+        errors,
+        asm_path,
+        r"\bld\.d\s+\$sp,\s+\$t0,\s+TRAP_SCRATCH_USER_CONTEXT\s+"
+        r"bnez\s+\$sp,\s+2f\s+"
+        r"csrwr\s+\$t0,\s+CSR_KS0\s+"
+        r"b\s+kernel_trap_panic",
+        "LoongArch trap entry rejects missing user-context pointer",
+    )
+    require_regex(
+        errors,
+        asm_path,
+        r"\bcsrrd\s+\$t1,\s+CSR_ERA\s+"
+        r"st\.d\s+\$t1,\s+\$sp,\s+USER_CONTEXT_PC\s+"
+        r"st\.d\s+\$t1,\s+\$sp,\s+USER_CONTEXT_RESTART_PC\s+"
+        r"csrrd\s+\$t1,\s+CSR_PRMD\s+"
+        r"st\.d\s+\$t1,\s+\$sp,\s+USER_CONTEXT_SSTATUS",
+        "LoongArch trap entry snapshots ERA and PRMD into UserContext",
+    )
+    require_regex(
+        errors,
+        asm_path,
+        r"\brestore_user_context:\s+"
+        r"move\s+\$t0,\s+\$a0\s+"
+        r"csrrd\s+\$t1,\s+CSR_KS0\s+"
+        r"beqz\s+\$t1,\s+kernel_trap_panic\s+"
+        r"st\.d\s+\$t0,\s+\$t1,\s+TRAP_SCRATCH_USER_CONTEXT\s+"
+        r"ld\.d\s+\$t1,\s+\$t0,\s+USER_CONTEXT_PC\s+"
+        r"csrwr\s+\$t1,\s+CSR_ERA\s+"
+        r"ld\.d\s+\$t1,\s+\$t0,\s+USER_CONTEXT_SSTATUS\s+"
+        r"csrwr\s+\$t1,\s+CSR_PRMD",
+        "LoongArch restore programs ERA and PRMD before GPR restore",
+    )
+    return 5
+
+
 def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     csr_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "csr.rs"
     irq_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "irq.rs"
@@ -411,6 +467,7 @@ def main(argv: list[str]) -> int:
     if target.name == "loongarch64":
         audit_loongarch_user_context(errors, asm_equ, rust_offsets)
         extra_checked += audit_loongarch_trap_abi(errors, asm_equ)
+        extra_checked += audit_loongarch_trap_control_flow(errors, asm_path)
         extra_checked += audit_loongarch_gpr_save_restore(errors, asm_path)
 
     if errors:
