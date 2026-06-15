@@ -248,13 +248,21 @@ def audit_loongarch64(errors: list[str]) -> None:
         "ASID pool deletion full TLB shootdown",
     )
     for name, value in (
+        ("CSR_CRMD", 0x000),
         ("CSR_ASID", 0x018),
         ("CSR_PGDL", 0x019),
+        ("CSR_PGDH", 0x01A),
+        ("CSR_PGD", 0x01B),
         ("CSR_PWCL", 0x01C),
         ("CSR_PWCH", 0x01D),
         ("CSR_STLBPS", 0x01E),
         ("CSR_DMW0", 0x180),
         ("CSR_DMW1", 0x181),
+        ("CSR_DMW2", 0x182),
+        ("CSR_DMW3", 0x183),
+        ("INVTLB_ALL", 0x00),
+        ("INVTLB_ASID", 0x04),
+        ("INVTLB_ADDR_G_OR_ASID", 0x06),
     ):
         expect(errors, f"loongarch64 {name}", csr.get(name), value)
 
@@ -269,6 +277,34 @@ def audit_loongarch64(errors: list[str]) -> None:
         csr_rs,
         r"pub\s+fn\s+ibar\(\)\s*\{\s*unsafe\s*\{\s*asm!\(\"ibar 0\",\s*options\(nostack\)\)\s*\};\s*\}",
         "LoongArch ibar compiler-visible instruction barrier",
+    )
+    require_regex(
+        errors,
+        csr_rs,
+        r"pub\s+fn\s+sfence_vma_all\(\)\s*\{.*?"
+        r"asm!\(\"invtlb \{op\}, \$zero, \$zero\",\s*op\s*=\s*const\s*INVTLB_ALL,.*?"
+        r"dbar\(\);",
+        "LoongArch full TLB flush uses INVTLB_ALL and barrier",
+    )
+    require_regex(
+        errors,
+        csr_rs,
+        r"pub\s+fn\s+sfence_vma_va\(vaddr:\s*usize\)\s*\{.*?"
+        r"let\s+asid\s*=\s*asid\(\)\s*&\s*ASID_MASK;.*?"
+        r"op\s*=\s*const\s*INVTLB_ADDR_G_OR_ASID,.*?"
+        r"asid\s*=\s*in\(reg\)\s*asid,.*?"
+        r"vaddr\s*=\s*in\(reg\)\s*vaddr,.*?"
+        r"dbar\(\);",
+        "LoongArch VA TLB flush uses current ASID and barrier",
+    )
+    require_regex(
+        errors,
+        csr_rs,
+        r"pub\s+fn\s+sfence_vma_asid\(asid:\s*usize\)\s*\{.*?"
+        r"op\s*=\s*const\s*INVTLB_ASID,.*?"
+        r"asid\s*=\s*in\(reg\)\s*asid\s*&\s*ASID_MASK,.*?"
+        r"dbar\(\);",
+        "LoongArch ASID TLB flush masks ASID and uses barrier",
     )
 
     expect(errors, "loongarch64 USER_ROOT_ENTRIES", vspace.get("USER_ROOT_ENTRIES"), 256)
