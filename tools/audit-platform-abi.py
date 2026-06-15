@@ -344,6 +344,15 @@ def audit_loongarch64(
         r"csr::iocsr_write32\(EXTIOI_COREISR_START\s*\+\s*offset,\s*u32::MAX\);",
         "LoongArch EXTIOI disable-and-clear during init",
     )
+    require_regex(
+        errors,
+        irq_rs,
+        r"pub\s+fn\s+enable_irq\(irq:\s*u64\)\s*\{.*?"
+        r"csr::iocsr_write32\(EXTIOI_COREISR_START\s*\+\s*group\s*\*\s*4,\s*mask\);.*?"
+        r"ptr::write_volatile\(pch_reg64\(PCH_PIC_INT_CLEAR\),\s*1u64\s*<<\s*irq\);.*?"
+        r"csr::iocsr_write32\(enable_addr,\s*csr::iocsr_read32\(enable_addr\)\s*\|\s*mask\);",
+        "LoongArch stale IRQ clear before enable",
+    )
 
     return errors
 

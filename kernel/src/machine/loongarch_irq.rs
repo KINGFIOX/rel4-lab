@@ -66,6 +66,12 @@ pub fn enable_irq(irq: u64) {
     let group = irq / EXTIOI_GROUP_BITS;
     let mask = 1u32 << (irq % EXTIOI_GROUP_BITS);
     let enable_addr = EXTIOI_ENABLE_START + group * 4;
+    csr::iocsr_write32(EXTIOI_COREISR_START + group * 4, mask);
+    if irq < PCH_PIC_IRQ_NUM {
+        unsafe {
+            ptr::write_volatile(pch_reg64(PCH_PIC_INT_CLEAR), 1u64 << irq);
+        }
+    }
     csr::iocsr_write32(enable_addr, csr::iocsr_read32(enable_addr) | mask);
 
     if irq < PCH_PIC_IRQ_NUM {
