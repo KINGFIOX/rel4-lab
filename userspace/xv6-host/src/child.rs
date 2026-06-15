@@ -11,6 +11,11 @@ use sel4_user::{
     call_checked, cap_rights, cnode_cap_data, msg_info, msg_label, read_ipc_mr, sel4_call,
 };
 
+#[cfg(target_arch = "loongarch64")]
+const EXPECTED_ELF_MACHINE: u16 = 258;
+#[cfg(target_arch = "riscv64")]
+const EXPECTED_ELF_MACHINE: u16 = 243;
+
 const EMPTY_MAPPING: Mapping = Mapping {
     pid: 0,
     child_page: 0,
@@ -383,6 +388,12 @@ pub(crate) fn load_payload(alloc: &mut Allocator, child: &mut TaskStruct) {
 
 pub(crate) fn elf_image_valid(elf: &[u8]) -> bool {
     if elf.len() < 64 || &elf[0..4] != b"\x7fELF" || elf[4] != 2 || elf[5] != 1 {
+        return false;
+    }
+    if u16::from_le_bytes([elf[16], elf[17]]) != 2 {
+        return false;
+    }
+    if u16::from_le_bytes([elf[18], elf[19]]) != EXPECTED_ELF_MACHINE {
         return false;
     }
     let phoff = read_u64(elf, 32) as usize;
