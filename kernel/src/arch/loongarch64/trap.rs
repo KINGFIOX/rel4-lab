@@ -220,6 +220,7 @@ const ESTAT_IS_IPI: usize = 1 << 12;
 const ECFG_LIE_TIMER: usize = 1 << 11;
 const TCFG_ENABLE: usize = 1 << 0;
 const TCFG_INITVAL_SHIFT: usize = 2;
+const TICLR_CLR_TIMER: usize = 1 << 0;
 const EXCCODE_INTERRUPT: usize = 0;
 const EXCCODE_PIL: usize = 1;
 const EXCCODE_PIS: usize = 2;
@@ -866,7 +867,7 @@ fn should_signal_synthetic_timer_irq(now: u64) -> bool {
 }
 
 fn clear_timer_interrupt() {
-    csr::set_ticlr(1);
+    csr::set_ticlr(TICLR_CLR_TIMER);
 }
 
 fn handle_timer_interrupt() {

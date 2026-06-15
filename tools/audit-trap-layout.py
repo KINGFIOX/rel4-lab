@@ -295,6 +295,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         "ECFG_LIE_TIMER",
         "TCFG_ENABLE",
         "TCFG_INITVAL_SHIFT",
+        "TICLR_CLR_TIMER",
         "EXCCODE_INTERRUPT",
         "EXCCODE_SYSCALL",
     }
@@ -321,11 +322,31 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         "ECFG_LIE_TIMER": 1 << 11,
         "TCFG_ENABLE": 1 << 0,
         "TCFG_INITVAL_SHIFT": 2,
+        "TICLR_CLR_TIMER": 1 << 0,
         "EXCCODE_INTERRUPT": 0,
         "EXCCODE_SYSCALL": 11,
     }
     for name, expected in expected_trap_values.items():
         require_equal(errors, name, trap_consts.get(name), expected)
+
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+clear_timer_interrupt\(\)\s*\{\s*csr::set_ticlr\(TICLR_CLR_TIMER\);\s*\}",
+        "named LoongArch timer-clear helper",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"pub\s+fn\s+init_timer\(\)\s*\{.*?csr::set_ecfg\(csr::ecfg\(\)\s*\|\s*ECFG_LIE_TIMER\)",
+        "LoongArch timer interrupt enable in init_timer",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+program_next_timer\(\)\s*\{.*?crate::kernel::smp::set_next_timer_deadline\(deadline\);.*?csr::set_tcfg\(\(initval\s*<<\s*TCFG_INITVAL_SHIFT\)\s*\|\s*TCFG_ENABLE\)",
+        "LoongArch timer reprogramming path",
+    )
 
     user_sstatus = require_present(errors, "trap", trap_consts, "USER_SSTATUS")
     rootserver_sstatus = require_present(errors, "trap", trap_consts, "ROOTSERVER_SSTATUS")
