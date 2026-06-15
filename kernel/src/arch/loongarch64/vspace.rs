@@ -460,6 +460,7 @@ pub unsafe fn switch_satp(satp_val: u64) {
     configure_page_walk();
     if current_satp() == satp_val {
         enable_paging();
+        csr::dbar();
         return;
     }
     csr::set_pgdl((satp_val & !0xfffu64) as usize);
