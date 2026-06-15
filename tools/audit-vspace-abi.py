@@ -103,6 +103,47 @@ def require_regex(errors: list[str], path: Path, pattern: str, description: str)
         errors.append(f"{path.relative_to(ROOT_DIR)} is missing {description}")
 
 
+def audit_kva_to_pa_helpers(
+    errors: list[str],
+    abi_consts: dict[str, int],
+    paths: tuple[Path, ...],
+    target_name: str,
+) -> None:
+    phys_base = abi_consts.get("PHYS_BASE_RAW")
+    kernel_elf_base = abi_consts.get("KERNEL_ELF_BASE")
+    paddr_base = abi_consts.get("PADDR_BASE")
+    pptr_base = abi_consts.get("PPTR_BASE")
+    if None in (phys_base, kernel_elf_base, paddr_base, pptr_base):
+        errors.append(f"{target_name} KVA/PA audit could not resolve direct-map constants")
+        return
+    if kernel_elf_base - phys_base != pptr_base - paddr_base:
+        errors.append(
+            f"{target_name} KERNEL_ELF_BASE-PHYS_BASE_RAW offset differs from "
+            "PPTR_BASE-PADDR_BASE; kva_to_pa branch order would be ambiguous"
+        )
+
+    for path in paths:
+        require_text(
+            errors,
+            path,
+            "kva - (KERNEL_ELF_BASE as u64) + (PHYS_BASE_RAW as u64)",
+            "kernel-ELF KVA to PA formula",
+        )
+        require_text(
+            errors,
+            path,
+            "kva - (PPTR_BASE as u64) + (PADDR_BASE as u64)",
+            "PSpace KVA to PA formula",
+        )
+        require_regex(
+            errors,
+            path,
+            r"fn\s+kva_to_pa\([^)]*\)\s*->\s*u64\s*\{.*?if\s+kva\s*>=\s*"
+            r"\(KERNEL_ELF_BASE\s+as\s+u64\)",
+            "kernel-ELF-first kva_to_pa helper",
+        )
+
+
 def audit_common_paging(errors: list[str], consts: dict[str, int], target_name: str) -> None:
     expect(errors, f"{target_name} PAGE_SHIFT", consts.get("PAGE_SHIFT"), 12)
     expect(errors, f"{target_name} PAGE_SIZE", consts.get("PAGE_SIZE"), 0x1000)
@@ -127,6 +168,8 @@ def audit_loongarch64(errors: list[str]) -> None:
     paging_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "paging.rs"
     csr_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "csr.rs"
     vspace_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "vspace.rs"
+    boot_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "boot.rs"
+    invocation_rs = ROOT_DIR / "kernel" / "src" / "api" / "invocation.rs"
     paging = parse_consts(paging_rs, abi_consts)
     csr = parse_consts(csr_rs)
     vspace = parse_consts(vspace_rs, {**abi_consts, **paging})
@@ -166,6 +209,16 @@ def audit_loongarch64(errors: list[str]) -> None:
 
     expect(errors, "loongarch64 USER_ROOT_ENTRIES", vspace.get("USER_ROOT_ENTRIES"), 256)
     expect(errors, "loongarch64 USER_TOP", vspace.get("USER_TOP"), 0x4000_0000_00)
+    expect(errors, "loongarch64 PHYS_BASE_RAW", abi_consts.get("PHYS_BASE_RAW"), 0x0020_0000)
+    expect(errors, "loongarch64 PADDR_BASE", abi_consts.get("PADDR_BASE"), 0)
+    expect(errors, "loongarch64 PPTR_BASE", abi_consts.get("PPTR_BASE"), 0)
+    expect(errors, "loongarch64 PPTR_TOP", abi_consts.get("PPTR_TOP"), 0x0000_0002_0000_0000)
+    expect(
+        errors,
+        "loongarch64 KERNEL_ELF_BASE",
+        abi_consts.get("KERNEL_ELF_BASE"),
+        0x0020_0000,
+    )
     expect(errors, "loongarch64 PAGE_WALK_DIR1_BASE", vspace.get("PAGE_WALK_DIR1_BASE"), 21)
     expect(errors, "loongarch64 PAGE_WALK_DIR2_BASE", vspace.get("PAGE_WALK_DIR2_BASE"), 30)
     expect(
@@ -214,6 +267,7 @@ def audit_loongarch64(errors: list[str]) -> None:
         r"fn\s+copy_kernel_mappings_to\([^)]*\)\s*\{[^}]*LoongArch keeps kernel access",
         "no-op kernel mapping copy rationale",
     )
+    audit_kva_to_pa_helpers(errors, abi_consts, (boot_rs, invocation_rs), "loongarch64")
 
     # Ensure the parsed symbol graph includes all imported constants used above.
     for name in ("PT_INDEX_BITS", "PADDR_BASE", "PPTR_BASE", "PPTR_TOP", "KERNEL_ELF_BASE"):
