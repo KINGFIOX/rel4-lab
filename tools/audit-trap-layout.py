@@ -320,6 +320,7 @@ def audit_loongarch_trap_control_flow(errors: list[str], asm_path: Path) -> int:
 
 
 def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
+    fault_rs = ROOT_DIR / "kernel" / "src" / "abi" / "fault.rs"
     csr_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "csr.rs"
     irq_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "irq.rs"
     trap_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "trap.rs"
@@ -525,6 +526,47 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         r"EXCCODE_ADE\s+if\s+subcode\s*==\s*EXSUBCODE_ADEF\s*=>\s*Some\(\(true,\s*VM_FAULT_FSR_INSTRUCTION\)\)",
         "LoongArch exception-code to VMFault FSR mapping",
     )
+    require_regex(
+        errors,
+        fault_rs,
+        r"pub\s+enum\s+FaultLabel\s*\{.*?"
+        r"CapFault\s*=\s*1,.*?"
+        r"UnknownSyscall\s*=\s*2,.*?"
+        r"UserException\s*=\s*3,.*?"
+        r"Timeout\s*=\s*5,.*?"
+        r"VmFault\s*=\s*6,",
+        "seL4 fault-label numeric ABI",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"pub\s+fn\s+send_cap_fault_ipc\(uc:\s*&mut\s+UserContext,\s*addr:\s*u64,\s*in_recv_phase:\s*bool\)\s*->\s*bool\s*\{.*?"
+        r"mrs\[0\]\s*=\s*uc\.restart_pc;.*?"
+        r"mrs\[1\]\s*=\s*addr;.*?"
+        r"mrs\[2\]\s*=\s*in_recv_phase\s+as\s+u64;.*?"
+        r"mrs\[3\]\s*=\s*1;.*?"
+        r"mrs\[4\]\s*=\s*0;.*?"
+        r"send_synthetic_fault_ipc\(FaultLabel::CapFault\.raw\(\),\s*5,\s*mrs\)",
+        "LoongArch CapFault IPC message shape",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+send_unknown_syscall_fault\(uc:\s*&mut\s+UserContext,\s*sysno:\s*isize\)\s*->\s*bool\s*\{.*?"
+        r"mrs\[0\]\s*=\s*uc\.restart_pc;.*?"
+        r"mrs\[1\]\s*=\s*uc\.regs\[UserRegister::Sp\.index\(\)\];.*?"
+        r"mrs\[2\]\s*=\s*uc\.regs\[UserRegister::Ra\.index\(\)\];.*?"
+        r"mrs\[3\]\s*=\s*uc\.regs\[UserRegister::A0\.index\(\)\];.*?"
+        r"mrs\[4\]\s*=\s*uc\.regs\[UserRegister::A1\.index\(\)\];.*?"
+        r"mrs\[5\]\s*=\s*uc\.regs\[UserRegister::A2\.index\(\)\];.*?"
+        r"mrs\[6\]\s*=\s*uc\.regs\[UserRegister::A3\.index\(\)\];.*?"
+        r"mrs\[7\]\s*=\s*uc\.regs\[UserRegister::A4\.index\(\)\];.*?"
+        r"mrs\[8\]\s*=\s*uc\.regs\[UserRegister::A5\.index\(\)\];.*?"
+        r"mrs\[9\]\s*=\s*uc\.regs\[UserRegister::A6\.index\(\)\];.*?"
+        r"mrs\[10\]\s*=\s*sysno\s+as\s+u64;.*?"
+        r"send_synthetic_fault_ipc\(FaultLabel::UnknownSyscall\.raw\(\),\s*11,\s*mrs\)",
+        "LoongArch UnknownSyscall IPC message shape",
+    )
 
     user_sstatus = require_present(errors, "trap", trap_consts, "USER_SSTATUS")
     rootserver_sstatus = require_present(errors, "trap", trap_consts, "ROOTSERVER_SSTATUS")
@@ -560,7 +602,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         irq_consts.get("MAX_IRQ"),
     )
     require_equal(errors, "MAX_IRQ", irq_consts.get("MAX_IRQ"), 256)
-    return len(csr_names) + 2 + len(expected_trap_values) + 8
+    return len(csr_names) + 2 + len(expected_trap_values) + 11
 
 
 def main(argv: list[str]) -> int:
