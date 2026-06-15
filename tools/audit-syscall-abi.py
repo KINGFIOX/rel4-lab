@@ -182,8 +182,94 @@ def audit_kernel_trap(errors: list[str], target_name: str) -> None:
     require_regex(
         errors,
         path,
-        r"SyscallNumber::from_raw\(raw_sysno\).*None\s*=>",
-        "unknown-syscall fallback",
+        r"Some\(SyscallNumber::DebugPutChar\)\s*=>\s*\{\s*"
+        r"let\s+ch\s*=\s*uc\.regs\[UserRegister::A0\.index\(\)\]\s+as\s+u8;\s*"
+        r"crate::machine::console::putc\(ch\);",
+        "DebugPutChar syscall handler",
+    )
+    require_regex(
+        errors,
+        path,
+        r"Some\(SyscallNumber::DebugCapIdentify\)\s*=>\s*\{.*?"
+        r"let\s+cptr\s*=\s*uc\.regs\[UserRegister::A0\.index\(\)\];.*?"
+        r"crate::api::cspace::lookup_cap\(thread,\s*cptr\).*?"
+        r"uc\.regs\[UserRegister::A0\.index\(\)\]\s*=\s*tag;",
+        "DebugCapIdentify syscall handler",
+    )
+    require_regex(
+        errors,
+        path,
+        r"Some\(SyscallNumber::Yield\)\s*=>\s*unsafe\s*\{\s*"
+        r"let\s+cur\s*=\s*crate::object::tcb::current\(\);\s*"
+        r"if\s+!cur\.is_null\(\)\s*\{\s*"
+        r"crate::object::tcb::rotate_to_tail\(cur\);\s*\}\s*\}",
+        "Yield syscall handler",
+    )
+    require_regex(
+        errors,
+        path,
+        r"Some\(SyscallNumber::Call\)\s*=>\s*\{\s*crate::api::syscall::do_call\(uc\);\s*\}",
+        "Call syscall handler",
+    )
+    require_regex(
+        errors,
+        path,
+        r"Some\(SyscallNumber::Send\)\s*=>\s*\{\s*crate::api::syscall::do_send\(uc,\s*false\);\s*\}",
+        "Send syscall handler",
+    )
+    require_regex(
+        errors,
+        path,
+        r"Some\(SyscallNumber::NonBlockingSend\)\s*=>\s*\{\s*crate::api::syscall::do_send\(uc,\s*true\);\s*\}",
+        "NonBlockingSend syscall handler",
+    )
+    require_regex(
+        errors,
+        path,
+        r"Some\(SyscallNumber::Recv\s*\|\s*SyscallNumber::NonBlockingRecv\)\s*=>\s*\{\s*"
+        r"let\s+blocking\s*=\s*SyscallNumber::from_raw\(raw_sysno\)\s*==\s*Some\(SyscallNumber::Recv\);\s*"
+        r"crate::api::syscall::do_recv_mcs\(uc,\s*blocking,\s*true\);\s*\}",
+        "Recv and NonBlockingRecv syscall handler",
+    )
+    require_regex(
+        errors,
+        path,
+        r"Some\(SyscallNumber::Wait\s*\|\s*SyscallNumber::NonBlockingWait\)\s*=>\s*\{\s*"
+        r"let\s+blocking\s*=\s*SyscallNumber::from_raw\(raw_sysno\)\s*==\s*Some\(SyscallNumber::Wait\);\s*"
+        r"crate::api::syscall::do_recv_mcs\(uc,\s*blocking,\s*false\);\s*\}",
+        "Wait and NonBlockingWait syscall handler",
+    )
+    require_regex(
+        errors,
+        path,
+        r"Some\(SyscallNumber::ReplyRecv\)\s*=>\s*\{\s*crate::api::syscall::do_reply_recv_mcs\(uc\);\s*\}",
+        "ReplyRecv syscall handler",
+    )
+    require_regex(
+        errors,
+        path,
+        r"Some\(SyscallNumber::NonBlockingSendRecv\)\s*=>\s*\{\s*crate::api::syscall::do_nbsend_recv_mcs\(uc,\s*false\);\s*\}",
+        "NonBlockingSendRecv syscall handler",
+    )
+    require_regex(
+        errors,
+        path,
+        r"Some\(SyscallNumber::NonBlockingSendWait\)\s*=>\s*\{\s*crate::api::syscall::do_nbsend_recv_mcs\(uc,\s*true\);\s*\}",
+        "NonBlockingSendWait syscall handler",
+    )
+    require_regex(
+        errors,
+        path,
+        r"None\s*=>\s*\{\s*if\s*!send_unknown_syscall_fault\(uc,\s*raw_sysno\)\s*\{\s*"
+        r"warn!\(.*?unknown\s+(?:loongarch64\s+)?syscall number.*?\);\s*"
+        r"park_current_thread\(\);\s*\}\s*\}",
+        "unknown syscall fallback",
+    )
+    require_regex(
+        errors,
+        path,
+        r"uc\.pc\s*=\s*uc\.pc\.wrapping_add\(4\);",
+        "4-byte syscall PC advance",
     )
 
 
