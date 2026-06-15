@@ -378,7 +378,13 @@ pub fn wake_current_core_of_tcb(tcb: *const Tcb) {
 
 pub fn remote_tcb_stall(tcb: *const Tcb) {
     debug_assert_kernel_lock_held();
-    let _ = tcb;
+    let Some(core) = current_core_of_tcb(tcb) else {
+        return;
+    };
+    if core == current_core_id() {
+        return;
+    }
+    remote_core_op(core, REMOTE_OP_STALL_TCB, tcb as usize);
 }
 
 pub fn remote_fpu_owner_release(core: usize, tcb: *const Tcb) {
