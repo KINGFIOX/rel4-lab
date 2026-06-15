@@ -31,6 +31,8 @@ TRAP_SCRATCH_FIELDS = {
     "saved_user_sp": "TRAP_SCRATCH_SAVED_USER_SP",
     "saved_user_t1": "TRAP_SCRATCH_SAVED_USER_T1",
     "saved_user_t2": "TRAP_SCRATCH_SAVED_USER_T2",
+    "core_id": "TRAP_SCRATCH_CORE_ID",
+    "hart_id": "TRAP_SCRATCH_HART_ID",
 }
 
 LOONGARCH_USER_CONTEXT_FIELDS = {
