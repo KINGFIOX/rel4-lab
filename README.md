@@ -168,6 +168,16 @@ cargo build --release --target riscv64gc-unknown-none-elf -p kernel
 cargo build --release --target loongarch64-unknown-none -p kernel
 ```
 
+Check whether a LoongArch64-capable sel4tests tree is available:
+
+```sh
+./tools/check-loongarch-sel4tests.py
+SEL4_TREE_DIR=/path/to/loongarch64-sel4test \
+  SEL4_BUILD_DIR=/path/to/loongarch64-sel4test/build-loongarch64 \
+  ARCH=loongarch64 ./tools/pack-image.py
+ARCH=loongarch64 ./tools/run-tests.py
+```
+
 Current smoke path:
 
 ```sh

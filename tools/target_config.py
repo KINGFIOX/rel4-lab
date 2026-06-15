@@ -11,6 +11,62 @@ from tool_common import ROOT_DIR, command_exists, die
 
 
 @dataclass(frozen=True)
+class Sel4ArchSourceStatus:
+    tree_dir: Path
+    kernel_arch_dirs: tuple[Path, ...]
+    libsel4_dir: Path
+    elfloader_src_dirs: tuple[Path, ...]
+    elfloader_include_dirs: tuple[Path, ...]
+
+    @staticmethod
+    def _has_any(paths: tuple[Path, ...]) -> bool:
+        return any(path.is_dir() for path in paths)
+
+    @property
+    def has_kernel_arch(self) -> bool:
+        return self._has_any(self.kernel_arch_dirs)
+
+    @property
+    def has_libsel4_arch(self) -> bool:
+        return self.libsel4_dir.is_dir()
+
+    @property
+    def has_elfloader_src(self) -> bool:
+        return self._has_any(self.elfloader_src_dirs)
+
+    @property
+    def has_elfloader_include(self) -> bool:
+        return self._has_any(self.elfloader_include_dirs)
+
+    @property
+    def is_ready(self) -> bool:
+        return (
+            self.has_kernel_arch
+            and self.has_libsel4_arch
+            and self.has_elfloader_src
+            and self.has_elfloader_include
+        )
+
+    def _relative(self, path: Path) -> str:
+        return str(path.relative_to(self.tree_dir))
+
+    def _relative_any(self, paths: tuple[Path, ...]) -> str:
+        return " or ".join(self._relative(path) for path in paths)
+
+    def missing_descriptions(self) -> list[str]:
+        missing: list[str] = []
+        if not self.has_kernel_arch:
+            missing.append(self._relative_any(self.kernel_arch_dirs))
+        if not self.has_libsel4_arch:
+            missing.append(self._relative(self.libsel4_dir))
+        if not self.has_elfloader_src:
+            missing.append(self._relative_any(self.elfloader_src_dirs))
+        if not self.has_elfloader_include:
+            missing.append(self._relative_any(self.elfloader_include_dirs))
+        return missing
+
+
+@dataclass(frozen=True)
 class TargetConfig:
     name: str
     rust_target: str
@@ -78,12 +134,12 @@ class TargetConfig:
         if not command_exists(self.qemu):
             die(prefix, f"{self.qemu} not on PATH; activate the flake dev shell")
 
-    def require_sel4_arch_source(self, prefix: str, sel4_tree_dir: Path) -> None:
+    def sel4_arch_source_status(self, sel4_tree_dir: Path) -> Sel4ArchSourceStatus:
         arch_candidates = tuple(dict.fromkeys((self.sel4_source_arch, self.sel4_arch)))
-        arch_dirs = [
+        arch_dirs = tuple(
             sel4_tree_dir / "kernel" / "src" / "arch" / arch
             for arch in arch_candidates
-        ]
+        )
         libsel4_dir = (
             sel4_tree_dir
             / "kernel"
@@ -91,11 +147,11 @@ class TargetConfig:
             / "sel4_arch_include"
             / self.sel4_arch
         )
-        elfloader_src_dirs = [
+        elfloader_src_dirs = tuple(
             sel4_tree_dir / "tools" / "seL4" / "elfloader-tool" / "src" / f"arch-{arch}"
             for arch in arch_candidates
-        ]
-        elfloader_include_dirs = [
+        )
+        elfloader_include_dirs = tuple(
             sel4_tree_dir
             / "tools"
             / "seL4"
@@ -103,28 +159,20 @@ class TargetConfig:
             / "include"
             / f"arch-{arch}"
             for arch in arch_candidates
-        ]
+        )
+        return Sel4ArchSourceStatus(
+            tree_dir=sel4_tree_dir,
+            kernel_arch_dirs=arch_dirs,
+            libsel4_dir=libsel4_dir,
+            elfloader_src_dirs=elfloader_src_dirs,
+            elfloader_include_dirs=elfloader_include_dirs,
+        )
 
-        has_kernel_arch = any(arch_dir.is_dir() for arch_dir in arch_dirs)
-        has_libsel4_arch = libsel4_dir.is_dir()
-        has_elfloader_src = any(arch_dir.is_dir() for arch_dir in elfloader_src_dirs)
-        has_elfloader_include = any(arch_dir.is_dir() for arch_dir in elfloader_include_dirs)
-        if has_kernel_arch and has_libsel4_arch and has_elfloader_src and has_elfloader_include:
+    def require_sel4_arch_source(self, prefix: str, sel4_tree_dir: Path) -> None:
+        status = self.sel4_arch_source_status(sel4_tree_dir)
+        if status.is_ready:
             return
 
-        missing: list[str] = []
-        if not has_kernel_arch:
-            missing.append(" or ".join(str(path.relative_to(sel4_tree_dir)) for path in arch_dirs))
-        if not has_libsel4_arch:
-            missing.append(str(libsel4_dir.relative_to(sel4_tree_dir)))
-        if not has_elfloader_src:
-            missing.append(
-                " or ".join(str(path.relative_to(sel4_tree_dir)) for path in elfloader_src_dirs)
-            )
-        if not has_elfloader_include:
-            missing.append(
-                " or ".join(str(path.relative_to(sel4_tree_dir)) for path in elfloader_include_dirs)
-            )
         port_hint = (
             "Add a LoongArch seL4/libsel4/elfloader port"
             if self.name == "loongarch64"
@@ -134,7 +182,7 @@ class TargetConfig:
             prefix,
             (
                 f"official sel4test for ARCH={self.name} is not available in {sel4_tree_dir}; "
-                f"missing {', '.join(missing)}. {port_hint} "
+                f"missing {', '.join(status.missing_descriptions())}. {port_hint} "
                 "or set SEL4_TREE_DIR to one before packing."
             ),
         )
