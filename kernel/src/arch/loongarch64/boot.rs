@@ -37,6 +37,13 @@ pub unsafe extern "C" fn _start() -> ! {
         // installs the real per-hart TrapScratch pointer.
         "csrwr    $zero, 0x030",
 
+        // Disable FPU access before any hart enters Rust or parks. The
+        // LoongArch staging backend does not preserve user FPU state.
+        "csrrd    $t0, 0x002",
+        "li.d     $t1, -2",
+        "and      $t0, $t0, $t1",
+        "csrwr    $t0, 0x002",
+
         // Only core 0 may clear .bss and bring up shared kernel state.
         "bnez     $a7, 4f",
 

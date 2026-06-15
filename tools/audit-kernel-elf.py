@@ -308,6 +308,16 @@ def validate_arch_boot_source(arch: str) -> list[str]:
             errors,
             path,
             text,
+            r'"csrrd\s+\$t0,\s+0x002".*?'
+            r'"li\.d\s+\$t1,\s+-2".*?'
+            r'"and\s+\$t0,\s+\$t0,\s+\$t1".*?'
+            r'"csrwr\s+\$t0,\s+0x002"',
+            "LoongArch early FPU disable before Rust entry",
+        )
+        require_source_regex(
+            errors,
+            path,
+            text,
             r'"ld\.d\s+\$t1,\s+\$t0,\s+0".*?'
             r'"bne\s+\$t1,\s+\$t2,\s+5b".*?'
             r'"dbar\s+0"',
