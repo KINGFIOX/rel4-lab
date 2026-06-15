@@ -303,6 +303,15 @@ def audit_loongarch64(errors: list[str]) -> None:
         r"return;",
         "LoongArch same-root paging enable barrier",
     )
+    require_regex(
+        errors,
+        vspace_rs,
+        r"csr::set_pgdl\(\(satp_val\s*&\s*!0xfffu64\)\s*as\s*usize\);\s*"
+        r"csr::set_asid\(\(satp_val\s*&\s*csr::ASID_MASK\s*as\s*u64\)\s*as\s*usize\);\s*"
+        r"csr::dbar\(\);\s*"
+        r"enable_paging\(\);",
+        "LoongArch PGDL/ASID switch barrier before paging enable",
+    )
     require_text(errors, vspace_rs, "csr::set_stlbps(PAGE_SHIFT)", "STLB page-size setup")
     require_text(errors, vspace_rs, "csr::set_dmw0(DMW_LOW_DIRECT)", "low direct-map setup")
     require_text(errors, vspace_rs, "csr::set_dmw1(DMW_MMIO_DIRECT)", "MMIO direct-map setup")

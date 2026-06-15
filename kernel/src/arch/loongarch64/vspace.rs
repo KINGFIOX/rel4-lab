@@ -465,6 +465,7 @@ pub unsafe fn switch_satp(satp_val: u64) {
     }
     csr::set_pgdl((satp_val & !0xfffu64) as usize);
     csr::set_asid((satp_val & csr::ASID_MASK as u64) as usize);
+    csr::dbar();
     enable_paging();
     csr::sfence_vma_all();
     csr::fence_i();
