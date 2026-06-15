@@ -157,6 +157,19 @@ def audit_loongarch64(errors: list[str]) -> None:
     require_regex(
         errors,
         smp_rs,
+        r"fn\s+remote_core_op\(core:\s*usize,\s*op:\s*usize,\s*target_value:\s*usize\)\s*\{.*?"
+        r"REMOTE_STALL_TARGET_VALUE\.store\(target_value,\s*Ordering::Release\);"
+        r"\s*REMOTE_STALL_OP\.store\(op,\s*Ordering::Release\);"
+        r"\s*REMOTE_STALL_DONE_MASK\.store\(0,\s*Ordering::Release\);"
+        r"\s*REMOTE_STALL_PENDING_MASK\.store\(bit,\s*Ordering::Release\);"
+        r"\s*#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
+        r"crate::arch::current::csr::dbar\(\);"
+        r"\s*wake_core\(core\);",
+        "LoongArch remote op publish barrier before IPI",
+    )
+    require_regex(
+        errors,
+        smp_rs,
         r"REMOTE_OP_FLUSH_VMA_ALL\s*=>\s*\{\s*"
         r"crate::arch::current::csr::sfence_vma_all\(\);",
         "remote full TLB flush service",

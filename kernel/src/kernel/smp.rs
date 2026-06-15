@@ -410,6 +410,8 @@ fn remote_core_op(core: usize, op: usize, target_value: usize) {
     REMOTE_STALL_OP.store(op, Ordering::Release);
     REMOTE_STALL_DONE_MASK.store(0, Ordering::Release);
     REMOTE_STALL_PENDING_MASK.store(bit, Ordering::Release);
+    #[cfg(target_arch = "loongarch64")]
+    crate::arch::current::csr::dbar();
     wake_core(core);
 
     while REMOTE_STALL_DONE_MASK.load(Ordering::Acquire) & bit == 0 {
