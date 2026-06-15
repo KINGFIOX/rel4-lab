@@ -388,8 +388,9 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     require_regex(
         errors,
         trap_rs,
-        r"fn\s+clear_timer_interrupt\(\)\s*\{\s*csr::set_ticlr\(TICLR_CLR_TIMER\);\s*\}",
-        "named LoongArch timer-clear helper",
+        r"fn\s+clear_timer_interrupt\(\)\s*\{\s*csr::set_ticlr\(TICLR_CLR_TIMER\);"
+        r"\s*csr::dbar\(\);\s*\}",
+        "named LoongArch timer-clear helper with barrier",
     )
     require_regex(
         errors,

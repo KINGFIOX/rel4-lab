@@ -871,6 +871,7 @@ fn should_signal_synthetic_timer_irq(now: u64) -> bool {
 
 fn clear_timer_interrupt() {
     csr::set_ticlr(TICLR_CLR_TIMER);
+    csr::dbar();
 }
 
 fn handle_timer_interrupt() {
