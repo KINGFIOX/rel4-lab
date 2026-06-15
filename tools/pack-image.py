@@ -254,6 +254,12 @@ def audit_rust_kernel(target, rust_target: str, rust_kernel_elf: Path, env: dict
         cwd=ROOT_DIR,
         env=audit_env,
     )
+    log(PREFIX, "auditing syscall ABI constants...")
+    run(
+        [sys.executable, "tools/audit-syscall-abi.py"],
+        cwd=ROOT_DIR,
+        env=audit_env,
+    )
     log(PREFIX, "auditing platform ABI constants...")
     run(
         [sys.executable, "tools/audit-platform-abi.py"],
