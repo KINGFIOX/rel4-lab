@@ -22,6 +22,7 @@ from tool_common import (
     remove_files,
     require_dir,
     require_file,
+    require_target_executable_elf,
     run,
     touch,
 )
@@ -362,12 +363,13 @@ def main() -> int:
         )
         require_file(PREFIX, rust_kernel_elf, f"Rust kernel ELF missing: {rust_kernel_elf}")
         audit_rust_kernel(target, rust_target, rust_kernel_elf, cargo_env)
+        if rootserver_elf is not None:
+            require_file(PREFIX, rootserver_elf, f"ROOTSERVER_ELF not found: {rootserver_elf}")
+            require_target_executable_elf(PREFIX, target, rootserver_elf, "rootserver ELF")
 
         ensure_sel4_arch_available(sel4_build_dir, target)
         require_dir(PREFIX, sel4_build_dir, f"SEL4_BUILD_DIR not found: {sel4_build_dir}")
         ensure_sel4_configured(sel4_build_dir, target)
-        if rootserver_elf is not None:
-            require_file(PREFIX, rootserver_elf, f"ROOTSERVER_ELF not found: {rootserver_elf}")
 
         if rootserver_elf is None:
             remove_files([sel4_build_dir / "elfloader" / "rootserver"])
