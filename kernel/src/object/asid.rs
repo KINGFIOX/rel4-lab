@@ -204,6 +204,7 @@ pub fn delete_pool(base: u16, pool_kva: u64) {
         true
     });
     if deleted {
+        crate::kernel::smp::sfence_vma_all_harts();
         crate::arch::current::vspace::set_current_vspace_root();
     }
 }

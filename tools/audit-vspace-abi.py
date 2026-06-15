@@ -216,6 +216,13 @@ def audit_loongarch64(errors: list[str]) -> None:
         "const ASID_POOL_COUNT: usize = ASID_TABLE_LEN / ASID_POOL_ENTRY_COUNT;",
         "ASID pool count derived from architecture ASID width",
     )
+    require_regex(
+        errors,
+        asid_rs,
+        r"pub\s+fn\s+delete_pool\([^)]*\)\s*\{.*?if\s+deleted\s*\{\s*"
+        r"crate::kernel::smp::sfence_vma_all_harts\(\);",
+        "ASID pool deletion full TLB shootdown",
+    )
     for name, value in (
         ("CSR_ASID", 0x018),
         ("CSR_PGDL", 0x019),
