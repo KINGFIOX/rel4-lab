@@ -355,7 +355,20 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         "TCFG_INITVAL_SHIFT",
         "TICLR_CLR_TIMER",
         "EXCCODE_INTERRUPT",
+        "EXCCODE_PIL",
+        "EXCCODE_PIS",
+        "EXCCODE_PIF",
+        "EXCCODE_PME",
+        "EXCCODE_PNR",
+        "EXCCODE_PNX",
+        "EXCCODE_PPI",
+        "EXCCODE_ADE",
         "EXCCODE_SYSCALL",
+        "EXSUBCODE_ADEF",
+        "FAULT_MR_REG_COUNT",
+        "VM_FAULT_FSR_INSTRUCTION",
+        "VM_FAULT_FSR_LOAD",
+        "VM_FAULT_FSR_STORE",
     }
     csr_consts = parse_rust_consts(csr_rs, csr_names)
     irq_consts = parse_rust_consts(irq_rs, irq_names)
@@ -382,7 +395,20 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         "TCFG_INITVAL_SHIFT": 2,
         "TICLR_CLR_TIMER": 1 << 0,
         "EXCCODE_INTERRUPT": 0,
+        "EXCCODE_PIL": 1,
+        "EXCCODE_PIS": 2,
+        "EXCCODE_PIF": 3,
+        "EXCCODE_PME": 4,
+        "EXCCODE_PNR": 5,
+        "EXCCODE_PNX": 6,
+        "EXCCODE_PPI": 7,
+        "EXCCODE_ADE": 8,
         "EXCCODE_SYSCALL": 11,
+        "EXSUBCODE_ADEF": 0,
+        "FAULT_MR_REG_COUNT": 4,
+        "VM_FAULT_FSR_INSTRUCTION": 1,
+        "VM_FAULT_FSR_LOAD": 5,
+        "VM_FAULT_FSR_STORE": 7,
     }
     for name, expected in expected_trap_values.items():
         require_equal(errors, name, trap_consts.get(name), expected)
@@ -477,6 +503,27 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         r"if\s+!delivered\s*\{\s*super::irq::complete_external_irq\(irq\);\s*\}\s*"
         r"true\s*\}",
         "LoongArch external IRQ service completes undelivered interrupts",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+fault_message\([^)]*\)\s*->\s*\(u64,\s*u64,\s*\[u64;\s*16\]\)\s*\{.*?"
+        r"mrs\[0\]\s*=\s*uc\.pc;.*?"
+        r"mrs\[1\]\s*=\s*badv;.*?"
+        r"mrs\[2\]\s*=\s*instruction_fault\s+as\s+u64;.*?"
+        r"mrs\[3\]\s*=\s*fsr;.*?"
+        r"FaultLabel::VmFault\.raw\(\),\s*4,\s*mrs",
+        "LoongArch VMFault IPC message shape",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+vm_fault_fsr\(code:\s*usize,\s*subcode:\s*usize\)\s*->\s*Option<\(bool,\s*u64\)>\s*\{.*?"
+        r"EXCCODE_PIF\s*\|\s*EXCCODE_PNX\s*=>\s*Some\(\(true,\s*VM_FAULT_FSR_INSTRUCTION\)\).*?"
+        r"EXCCODE_PIS\s*\|\s*EXCCODE_PME\s*=>\s*Some\(\(false,\s*VM_FAULT_FSR_STORE\)\).*?"
+        r"EXCCODE_PIL\s*\|\s*EXCCODE_PNR\s*=>\s*Some\(\(false,\s*VM_FAULT_FSR_LOAD\)\).*?"
+        r"EXCCODE_ADE\s+if\s+subcode\s*==\s*EXSUBCODE_ADEF\s*=>\s*Some\(\(true,\s*VM_FAULT_FSR_INSTRUCTION\)\)",
+        "LoongArch exception-code to VMFault FSR mapping",
     )
 
     user_sstatus = require_present(errors, "trap", trap_consts, "USER_SSTATUS")
