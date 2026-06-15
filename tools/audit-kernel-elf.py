@@ -301,6 +301,31 @@ def validate_arch_boot_source(arch: str) -> list[str]:
             errors,
             path,
             text,
+            r'"la\.local\s+\$t0,\s+__stack_top".*?'
+            r'"li\.d\s+\$t1,\s+\{kernel_stack_bytes\}".*?'
+            r'"mul\.d\s+\$t1,\s+\$a7,\s+\$t1".*?'
+            r'"sub\.d\s+\$sp,\s+\$t0,\s+\$t1".*?'
+            r"kernel_stack_bytes\s*=\s*const\s+crate::kernel::smp::KERNEL_STACK_BYTES",
+            "LoongArch per-core boot stack selected from handoff core_id",
+        )
+        require_source_regex(
+            errors,
+            path,
+            text,
+            r'"bnez\s+\$a7,\s+4f".*?'
+            r'"la\.local\s+\$t0,\s+__bss_start".*?'
+            r'"la\.local\s+\$t1,\s+__bss_end".*?'
+            r'"st\.d\s+\$zero,\s+\$t0,\s+0".*?'
+            r'"addi\.d\s+\$t0,\s+\$t0,\s+8".*?'
+            r'"la\.local\s+\$t0,\s+__stack_top".*?'
+            r'"move\s+\$sp,\s+\$t0".*?'
+            r'"bl\s+\{init_kernel\}"',
+            "LoongArch boot hart clears BSS before init_kernel handoff",
+        )
+        require_source_regex(
+            errors,
+            path,
+            text,
             r'"csrwr\s+\$zero,\s+\{csr_ks0\}".*?'
             r"csr_ks0\s*=\s*const\s+crate::arch::loongarch64::csr::CSR_KS0",
             "LoongArch KS0 scratch clear before Rust entry using CSR constant",
