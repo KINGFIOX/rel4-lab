@@ -281,12 +281,13 @@ def validate_loongarch_fpu_source() -> None:
     require_source_regex(
         errors,
         boot_rs,
-        r'"csrrd\s+\$t0,\s+0x002".*?'
+        r'"csrrd\s+\$t0,\s+\{csr_euen\}".*?'
         r'"li\.d\s+\$t1,\s+-8".*?'
         r'"and\s+\$t0,\s+\$t0,\s+\$t1".*?'
-        r'"csrwr\s+\$t0,\s+0x002".*?'
-        r'"dbar\s+0"',
-        "early EUEN FPU/LSX/LASX clear barrier before Rust entry",
+        r'"csrwr\s+\$t0,\s+\{csr_euen\}".*?'
+        r'"dbar\s+0".*?'
+        r"csr_euen\s*=\s*const\s+crate::arch::loongarch64::csr::CSR_EUEN",
+        "early EUEN FPU/LSX/LASX clear barrier before Rust entry using CSR constant",
     )
 
     if errors:
