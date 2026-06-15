@@ -124,8 +124,13 @@ def require_regex(errors: list[str], path: Path, pattern: str, description: str)
         errors.append(f"{path.relative_to(ROOT_DIR)} is missing {description}")
 
 
-def audit_trap_scratch(errors: list[str], asm_equ: dict[str, int], rust_offsets) -> None:
-    for field, equ_name in TRAP_SCRATCH_FIELDS.items():
+def audit_trap_scratch(
+    errors: list[str], asm_equ: dict[str, int], rust_offsets, target_name: str
+) -> None:
+    fields = TRAP_SCRATCH_FIELDS
+    if target_name != "loongarch64":
+        fields = {k: v for k, v in fields.items() if k not in {"core_id", "hart_id"}}
+    for field, equ_name in fields.items():
         require_equal(
             errors,
             equ_name,
@@ -324,6 +329,9 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     csr_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "csr.rs"
     irq_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "irq.rs"
     trap_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "trap.rs"
+    sel4_user_arch_rs = (
+        ROOT_DIR / "userspace" / "sel4-user" / "src" / "arch" / "loongarch64.rs"
+    )
 
     csr_names = {
         "CSR_PRMD",
@@ -508,6 +516,30 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     require_regex(
         errors,
         trap_rs,
+        r"fn\s+should_signal_synthetic_timer_irq\(now:\s*u64\)\s*->\s*bool\s*\{.*?"
+        r"if\s+crate::kernel::smp::current_core_id\(\)\s*!=\s*0\s*\{\s*return\s+false;.*?"
+        r"NEXT_SYNTHETIC_TIMER_IRQ_DEADLINE\.store\(next,\s*Ordering::Release\);\s*"
+        r"true\s*\}",
+        "LoongArch synthetic timer IRQ fires only from core 0 with release deadline update",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+handle_timer_interrupt\(\)\s*\{.*?"
+        r"clear_timer_interrupt\(\);.*?"
+        r"if\s+should_signal_synthetic_timer_irq\(now\)\s*\{\s*"
+        r"crate::object::irq::signal_irq\(super::irq::KERNEL_TIMER_IRQ\s+as\s+u64\);",
+        "LoongArch timer interrupt signals synthetic kernel timer IRQ",
+    )
+    require_regex(
+        errors,
+        sel4_user_arch_rs,
+        r"pub\(crate\)\s+const\s+KERNEL_TIMER_IRQ\s*:\s*u64\s*=\s*256\s*;",
+        "LoongArch sel4-user synthetic kernel timer IRQ ABI",
+    )
+    require_regex(
+        errors,
+        trap_rs,
         r"fn\s+fault_message\([^)]*\)\s*->\s*\(u64,\s*u64,\s*\[u64;\s*16\]\)\s*\{.*?"
         r"mrs\[0\]\s*=\s*uc\.pc;.*?"
         r"mrs\[1\]\s*=\s*badv;.*?"
@@ -602,7 +634,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         irq_consts.get("MAX_IRQ"),
     )
     require_equal(errors, "MAX_IRQ", irq_consts.get("MAX_IRQ"), 256)
-    return len(csr_names) + 2 + len(expected_trap_values) + 11
+    return len(csr_names) + 2 + len(expected_trap_values) + 14
 
 
 def main(argv: list[str]) -> int:
@@ -626,7 +658,7 @@ def main(argv: list[str]) -> int:
         **parse_rust_offsets(trap_rs_path, {"UserContext", "TrapRecord"}),
     }
     errors: list[str] = []
-    audit_trap_scratch(errors, asm_equ, rust_offsets)
+    audit_trap_scratch(errors, asm_equ, rust_offsets, target.name)
     extra_checked = 0
     if target.name == "loongarch64":
         audit_loongarch_user_context(errors, asm_equ, rust_offsets)
