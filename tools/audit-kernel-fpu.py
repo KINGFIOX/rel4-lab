@@ -214,6 +214,85 @@ def is_fpu_mnemonic(target: str, mnemonic: str, operands: str = "") -> bool:
             raise AssertionError("unreachable target architecture")
 
 
+def require_source_regex(errors: list[str], path: Path, pattern: str, description: str) -> None:
+    if re.search(pattern, path.read_text(), re.S) is None:
+        errors.append(f"{path.relative_to(ROOT_DIR)} is missing {description}")
+
+
+def validate_loongarch_fpu_source() -> None:
+    fpu_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "fpu.rs"
+    trap_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "trap.rs"
+    boot_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "boot.rs"
+    errors: list[str] = []
+
+    require_source_regex(
+        errors,
+        fpu_rs,
+        r"const\s+EUEN_FPE\s*:\s*usize\s*=\s*1\s*<<\s*0\s*;",
+        "LoongArch FPU enable bit",
+    )
+    require_source_regex(
+        errors,
+        fpu_rs,
+        r"const\s+EUEN_SXE\s*:\s*usize\s*=\s*1\s*<<\s*1\s*;",
+        "LoongArch LSX enable bit",
+    )
+    require_source_regex(
+        errors,
+        fpu_rs,
+        r"const\s+EUEN_ASXE\s*:\s*usize\s*=\s*1\s*<<\s*2\s*;",
+        "LoongArch LASX enable bit",
+    )
+    require_source_regex(
+        errors,
+        fpu_rs,
+        r"const\s+EUEN_FPU_STATE_MASK\s*:\s*usize\s*="
+        r"\s*EUEN_FPE\s*\|\s*EUEN_SXE\s*\|\s*EUEN_ASXE\s*;",
+        "combined FPU/LSX/LASX state mask",
+    )
+    require_source_regex(
+        errors,
+        fpu_rs,
+        r"fn\s+clear_fpu_enable\(\)\s*\{.*?"
+        r"set_euen\(euen\s*&\s*!EUEN_FPU_STATE_MASK\);.*?\}",
+        "EUEN FPU/LSX/LASX clear helper",
+    )
+    require_source_regex(
+        errors,
+        fpu_rs,
+        r"pub\s+fn\s+lazy_restore\(thread:\s*\*mut Tcb\)\s*\{.*?"
+        r"disable_access\(\);.*?"
+        r"tcb::set_fpu_context_enabled\(thread,\s*false\);.*?\}",
+        "lazy restore keeps TCB FPU context disabled",
+    )
+    require_source_regex(
+        errors,
+        trap_rs,
+        r"pub\s+const\s+SSTATUS_FS_MASK\s*:\s*u64\s*=\s*0\s*;",
+        "zero FPU status mask for LoongArch TCB context",
+    )
+    require_source_regex(
+        errors,
+        trap_rs,
+        r"pub\s+const\s+SSTATUS_FS_CLEAN\s*:\s*u64\s*=\s*0\s*;",
+        "zero FPU clean state for LoongArch TCB context",
+    )
+    require_source_regex(
+        errors,
+        boot_rs,
+        r'"csrrd\s+\$t0,\s+0x002".*?'
+        r'"li\.d\s+\$t1,\s+-8".*?'
+        r'"and\s+\$t0,\s+\$t0,\s+\$t1".*?'
+        r'"csrwr\s+\$t0,\s+0x002"',
+        "early EUEN FPU/LSX/LASX clear before Rust entry",
+    )
+
+    if errors:
+        for error in errors:
+            log(PREFIX, f"FAIL: {error}")
+        raise SystemExit(1)
+
+
 def fpu_instruction_addresses(target: str, objdump_output: str) -> list[str]:
     addresses: list[str] = []
     for line in objdump_output.splitlines():
@@ -299,6 +378,10 @@ def main(argv: list[str]) -> int:
         allowed_source = (ROOT_DIR / allowed_source_arg).resolve()
         allowed_marker = f"{allowed_source}:"
 
+    arch = target_arch(args.target)
+    if arch == "loongarch64":
+        validate_loongarch_fpu_source()
+
     if args.build:
         log(PREFIX, f"building release kernel for {args.target}")
         run(["cargo", "build", "--release", "--target", args.target, "-p", "kernel"])
@@ -327,7 +410,6 @@ def main(argv: list[str]) -> int:
             print(f"  {address}: {location}", file=sys.stderr)
         return 1
 
-    arch = target_arch(args.target)
     abi_suffix = (
         f" (ELF ABI: {loongarch_abi_name(elf)})" if arch == "loongarch64" else ""
     )
