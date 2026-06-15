@@ -30,6 +30,7 @@ pub const PTE_W: u64 = 1 << 8;
 pub const PTE_MODIFIED: u64 = 1 << 9;
 pub const PTE_SPECIAL: u64 = 1 << 11;
 pub const PTE_PFN_SHIFT: u64 = 12;
+pub const PTE_PFN_MASK: u64 = (1 << 36) - 1;
 pub const PTE_NR: u64 = 1 << 61;
 pub const PTE_NX: u64 = 1 << 62;
 pub const PTE_RPLV: u64 = 1 << 63;
@@ -80,7 +81,7 @@ impl Pte {
 
     #[inline]
     pub const fn ppn(self) -> u64 {
-        (self.0 >> PTE_PFN_SHIFT) & ((1u64 << 36) - 1)
+        (self.0 >> PTE_PFN_SHIFT) & PTE_PFN_MASK
     }
 
     #[inline]
