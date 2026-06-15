@@ -520,6 +520,8 @@ pub(crate) fn service_pending_remote_core_op() -> RemoteCoreOpResult {
 fn complete_remote_core_op(bit: usize) {
     #[cfg(target_arch = "loongarch64")]
     crate::arch::current::sbi::ack_ipi();
+    #[cfg(target_arch = "loongarch64")]
+    crate::arch::current::csr::dbar();
     REMOTE_STALL_DONE_MASK.fetch_or(bit, Ordering::AcqRel);
 }
 

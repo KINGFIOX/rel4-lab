@@ -189,6 +189,17 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
+        smp_rs,
+        r"fn\s+complete_remote_core_op\(bit:\s*usize\)\s*\{\s*"
+        r"#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
+        r"crate::arch::current::sbi::ack_ipi\(\);"
+        r"\s*#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
+        r"crate::arch::current::csr::dbar\(\);"
+        r"\s*REMOTE_STALL_DONE_MASK\.fetch_or\(bit,\s*Ordering::AcqRel\);",
+        "LoongArch remote op completion barrier before done bit",
+    )
+    require_regex(
+        errors,
         trap_rs,
         r"if\s+ipi_pending\(estat\)\s*\{.*?"
         r"service_pending_remote_core_op\(\).*?"
