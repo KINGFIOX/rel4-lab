@@ -103,7 +103,7 @@ rw_csr!(dmw3, set_dmw3, CSR_DMW3);
 
 #[inline]
 pub fn ibar() {
-    unsafe { asm!("ibar 0", options(nostack, nomem)) };
+    unsafe { asm!("ibar 0", options(nostack)) };
 }
 
 #[inline]

@@ -240,6 +240,12 @@ def audit_loongarch64(errors: list[str]) -> None:
         r"pub\s+fn\s+dbar\(\)\s*\{\s*unsafe\s*\{\s*asm!\(\"dbar 0\",\s*options\(nostack\)\)\s*\};\s*\}",
         "LoongArch dbar compiler-visible memory barrier",
     )
+    require_regex(
+        errors,
+        csr_rs,
+        r"pub\s+fn\s+ibar\(\)\s*\{\s*unsafe\s*\{\s*asm!\(\"ibar 0\",\s*options\(nostack\)\)\s*\};\s*\}",
+        "LoongArch ibar compiler-visible instruction barrier",
+    )
 
     expect(errors, "loongarch64 USER_ROOT_ENTRIES", vspace.get("USER_ROOT_ENTRIES"), 256)
     expect(errors, "loongarch64 USER_TOP", vspace.get("USER_TOP"), 0x4000_0000_00)
