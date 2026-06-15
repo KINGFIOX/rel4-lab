@@ -395,6 +395,16 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     require_regex(
         errors,
         trap_rs,
+        r"pub\s+fn\s+install_trap_vector\(\)\s*\{\s*"
+        r"let\s+addr\s*=\s*trap_entry\s+as\s+\*const\s+\(\)\s+as\s+usize;"
+        r"\s*debug_assert!\(addr\s*&\s*0x3f\s*==\s*0,\s*\"eentry must be 64-byte aligned\"\);"
+        r"\s*csr::set_eentry\(addr\);"
+        r"\s*csr::ibar\(\);\s*\}",
+        "LoongArch trap vector installation programs EENTRY then fences with ibar",
+    )
+    require_regex(
+        errors,
+        trap_rs,
         r"pub\s+fn\s+init_timer\(\)\s*\{\s*clear_timer_interrupt\(\);.*?program_next_timer\(\);.*?"
         r"csr::set_ecfg\(csr::ecfg\(\)\s*\|\s*ECFG_LIE_TIMER\);"
         r"\s*csr::dbar\(\);",
