@@ -168,6 +168,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     paging_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "paging.rs"
     csr_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "csr.rs"
     vspace_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "vspace.rs"
+    trap_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "trap.rs"
     asid_rs = ROOT_DIR / "kernel" / "src" / "object" / "asid.rs"
     boot_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "boot.rs"
     invocation_rs = ROOT_DIR / "kernel" / "src" / "api" / "invocation.rs"
@@ -383,6 +384,49 @@ def audit_loongarch64(errors: list[str]) -> None:
         r"csr::dbar\(\);\s*"
         r"enable_paging\(\);",
         "LoongArch PGDL/ASID switch barrier before paging enable",
+    )
+    require_regex(
+        errors,
+        vspace_rs,
+        r"pub\s+fn\s+set_current_vspace_root\(\)\s*\{\s*"
+        r"let\s+current\s*=\s*crate::object::tcb::current\(\);"
+        r"\s*if\s+!try_switch_to_tcb_root\(current\)\s*\{\s*"
+        r"switch_to_kernel_root\(\);\s*\}\s*\}",
+        "LoongArch current-thread VSpace root fallback",
+    )
+    require_regex(
+        errors,
+        vspace_rs,
+        r"fn\s+try_switch_to_tcb_root\(tcb:\s*\*const\s+crate::object::tcb::Tcb\)\s*->\s*bool\s*\{.*?"
+        r"vspace_cap_snapshot\(tcb\);.*?"
+        r"vroot\.tag\(\)\s*!=\s*Some\(CapTag::PageTable\).*?"
+        r"let\s+root_kva\s*=\s*vroot\.page_table_base_ptr\(\);.*?"
+        r"let\s+asid\s*=\s*vroot\.page_table_mapped_asid\(\);.*?"
+        r"crate::object::asid::lookup\(asid\)\s*!=\s*root_kva.*?"
+        r"let\s+new_satp\s*=\s*satp_from_kva\(root_kva,\s*asid\s+as\s+u64\);.*?"
+        r"switch_satp\(new_satp\);.*?"
+        r"true",
+        "LoongArch TCB VSpace cap validation before root switch",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"if\s+next\s*!=\s*cur\s*\{.*?"
+        r"tcb::set_current\(next\);.*?"
+        r"let\s+ctx\s*=\s*unsafe\s*\{\s*tcb::prepare_for_user_restore\(next\)\s*\};.*?"
+        r"switch_to_tcb_vspace\(next\);.*?"
+        r"return\s+finish_kernel_exit\(ctx,\s*kernel_lock\);",
+        "LoongArch scheduler switch changes VSpace before user restore",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+kernel_exit_after_remote_stall\([^)]*\)\s*->\s*\*mut\s+UserContext\s*\{.*?"
+        r"tcb::set_current\(next\);.*?"
+        r"let\s+ctx\s*=\s*unsafe\s*\{\s*tcb::prepare_for_user_restore\(next\)\s*\};.*?"
+        r"switch_to_tcb_vspace\(next\);.*?"
+        r"return\s+finish_kernel_exit\(ctx,\s*kernel_lock\);",
+        "LoongArch remote-stall exit changes VSpace before user restore",
     )
     require_text(errors, vspace_rs, "csr::set_stlbps(PAGE_SHIFT)", "STLB page-size setup")
     require_text(errors, vspace_rs, "csr::set_dmw0(DMW_LOW_DIRECT)", "low direct-map setup")
