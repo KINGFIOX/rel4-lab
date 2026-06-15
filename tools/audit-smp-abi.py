@@ -105,6 +105,31 @@ def audit_loongarch64(errors: list[str]) -> None:
     require_text(errors, sbi_rs, "IPI_SEND_ACTION_RESCHEDULE", "IPI reschedule action")
     require_regex(
         errors,
+        sbi_rs,
+        r"pub\s+fn\s+init_ipi\(\)\s*\{\s*"
+        r"csr::iocsr_write64\(IOCSR_IPI_CLEAR,\s*u64::MAX\);"
+        r"\s*csr::iocsr_write64\(IOCSR_IPI_EN,\s*u64::MAX\);"
+        r"\s*csr::dbar\(\);",
+        "LoongArch clears stale IPI state before enable",
+    )
+    require_regex(
+        errors,
+        sbi_rs,
+        r"pub\s+fn\s+ack_ipi\(\)\s*->\s*bool\s*\{.*?"
+        r"csr::iocsr_write64\(IOCSR_IPI_CLEAR,\s*pending\);"
+        r"\s*csr::dbar\(\);",
+        "LoongArch IPI acknowledgement write barrier",
+    )
+    require_regex(
+        errors,
+        sbi_rs,
+        r"pub\s+fn\s+send_ipi\([^)]*\)\s*->\s*SbiRet\s*\{.*?"
+        r"csr::iocsr_write64\(\s*IOCSR_IPI_SEND,.*?"
+        r"csr::dbar\(\);\s*OK",
+        "LoongArch IPI send write barrier",
+    )
+    require_regex(
+        errors,
         smp_rs,
         r"#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
         r"fn\s+remote_sfence_vma_core\([^)]*\)\s*\{\s*"

@@ -28,7 +28,9 @@ const OK: SbiRet = SbiRet { error: 0, value: 0 };
 
 #[inline]
 pub fn init_ipi() {
+    csr::iocsr_write64(IOCSR_IPI_CLEAR, u64::MAX);
     csr::iocsr_write64(IOCSR_IPI_EN, u64::MAX);
+    csr::dbar();
 }
 
 #[inline]
@@ -38,6 +40,7 @@ pub fn ack_ipi() -> bool {
         return false;
     }
     csr::iocsr_write64(IOCSR_IPI_CLEAR, pending);
+    csr::dbar();
     true
 }
 
@@ -57,6 +60,7 @@ pub fn send_ipi(hart_mask: usize, hart_mask_base: usize) -> SbiRet {
         mask >>= 1;
         bit += 1;
     }
+    csr::dbar();
     OK
 }
 
