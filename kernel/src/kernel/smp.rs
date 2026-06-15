@@ -330,6 +330,8 @@ pub fn release_secondary_harts() {
 
 pub fn publish_kernel_satp(satp: u64) {
     KERNEL_SATP.store(satp, Ordering::Release);
+    #[cfg(target_arch = "loongarch64")]
+    crate::arch::current::csr::dbar();
 }
 
 pub fn kernel_satp() -> Option<u64> {

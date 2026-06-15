@@ -407,6 +407,16 @@ def audit_loongarch64(errors: list[str]) -> None:
         r"crate::arch::current::irq::init\(\);",
         "LoongArch boot configures DMW/MMIO access before console and IRQ init",
     )
+    smp_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "smp.rs"
+    require_regex(
+        errors,
+        smp_rs,
+        r"pub\s+fn\s+publish_kernel_satp\(satp:\s*u64\)\s*\{\s*"
+        r"KERNEL_SATP\.store\(satp,\s*Ordering::Release\);"
+        r"\s*#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
+        r"crate::arch::current::csr::dbar\(\);",
+        "LoongArch kernel root publish barrier",
+    )
     audit_kva_to_pa_helpers(errors, abi_consts, (boot_rs, invocation_rs), "loongarch64")
 
     # Ensure the parsed symbol graph includes all imported constants used above.
