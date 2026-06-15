@@ -2,6 +2,10 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+const RISCV_ELF_MACHINE: u16 = 243;
+const LOONGARCH64_ELF_MACHINE: u16 = 258;
+const ELF_TYPE_EXECUTABLE: u16 = 2;
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -66,6 +70,11 @@ fn main() {
         "virtio-disk-server ELF",
         "tools/build-xv6-user-rootserver.py PROGRAM [ARG...]",
     );
+    validate_embedded_elf(&payload, "payload ELF", allow_placeholders);
+    validate_embedded_elf(&uart_server, "uart-server ELF", allow_placeholders);
+    validate_embedded_elf(&vfs_server, "vfs-server ELF", allow_placeholders);
+    validate_embedded_elf(&xv6fs_server, "xv6fs-server ELF", allow_placeholders);
+    validate_embedded_elf(&disk_server, "virtio-disk-server ELF", allow_placeholders);
     println!("cargo:rerun-if-changed={}", payload.display());
     println!("cargo:rerun-if-changed={}", uart_server.display());
     println!("cargo:rerun-if-changed={}", vfs_server.display());
@@ -127,5 +136,40 @@ fn resolve_embedded_elf(
             placeholder
         }
         Err(_) => panic!("{var} must point to a {purpose}; use {hint}"),
+    }
+}
+
+fn validate_embedded_elf(path: &PathBuf, purpose: &str, allow_placeholders: bool) {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => panic!("{purpose} not found: {}", path.display()),
+    };
+    if allow_placeholders && metadata.len() == 0 {
+        return;
+    }
+    let data = fs::read(path).unwrap();
+    if data.len() < 64 || &data[0..4] != b"\x7fELF" || data[4] != 2 || data[5] != 1 {
+        panic!(
+            "expected a little-endian ELF64 {purpose}: {}",
+            path.display()
+        );
+    }
+    let expected_machine = expected_machine_for_target();
+    let elf_type = u16::from_le_bytes([data[16], data[17]]);
+    let machine = u16::from_le_bytes([data[18], data[19]]);
+    if elf_type != ELF_TYPE_EXECUTABLE || machine != expected_machine {
+        panic!(
+            "expected an executable {purpose} for target {expected_machine:#x}: {} has e_type={elf_type:#x} e_machine={machine:#x}",
+            path.display(),
+        );
+    }
+}
+
+fn expected_machine_for_target() -> u16 {
+    let target = env::var("TARGET").unwrap();
+    match target.as_str() {
+        "riscv64gc-unknown-none-elf" => RISCV_ELF_MACHINE,
+        "loongarch64-unknown-none" => LOONGARCH64_ELF_MACHINE,
+        _ => panic!("unsupported target for xv6-host: {target}"),
     }
 }
