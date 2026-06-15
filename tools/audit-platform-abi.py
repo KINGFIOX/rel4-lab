@@ -350,8 +350,32 @@ def audit_loongarch64(
         r"pub\s+fn\s+enable_irq\(irq:\s*u64\)\s*\{.*?"
         r"csr::iocsr_write32\(EXTIOI_COREISR_START\s*\+\s*group\s*\*\s*4,\s*mask\);.*?"
         r"ptr::write_volatile\(pch_reg64\(PCH_PIC_INT_CLEAR\),\s*1u64\s*<<\s*irq\);.*?"
-        r"csr::iocsr_write32\(enable_addr,\s*csr::iocsr_read32\(enable_addr\)\s*\|\s*mask\);",
+        r"csr::iocsr_write32\(enable_addr,\s*csr::iocsr_read32\(enable_addr\)\s*\|\s*mask\);.*?"
+        r"csr::dbar\(\);",
         "LoongArch stale IRQ clear before enable",
+    )
+    require_regex(
+        errors,
+        irq_rs,
+        r"pub\s+fn\s+init\(\)\s*\{.*?EXTIOI_COREMAP_START.*?csr::dbar\(\);",
+        "LoongArch IRQ controller init write barrier",
+    )
+    require_regex(
+        errors,
+        irq_rs,
+        r"pub\s+fn\s+disable_irq\(irq:\s*u64\)\s*\{.*?"
+        r"csr::iocsr_write32\(enable_addr,\s*csr::iocsr_read32\(enable_addr\)\s*&\s*!mask\);.*?"
+        r"csr::dbar\(\);",
+        "LoongArch IRQ disable write barrier",
+    )
+    require_regex(
+        errors,
+        irq_rs,
+        r"pub\s+fn\s+complete\(irq:\s*u64\)\s*\{.*?"
+        r"csr::iocsr_write32\(EXTIOI_COREISR_START\s*\+\s*group\s*\*\s*4,\s*mask\);.*?"
+        r"ptr::write_volatile\(pch_reg64\(PCH_PIC_INT_CLEAR\),\s*1u64\s*<<\s*irq\);.*?"
+        r"csr::dbar\(\);",
+        "LoongArch IRQ completion write barrier",
     )
 
     return errors

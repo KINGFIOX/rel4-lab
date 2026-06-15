@@ -50,6 +50,7 @@ pub fn init() {
     for index in 0..(EXTIOI_IRQS / 4) {
         csr::iocsr_write32(EXTIOI_COREMAP_START + index * 4, CPU0_BITMAP_PER_BYTE);
     }
+    csr::dbar();
 }
 
 #[inline]
@@ -80,6 +81,7 @@ pub fn enable_irq(irq: u64) {
             ptr::write_volatile(mask_reg, ptr::read_volatile(mask_reg) & !(1u64 << irq));
         }
     }
+    csr::dbar();
 }
 
 pub fn disable_irq(irq: u64) {
@@ -99,6 +101,7 @@ pub fn disable_irq(irq: u64) {
     let mask = 1u32 << (irq % EXTIOI_GROUP_BITS);
     let enable_addr = EXTIOI_ENABLE_START + group * 4;
     csr::iocsr_write32(enable_addr, csr::iocsr_read32(enable_addr) & !mask);
+    csr::dbar();
 }
 
 pub fn claim() -> Option<u64> {
@@ -127,4 +130,5 @@ pub fn complete(irq: u64) {
             ptr::write_volatile(pch_reg64(PCH_PIC_INT_CLEAR), 1u64 << irq);
         }
     }
+    csr::dbar();
 }
