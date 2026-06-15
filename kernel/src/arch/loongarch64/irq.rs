@@ -22,6 +22,7 @@ pub fn local_irq_save() -> bool {
     let irq_was_enabled = (crmd & CRMD_IE) != 0;
     if irq_was_enabled {
         super::csr::set_crmd(crmd & !CRMD_IE);
+        super::csr::dbar();
     }
     irq_was_enabled
 }
@@ -34,6 +35,7 @@ pub fn local_irq_restore(irq_was_enabled: bool) {
     } else {
         super::csr::set_crmd(crmd & !CRMD_IE);
     }
+    super::csr::dbar();
 }
 
 #[inline]

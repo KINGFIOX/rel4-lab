@@ -92,6 +92,7 @@ def audit_riscv64(errors: list[str]) -> None:
 
 def audit_loongarch64(errors: list[str]) -> None:
     smp_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "smp.rs"
+    irq_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "irq.rs"
     sbi_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "sbi.rs"
     trap_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "trap.rs"
     require_text(errors, sbi_rs, "pub const SUPPORTS_REMOTE_IPI: bool = true;", "IOCSR IPI")
@@ -171,6 +172,23 @@ def audit_loongarch64(errors: list[str]) -> None:
         r"service_pending_remote_core_op\(\).*?"
         r"RemoteCoreOpResult::StalledCurrent",
         "LoongArch trap IPI remote-op service",
+    )
+    require_regex(
+        errors,
+        irq_rs,
+        r"pub\s+fn\s+local_irq_save\(\)\s*->\s*bool\s*\{.*?"
+        r"super::csr::set_crmd\(crmd\s*&\s*!CRMD_IE\);"
+        r"\s*super::csr::dbar\(\);",
+        "LoongArch local IRQ disable barrier",
+    )
+    require_regex(
+        errors,
+        irq_rs,
+        r"pub\s+fn\s+local_irq_restore\(irq_was_enabled:\s*bool\)\s*\{.*?"
+        r"super::csr::set_crmd\(crmd\s*\|\s*CRMD_IE\);.*?"
+        r"super::csr::set_crmd\(crmd\s*&\s*!CRMD_IE\);.*?"
+        r"super::csr::dbar\(\);",
+        "LoongArch local IRQ restore barrier",
     )
 
 
