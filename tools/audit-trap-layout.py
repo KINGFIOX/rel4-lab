@@ -411,8 +411,10 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     require_regex(
         errors,
         trap_rs,
-        r"fn\s+program_next_timer\(\)\s*\{.*?crate::kernel::smp::set_next_timer_deadline\(deadline\);.*?csr::set_tcfg\(\(initval\s*<<\s*TCFG_INITVAL_SHIFT\)\s*\|\s*TCFG_ENABLE\)",
-        "LoongArch timer reprogramming path",
+        r"fn\s+program_next_timer\(\)\s*\{.*?crate::kernel::smp::set_next_timer_deadline\(deadline\);.*?"
+        r"csr::set_tcfg\(\(initval\s*<<\s*TCFG_INITVAL_SHIFT\)\s*\|\s*TCFG_ENABLE\);"
+        r"\s*csr::dbar\(\);",
+        "LoongArch timer reprogramming path with barrier",
     )
     require_regex(
         errors,

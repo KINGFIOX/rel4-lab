@@ -843,6 +843,7 @@ fn program_next_timer() {
     let delta = deadline.saturating_sub(now).max(1);
     let initval = delta.min((usize::MAX >> TCFG_INITVAL_SHIFT) as u64) as usize;
     csr::set_tcfg((initval << TCFG_INITVAL_SHIFT) | TCFG_ENABLE);
+    csr::dbar();
 }
 
 fn should_signal_synthetic_timer_irq(now: u64) -> bool {
