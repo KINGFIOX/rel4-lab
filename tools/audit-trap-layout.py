@@ -117,6 +117,11 @@ def require_present(
     return value
 
 
+def require_regex(errors: list[str], path: Path, pattern: str, description: str) -> None:
+    if re.search(pattern, path.read_text(), re.S) is None:
+        errors.append(f"{path.relative_to(ROOT_DIR)} is missing {description}")
+
+
 def audit_trap_scratch(errors: list[str], asm_equ: dict[str, int], rust_offsets) -> None:
     for field, equ_name in TRAP_SCRATCH_FIELDS.items():
         require_equal(
@@ -144,6 +149,116 @@ def audit_loongarch_user_context(errors: list[str], asm_equ: dict[str, int], rus
             else trap_record_base + field_offset
         )
         require_equal(errors, equ_name, asm_equ.get(equ_name), expected)
+
+
+def audit_loongarch_gpr_save_restore(errors: list[str], asm_path: Path) -> int:
+    direct_saves = {
+        "zero": 0,
+        "ra": 1,
+        "tp": 2,
+        "a0": 4,
+        "a1": 5,
+        "a2": 6,
+        "a3": 7,
+        "a4": 8,
+        "a5": 9,
+        "a6": 10,
+        "a7": 11,
+        "t3": 15,
+        "t4": 16,
+        "t5": 17,
+        "t6": 18,
+        "t7": 19,
+        "t8": 20,
+        "r21": 21,
+        "fp": 22,
+        "s0": 23,
+        "s1": 24,
+        "s2": 25,
+        "s3": 26,
+        "s4": 27,
+        "s5": 28,
+        "s6": 29,
+        "s7": 30,
+        "s8": 31,
+    }
+    direct_restores = {
+        "ra": 1,
+        "tp": 2,
+        "sp": 3,
+        "a0": 4,
+        "a1": 5,
+        "a2": 6,
+        "a3": 7,
+        "a4": 8,
+        "a5": 9,
+        "a6": 10,
+        "a7": 11,
+        "t0": 12,
+        "t1": 13,
+        "t2": 14,
+        "t3": 15,
+        "t4": 16,
+        "t5": 17,
+        "t6": 18,
+        "t7": 19,
+        "t8": 20,
+        "r21": 21,
+        "fp": 22,
+        "s0": 23,
+        "s1": 24,
+        "s2": 25,
+        "s3": 26,
+        "s4": 27,
+        "s5": 28,
+        "s6": 29,
+        "s7": 30,
+        "s8": 31,
+    }
+
+    for reg, index in direct_saves.items():
+        require_regex(
+            errors,
+            asm_path,
+            rf"\bst\.d\s+\${reg},\s+\$sp,\s+{index}\*8\b",
+            f"LoongArch save of ${reg} into UserContext.regs[{index}]",
+        )
+    for reg, index in direct_restores.items():
+        require_regex(
+            errors,
+            asm_path,
+            rf"\bld\.d\s+\${reg},\s+\$t0,\s+{index}\*8\b",
+            f"LoongArch restore of ${reg} from UserContext.regs[{index}]",
+        )
+
+    scratch_moves = {
+        "sp": ("TRAP_SCRATCH_SAVED_USER_SP", 3),
+        "t0": ("CSR_KS0", 12),
+        "t1": ("TRAP_SCRATCH_SAVED_USER_T1", 13),
+        "t2": ("TRAP_SCRATCH_SAVED_USER_T2", 14),
+    }
+    for reg, (source, index) in scratch_moves.items():
+        if source == "CSR_KS0":
+            pattern = rf"\bcsrrd\s+\$t1,\s+{source}\s+st\.d\s+\$t1,\s+\$sp,\s+{index}\*8\b"
+        else:
+            pattern = (
+                rf"\bld\.d\s+\$t1,\s+\$t0,\s+{source}\s+"
+                rf"st\.d\s+\$t1,\s+\$sp,\s+{index}\*8\b"
+            )
+        require_regex(
+            errors,
+            asm_path,
+            pattern,
+            f"LoongArch scratch save of ${reg} into UserContext.regs[{index}]",
+        )
+
+    require_regex(
+        errors,
+        asm_path,
+        r"\bld\.d\s+\$t0,\s+\$t0,\s+12\*8\s+ertn\b",
+        "LoongArch restores user $t0 last before ertn",
+    )
+    return len(direct_saves) + len(direct_restores) + len(scratch_moves) + 1
 
 
 def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
@@ -275,6 +390,7 @@ def main(argv: list[str]) -> int:
     if target.name == "loongarch64":
         audit_loongarch_user_context(errors, asm_equ, rust_offsets)
         extra_checked += audit_loongarch_trap_abi(errors, asm_equ)
+        extra_checked += audit_loongarch_gpr_save_restore(errors, asm_path)
 
     if errors:
         for error in errors:
