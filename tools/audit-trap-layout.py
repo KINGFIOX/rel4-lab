@@ -457,6 +457,17 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         r"else\s*\{.*?switch_to_tcb_vspace\(next\);.*?program_next_timer\(\);.*?Some\(\(ctx,\s*kernel_lock\)\)",
         "LoongArch idle scheduler reprograms timer before user entry",
     )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+service_pending_external_interrupt\(\)\s*->\s*bool\s*\{\s*"
+        r"let\s+Some\(irq\)\s*=\s*super::irq::claim_external_irq\(\)\s*else\s*\{\s*"
+        r"return\s+false;\s*\};\s*"
+        r"let\s+delivered\s*=\s*unsafe\s*\{\s*crate::object::irq::signal_irq\(irq\)\s*\};\s*"
+        r"if\s+!delivered\s*\{\s*super::irq::complete_external_irq\(irq\);\s*\}\s*"
+        r"true\s*\}",
+        "LoongArch external IRQ service completes undelivered interrupts",
+    )
 
     user_sstatus = require_present(errors, "trap", trap_consts, "USER_SSTATUS")
     rootserver_sstatus = require_present(errors, "trap", trap_consts, "ROOTSERVER_SSTATUS")
