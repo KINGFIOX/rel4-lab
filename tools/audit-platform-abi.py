@@ -324,6 +324,8 @@ def audit_loongarch64(
             "LOONGARCH64_PCIE_LEGACY_IRQ range "
             f"[{legacy_irq_base}, {legacy_irq_base + legacy_irq_count}) exceeds EXTIOI_IRQS={extioi_irqs}"
         )
+    if legacy_irq_base < 1:
+        errors.append("LOONGARCH64_PCIE_LEGACY_IRQ_BASE must not use reserved EXTIOI IRQ 0")
     msi_base_vector = require_symbol(
         platform_consts, "LOONGARCH64_PCH_MSI_BASE_VECTOR", errors, "userspace"
     )
@@ -335,6 +337,22 @@ def audit_loongarch64(
             "LOONGARCH64_PCH_MSI vector range "
             f"[{msi_base_vector}, {msi_base_vector + msi_vectors}) exceeds EXTIOI_IRQS={extioi_irqs}"
         )
+    if msi_base_vector < 1:
+        errors.append("LOONGARCH64_PCH_MSI_BASE_VECTOR must not use reserved EXTIOI IRQ 0")
+    require_regex(
+        errors,
+        irq_rs,
+        r"pub\s+fn\s+is_external_irq\(irq:\s*u64\)\s*->\s*bool\s*\{\s*"
+        r"irq\s*>\s*0\s*&&\s*irq\s*<\s*EXTIOI_IRQS\s+as\s+u64\s*\}",
+        "LoongArch reserves EXTIOI IRQ 0 from external IRQ allocation",
+    )
+    require_regex(
+        errors,
+        irq_rs,
+        r"pub\s+fn\s+claim\(\)\s*->\s*Option<u64>\s*\{.*?"
+        r"let\s+pending\s*=\s*if\s+group\s*==\s*0\s*\{\s*pending\s*&\s*!1\s*\}\s*else\s*\{\s*pending\s*\};",
+        "LoongArch claim path masks reserved EXTIOI IRQ 0",
+    )
     require_regex(
         errors,
         irq_rs,
