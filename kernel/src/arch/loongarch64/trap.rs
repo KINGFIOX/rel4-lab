@@ -818,6 +818,7 @@ pub fn init_timer() {
     }
     program_next_timer();
     csr::set_ecfg(csr::ecfg() | ECFG_LIE_TIMER);
+    csr::dbar();
 }
 
 fn synthetic_timer_irq_deadline(now: u64) -> Option<u64> {

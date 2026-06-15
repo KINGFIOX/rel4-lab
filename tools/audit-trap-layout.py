@@ -394,8 +394,19 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     require_regex(
         errors,
         trap_rs,
-        r"pub\s+fn\s+init_timer\(\)\s*\{\s*clear_timer_interrupt\(\);.*?program_next_timer\(\);.*?csr::set_ecfg\(csr::ecfg\(\)\s*\|\s*ECFG_LIE_TIMER\)",
-        "LoongArch clears and programs timer before enabling interrupts",
+        r"pub\s+fn\s+init_timer\(\)\s*\{\s*clear_timer_interrupt\(\);.*?program_next_timer\(\);.*?"
+        r"csr::set_ecfg\(csr::ecfg\(\)\s*\|\s*ECFG_LIE_TIMER\);"
+        r"\s*csr::dbar\(\);",
+        "LoongArch clears and programs timer before enabling interrupts with barrier",
+    )
+    require_regex(
+        errors,
+        irq_rs,
+        r"pub\s+fn\s+init_current_core\(\)\s*\{\s*"
+        r"super::sbi::init_ipi\(\);"
+        r"\s*super::csr::set_ecfg\(super::csr::ecfg\(\)\s*\|\s*ECFG_LIE_EXTIOI0\s*\|\s*ECFG_LIE_IPI\);"
+        r"\s*super::csr::dbar\(\);",
+        "LoongArch enables external/IPI interrupt lines with barrier",
     )
     require_regex(
         errors,
@@ -468,7 +479,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         irq_consts.get("MAX_IRQ"),
     )
     require_equal(errors, "MAX_IRQ", irq_consts.get("MAX_IRQ"), 256)
-    return len(csr_names) + 2 + len(expected_trap_values) + 7
+    return len(csr_names) + 2 + len(expected_trap_values) + 8
 
 
 def main(argv: list[str]) -> int:
