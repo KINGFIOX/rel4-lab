@@ -284,6 +284,53 @@ def validate_boot_handoff_source(arch: str) -> list[str]:
     return errors
 
 
+def require_source_regex(
+    errors: list[str], path: Path, text: str, pattern: str, description: str
+) -> None:
+    if re.search(pattern, text, re.S) is None:
+        errors.append(f"{path.relative_to(ROOT_DIR)} is missing {description}")
+
+
+def validate_arch_boot_source(arch: str) -> list[str]:
+    path = ROOT_DIR / "kernel" / "src" / "arch" / arch / "boot.rs"
+    text = path.read_text()
+    errors: list[str] = []
+
+    if arch == "loongarch64":
+        require_source_regex(
+            errors,
+            path,
+            text,
+            r'"csrwr\s+\$zero,\s+0x030"',
+            "LoongArch KS0 scratch clear before Rust entry",
+        )
+        require_source_regex(
+            errors,
+            path,
+            text,
+            r'"ld\.d\s+\$t1,\s+\$t0,\s+0".*?'
+            r'"bne\s+\$t1,\s+\$t2,\s+5b".*?'
+            r'"dbar\s+0"',
+            "LoongArch secondary ready wait barrier",
+        )
+        require_source_regex(
+            errors,
+            path,
+            text,
+            r"pub\s+extern\s+\"C\"\s+fn\s+init_secondary_hart\([^)]*\)\s*->\s*!\s*\{"
+            r".*?smp::init_current_hart\(hart_id,\s*core_id\);"
+            r".*?fpu::init_current_core\(\);"
+            r".*?vspace::switch_satp\(satp\)"
+            r".*?trap::install_trap_vector\(\);"
+            r".*?trap::init_timer\(\);"
+            r".*?irq::init_current_core\(\);"
+            r".*?trap::idle_scheduler_loop\(\)",
+            "LoongArch secondary hart arch initialisation sequence",
+        )
+
+    return errors
+
+
 def parse_header(data: bytes) -> ElfHeader:
     if len(data) < ELF_HEADER.size:
         die(PREFIX, "file is too small to be an ELF64 executable")
@@ -556,6 +603,7 @@ def main(argv: list[str]) -> int:
         *validate_symbols(symbols, program_headers, expectation, stack_expectation),
         *validate_boot_stack_source(arch),
         *validate_boot_handoff_source(arch),
+        *validate_arch_boot_source(arch),
     ]
     if errors:
         for error in errors:
