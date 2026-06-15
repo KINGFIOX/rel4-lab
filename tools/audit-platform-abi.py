@@ -23,10 +23,6 @@ CONST_RE = re.compile(
     re.S,
 )
 NUMBER_RE = re.compile(r"\b0x[0-9a-fA-F_]+|\b\d[\d_]*")
-REGION_RE = re.compile(
-    r"pub\s+const\s+DEVICE_UNTYPED_REGIONS\s*:\s*&\[\(u64,\s*u64\)\]\s*=\s*&\[(?P<body>.*?)\];",
-    re.S,
-)
 TUPLE_RE = re.compile(r"\(\s*([^,]+?)\s*,\s*([^)]+?)\s*\)")
 
 BIN_OPS = {
@@ -93,17 +89,21 @@ def parse_consts(path: Path, initial: dict[str, int] | None = None) -> dict[str,
     return symbols
 
 
-def parse_device_regions(path: Path, symbols: dict[str, int]) -> list[tuple[int, int]]:
+def parse_regions(path: Path, symbols: dict[str, int], name: str) -> list[tuple[int, int]]:
     text = path.read_text()
-    match = REGION_RE.search(text)
+    match = re.search(
+        rf"pub\s+const\s+{name}\s*:\s*&\[\(u64,\s*u64\)\]\s*=\s*&\[(?P<body>.*?)\];",
+        text,
+        re.S,
+    )
     if not match:
-        die(PREFIX, f"DEVICE_UNTYPED_REGIONS not found in {path}")
+        die(PREFIX, f"{name} not found in {path}")
     regions: list[tuple[int, int]] = []
     body = strip_comments(match.group("body"))
     for start_expr, end_expr in TUPLE_RE.findall(body):
         regions.append((eval_expr(start_expr, symbols), eval_expr(end_expr, symbols)))
     if not regions:
-        die(PREFIX, f"DEVICE_UNTYPED_REGIONS is empty in {path}")
+        die(PREFIX, f"{name} is empty in {path}")
     return regions
 
 
@@ -128,6 +128,32 @@ def expect_equal(errors: list[str], label: str, got: int, expected: int) -> None
 def expect_page_aligned(errors: list[str], label: str, value: int) -> None:
     if value % PAGE_SIZE != 0:
         errors.append(f"{label}=0x{value:x} is not {PAGE_SIZE:#x}-aligned")
+
+
+def expect_regions_page_aligned(
+    errors: list[str], label: str, regions: list[tuple[int, int]]
+) -> None:
+    for start, end in regions:
+        expect_page_aligned(errors, f"{label} start", start)
+        expect_page_aligned(errors, f"{label} end", end)
+        if start >= end:
+            errors.append(f"{label} region [0x{start:x}, 0x{end:x}) is empty or inverted")
+
+
+def expect_regions_disjoint(
+    errors: list[str],
+    left_label: str,
+    left: list[tuple[int, int]],
+    right_label: str,
+    right: list[tuple[int, int]],
+) -> None:
+    for left_start, left_end in left:
+        for right_start, right_end in right:
+            if left_start < right_end and right_start < left_end:
+                errors.append(
+                    f"{left_label} [0x{left_start:x}, 0x{left_end:x}) overlaps "
+                    f"{right_label} [0x{right_start:x}, 0x{right_end:x})"
+                )
 
 
 def expect_covered(
@@ -178,9 +204,19 @@ def audit_loongarch64(
     pci_consts: dict[str, int],
     irq_consts: dict[str, int],
     regions: list[tuple[int, int]],
+    free_regions: list[tuple[int, int]],
 ) -> list[str]:
     errors: list[str] = []
     audit_common_device_window(errors, "loongarch64", kernel_consts, platform_consts, regions)
+    expect_regions_page_aligned(errors, "DEVICE_UNTYPED_REGIONS", regions)
+    expect_regions_page_aligned(errors, "FREE_RAM_REGIONS", free_regions)
+    expect_regions_disjoint(
+        errors, "DEVICE_UNTYPED_REGIONS", regions, "FREE_RAM_REGIONS", free_regions
+    )
+    expect_equal(errors, "LoongArch device-untyped base", regions[0][0], 0x1000_0000)
+    expect_equal(errors, "LoongArch device-untyped top", regions[-1][1], 0x8000_0000)
+    expect_equal(errors, "LoongArch free-RAM base", free_regions[0][0], 0x8200_0000)
+    expect_equal(errors, "LoongArch free-RAM top", free_regions[-1][1], 0x1_3000_0000)
 
     io_base = require_symbol(kernel_consts, "PCI_IO_BASE_PA", errors, "kernel")
     io_port = require_symbol(kernel_consts, "PCI_DEBUG_UART_PORT", errors, "kernel")
@@ -333,14 +369,17 @@ def main(argv: list[str]) -> int:
     shared_consts = parse_consts(shared_platform_rs)
     kernel_consts = parse_consts(kernel_platform_rs)
     platform_consts = parse_consts(userspace_platform_rs, shared_consts)
-    regions = parse_device_regions(kernel_platform_rs, kernel_consts)
+    regions = parse_regions(kernel_platform_rs, kernel_consts, "DEVICE_UNTYPED_REGIONS")
 
     if target.name == "loongarch64":
+        free_regions = parse_regions(kernel_platform_rs, kernel_consts, "FREE_RAM_REGIONS")
         pci_consts = parse_consts(
             ROOT_DIR / "userspace" / "virtio-disk-server" / "src" / "device" / "pci.rs"
         )
         irq_consts = parse_consts(ROOT_DIR / "kernel" / "src" / "machine" / "loongarch_irq.rs")
-        errors = audit_loongarch64(kernel_consts, platform_consts, pci_consts, irq_consts, regions)
+        errors = audit_loongarch64(
+            kernel_consts, platform_consts, pci_consts, irq_consts, regions, free_regions
+        )
     elif target.name == "riscv64":
         errors = audit_riscv64(kernel_consts, platform_consts, regions)
     else:
