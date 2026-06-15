@@ -403,6 +403,36 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         r"fn\s+program_next_timer\(\)\s*\{.*?crate::kernel::smp::set_next_timer_deadline\(deadline\);.*?csr::set_tcfg\(\(initval\s*<<\s*TCFG_INITVAL_SHIFT\)\s*\|\s*TCFG_ENABLE\)",
         "LoongArch timer reprogramming path",
     )
+    require_regex(
+        errors,
+        trap_rs,
+        r"pub\s+unsafe\s+fn\s+restore_user_context_with_kernel_lock\([^)]*\)\s*->\s*!\s*\{.*?program_next_timer\(\);.*?kernel_lock\.defer_unlock_for_user_restore\(\);.*?restore_user_context_locked\(ctx\)",
+        "LoongArch locked restore reprograms timer before user entry",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+finish_kernel_exit\([^)]*\)\s*->\s*\*mut\s+UserContext\s*\{.*?program_next_timer\(\);.*?kernel_lock\.defer_unlock_for_user_restore\(\);.*?ctx",
+        "LoongArch kernel exit reprograms timer before deferred unlock",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"pub\s+fn\s+idle_scheduler_loop\(\)\s*->\s*!\s*\{.*?let\s+_\s*=\s*service_due_timer_interrupts\(\);",
+        "LoongArch idle scheduler services due timers",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"if\s+next\.is_null\(\)\s*\{.*?switch_to_kernel_vspace\(\);.*?program_next_timer\(\);.*?None",
+        "LoongArch idle scheduler reprograms timer before idle",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"else\s*\{.*?switch_to_tcb_vspace\(next\);.*?program_next_timer\(\);.*?Some\(\(ctx,\s*kernel_lock\)\)",
+        "LoongArch idle scheduler reprograms timer before user entry",
+    )
 
     user_sstatus = require_present(errors, "trap", trap_consts, "USER_SSTATUS")
     rootserver_sstatus = require_present(errors, "trap", trap_consts, "ROOTSERVER_SSTATUS")
