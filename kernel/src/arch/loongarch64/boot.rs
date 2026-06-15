@@ -37,10 +37,10 @@ pub unsafe extern "C" fn _start() -> ! {
         // installs the real per-hart TrapScratch pointer.
         "csrwr    $zero, 0x030",
 
-        // Disable FPU access before any hart enters Rust or parks. The
-        // LoongArch staging backend does not preserve user FPU state.
+        // Disable FPU/LSX/LASX access before any hart enters Rust or parks.
+        // The LoongArch staging backend does not preserve that user state.
         "csrrd    $t0, 0x002",
-        "li.d     $t1, -2",
+        "li.d     $t1, -8",
         "and      $t0, $t0, $t1",
         "csrwr    $t0, 0x002",
 

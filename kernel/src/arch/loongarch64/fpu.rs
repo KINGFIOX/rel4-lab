@@ -7,11 +7,14 @@
 use crate::object::tcb::{self, Tcb};
 
 const EUEN_FPE: usize = 1 << 0;
+const EUEN_SXE: usize = 1 << 1;
+const EUEN_ASXE: usize = 1 << 2;
+const EUEN_FPU_STATE_MASK: usize = EUEN_FPE | EUEN_SXE | EUEN_ASXE;
 
 #[inline]
 fn clear_fpu_enable() {
     let euen = crate::arch::loongarch64::csr::euen();
-    crate::arch::loongarch64::csr::set_euen(euen & !EUEN_FPE);
+    crate::arch::loongarch64::csr::set_euen(euen & !EUEN_FPU_STATE_MASK);
 }
 
 pub fn init_current_core() {

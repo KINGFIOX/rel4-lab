@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit that kernel FP-register/FCSR instructions stay in expected code."""
+"""Audit that kernel FP/SIMD state instructions stay in expected code."""
 
 from __future__ import annotations
 
@@ -87,6 +87,8 @@ LOONGARCH_FPU_PSEUDO_MNEMONICS = {
 }
 
 LOONGARCH_FPU_PREFIXES = (
+    "v",
+    "xv",
     "fadd.",
     "fsub.",
     "fmul.",
@@ -249,7 +251,7 @@ def loongarch_abi_name(elf: Path) -> str:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Check that emitted kernel FP-register/FCSR instructions stay in "
+            "Check that emitted kernel FP/SIMD state instructions stay in "
             "architecture-approved code."
         )
     )
@@ -318,7 +320,7 @@ def main(argv: list[str]) -> int:
     if offenders:
         allowed_description = allowed_source_arg or "no source file"
         print(
-            f"FAIL: {len(offenders)} FP-register/FCSR instructions are outside {allowed_description}",
+            f"FAIL: {len(offenders)} FP/SIMD state instructions are outside {allowed_description}",
             file=sys.stderr,
         )
         for address, location in offenders:
@@ -331,10 +333,10 @@ def main(argv: list[str]) -> int:
     )
     if allowed_source_arg:
         print(
-            f"PASS: {len(addresses)} FP-register/FCSR instructions confined to {allowed_source_arg}{abi_suffix}"
+            f"PASS: {len(addresses)} FP/SIMD state instructions confined to {allowed_source_arg}{abi_suffix}"
         )
     else:
-        print(f"PASS: no FP-register/FCSR instructions found for {args.target}{abi_suffix}")
+        print(f"PASS: no FP/SIMD state instructions found for {args.target}{abi_suffix}")
     if args.verbose:
         for location in sorted(set(locations)):
             print(f"  {location}")
