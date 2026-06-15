@@ -809,7 +809,6 @@ pub fn install_trap_vector() {
 
 pub fn init_timer() {
     clear_timer_interrupt();
-    csr::set_ecfg(csr::ecfg() | ECFG_LIE_TIMER);
     let now = csr::time() as u64;
     if crate::kernel::smp::current_core_id() == 0 {
         NEXT_SYNTHETIC_TIMER_IRQ_DEADLINE.store(
@@ -818,6 +817,7 @@ pub fn init_timer() {
         );
     }
     program_next_timer();
+    csr::set_ecfg(csr::ecfg() | ECFG_LIE_TIMER);
 }
 
 fn synthetic_timer_irq_deadline(now: u64) -> Option<u64> {

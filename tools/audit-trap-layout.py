@@ -394,8 +394,8 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     require_regex(
         errors,
         trap_rs,
-        r"pub\s+fn\s+init_timer\(\)\s*\{\s*clear_timer_interrupt\(\);.*?csr::set_ecfg\(csr::ecfg\(\)\s*\|\s*ECFG_LIE_TIMER\)",
-        "LoongArch clears stale timer interrupt before enabling timer",
+        r"pub\s+fn\s+init_timer\(\)\s*\{\s*clear_timer_interrupt\(\);.*?program_next_timer\(\);.*?csr::set_ecfg\(csr::ecfg\(\)\s*\|\s*ECFG_LIE_TIMER\)",
+        "LoongArch clears and programs timer before enabling interrupts",
     )
     require_regex(
         errors,
