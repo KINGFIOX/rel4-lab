@@ -108,7 +108,7 @@ pub fn ibar() {
 
 #[inline]
 pub fn dbar() {
-    unsafe { asm!("dbar 0", options(nostack, nomem)) };
+    unsafe { asm!("dbar 0", options(nostack)) };
 }
 
 #[inline]
