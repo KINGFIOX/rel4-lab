@@ -174,6 +174,11 @@ def main(argv: list[str]) -> int:
         )
         require_xv6_user_elf(PREFIX, target, payload_elf)
 
+        log(PREFIX, "auditing xv6-host ELF ABI checks")
+        audit_env = os.environ.copy()
+        audit_env["ARCH"] = target.name
+        run([sys.executable, "tools/audit-xv6-host-elf-abi.py"], cwd=ROOT_DIR, env=audit_env)
+
         log(PREFIX, f"building xv6-host rootserver {host_elf}")
         run(
             [
