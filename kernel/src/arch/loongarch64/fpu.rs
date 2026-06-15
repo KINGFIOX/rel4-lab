@@ -15,6 +15,7 @@ const EUEN_FPU_STATE_MASK: usize = EUEN_FPE | EUEN_SXE | EUEN_ASXE;
 fn clear_fpu_enable() {
     let euen = crate::arch::loongarch64::csr::euen();
     crate::arch::loongarch64::csr::set_euen(euen & !EUEN_FPU_STATE_MASK);
+    crate::arch::loongarch64::csr::dbar();
 }
 
 pub fn init_current_core() {

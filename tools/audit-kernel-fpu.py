@@ -254,8 +254,9 @@ def validate_loongarch_fpu_source() -> None:
         errors,
         fpu_rs,
         r"fn\s+clear_fpu_enable\(\)\s*\{.*?"
-        r"set_euen\(euen\s*&\s*!EUEN_FPU_STATE_MASK\);.*?\}",
-        "EUEN FPU/LSX/LASX clear helper",
+        r"set_euen\(euen\s*&\s*!EUEN_FPU_STATE_MASK\);.*?"
+        r"csr::dbar\(\);.*?\}",
+        "EUEN FPU/LSX/LASX clear helper with barrier",
     )
     require_source_regex(
         errors,
@@ -283,8 +284,9 @@ def validate_loongarch_fpu_source() -> None:
         r'"csrrd\s+\$t0,\s+0x002".*?'
         r'"li\.d\s+\$t1,\s+-8".*?'
         r'"and\s+\$t0,\s+\$t0,\s+\$t1".*?'
-        r'"csrwr\s+\$t0,\s+0x002"',
-        "early EUEN FPU/LSX/LASX clear before Rust entry",
+        r'"csrwr\s+\$t0,\s+0x002".*?'
+        r'"dbar\s+0"',
+        "early EUEN FPU/LSX/LASX clear barrier before Rust entry",
     )
 
     if errors:

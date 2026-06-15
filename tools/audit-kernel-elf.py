@@ -311,8 +311,9 @@ def validate_arch_boot_source(arch: str) -> list[str]:
             r'"csrrd\s+\$t0,\s+0x002".*?'
             r'"li\.d\s+\$t1,\s+-8".*?'
             r'"and\s+\$t0,\s+\$t0,\s+\$t1".*?'
-            r'"csrwr\s+\$t0,\s+0x002"',
-            "LoongArch early FPU/LSX/LASX disable before Rust entry",
+            r'"csrwr\s+\$t0,\s+0x002".*?'
+            r'"dbar\s+0"',
+            "LoongArch early FPU/LSX/LASX disable barrier before Rust entry",
         )
         require_source_regex(
             errors,

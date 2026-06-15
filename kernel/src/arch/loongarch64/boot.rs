@@ -43,6 +43,7 @@ pub unsafe extern "C" fn _start() -> ! {
         "li.d     $t1, -8",
         "and      $t0, $t0, $t1",
         "csrwr    $t0, 0x002",
+        "dbar     0",
 
         // Only core 0 may clear .bss and bring up shared kernel state.
         "bnez     $a7, 4f",
