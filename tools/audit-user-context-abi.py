@@ -174,6 +174,47 @@ def expected_userspace_indexes(target_name: str, kernel_regs: list[int]) -> dict
     return indexes
 
 
+def require_regex(errors: list[str], path: Path, pattern: str, description: str) -> None:
+    if re.search(pattern, path.read_text(), re.S) is None:
+        errors.append(f"{path.relative_to(ROOT_DIR)} is missing {description}")
+
+
+def audit_boot_rootserver_context(
+    errors: list[str], target_name: str, kernel_regs: list[int]
+) -> None:
+    boot_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "boot.rs"
+    register_indexes = (
+        USER_REGISTER_INDEX if target_name == "loongarch64" else RISCV_USER_REGISTER_INDEX
+    )
+    a0 = register_indexes["A0"]
+    a1 = register_indexes["A1"]
+    sp = register_indexes["Sp"]
+    require_regex(
+        errors,
+        boot_rs,
+        r"t\.context\.pc\s*=\s*args\.user_ventry\s+as\s+u64;.*?"
+        r"t\.context\.restart_pc\s*=\s*args\.user_ventry\s+as\s+u64;.*?"
+        r"t\.context\.sstatus\s*=\s*crate::arch::current::trap::ROOTSERVER_SSTATUS;",
+        f"{target_name} rootserver PC/restart/sstatus initialisation",
+    )
+    require_regex(
+        errors,
+        boot_rs,
+        rf"t\.context\.regs\[UserRegister::A0\.index\(\)\]\s*=\s*USER_BOOTINFO_VA\s+as\s+u64;.*?"
+        rf"t\.context\.regs\[UserRegister::A1\.index\(\)\]\s*=\s*0;.*?"
+        rf"t\.context\.regs\[UserRegister::Sp\.index\(\)\]\s*=\s*USER_STACK_TOP\s+as\s+u64;",
+        f"{target_name} rootserver a0/a1/sp initialisation",
+    )
+    expected = {
+        "A0": a0,
+        "A1": a1,
+        "Sp": sp,
+    }
+    for name, reg in expected.items():
+        if reg not in kernel_regs:
+            errors.append(f"{target_name} rootserver {name} register index {reg} missing")
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         description="Check kernel and xv6-host seL4_UserContext ABI constants."
@@ -193,6 +234,7 @@ def main(argv: list[str]) -> int:
     errors: list[str] = []
     if kernel_regs != expected_regs:
         errors.append(f"kernel SEL4_USER_CONTEXT_REGS={kernel_regs}, expected {expected_regs}")
+    audit_boot_rootserver_context(errors, target.name, kernel_regs)
 
     userspace_consts = parse_userspace_consts(userspace_arch)
     words = userspace_consts.get("USER_CONTEXT_WORDS")
