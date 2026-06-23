@@ -5,7 +5,7 @@ the LoongArch64 trap, VSpace, platform, SMP, syscall, and FPU interfaces.
 Running upstream `sel4test-driver` on LoongArch64 also needs a LoongArch-capable
 upstream seL4/sel4test tree.
 
-The vendored tree under `third_party/sel4-lab/sel4test` currently provides the
+The vendored tree under `third_party/sel4test` currently provides the
 RISC-V seL4 test image path. It does not currently include the upstream
 LoongArch64 seL4 kernel, libsel4, and elfloader port pieces that CMake needs to
 build a LoongArch64 sel4test image.

@@ -26,6 +26,12 @@ target
 
 /images
 
+# Kept only as a local backup after splitting seL4 repo-managed projects into
+# top-level submodules under /third_party/sel4test.
+/third_party/sel4-lab/
+/third_party/sel4test/.sel4_cache/
+/third_party/sel4test/build-*/
+
 /.cursor
 /.codex
 /.vscode

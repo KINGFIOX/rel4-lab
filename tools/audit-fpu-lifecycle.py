@@ -92,7 +92,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V D extension implies FPU support",
-        path="third_party/sel4-lab/sel4test/kernel/src/arch/riscv/config.cmake",
+        path="third_party/sel4test/kernel/src/arch/riscv/config.cmake",
         patterns=(
             r"config_option\(KernelRiscvExtF\s+RISCV_EXT_F",
             r"config_option\(KernelRiscvExtD\s+RISCV_EXT_D",
@@ -133,7 +133,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 local FPU owner switch anchor",
-        path="third_party/sel4-lab/sel4test/kernel/src/machine/fpu.c",
+        path="third_party/sel4test/kernel/src/machine/fpu.c",
         patterns=(
             r"void\s+switchLocalFpuOwner\(tcb_t \*new_owner\)",
             r"enableFpu\(\);",
@@ -146,7 +146,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 lazy FPU restore anchor",
-        path="third_party/sel4-lab/sel4test/kernel/include/machine/fpu.h",
+        path="third_party/sel4test/kernel/include/machine/fpu.h",
         patterns=(
             r"static\s+inline\s+void\s+FORCE_INLINE\s+lazyFPURestore",
             r"thread->tcbFlags\s*&\s*seL4_TCBFlag_fpuDisabled",
@@ -159,7 +159,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 switchToThread refreshes lazy FPU state",
-        path="third_party/sel4-lab/sel4test/kernel/src/kernel/thread.c",
+        path="third_party/sel4test/kernel/src/kernel/thread.c",
         patterns=(
             r"void\s+switchToThread\(tcb_t \*thread\)",
             r"Arch_switchToThread\(thread\)",
@@ -173,7 +173,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 native FPU owner is checked on thread affinity core",
-        path="third_party/sel4-lab/sel4test/kernel/include/machine/fpu.h",
+        path="third_party/sel4test/kernel/include/machine/fpu.h",
         patterns=(
             r"static\s+inline\s+bool_t\s+nativeThreadUsingFPU\(tcb_t \*thread\)",
             r"return\s+thread\s*==\s*NODE_STATE_ON_CORE\(ksCurFPUOwner,\s*thread->tcbAffinity\)",
@@ -182,7 +182,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V FPU boot init anchor",
-        path="third_party/sel4-lab/sel4test/kernel/src/arch/riscv/kernel/boot.c",
+        path="third_party/sel4test/kernel/src/arch/riscv/kernel/boot.c",
         patterns=(
             r"BOOT_CODE\s+static\s+void\s+init_fpu\(void\)",
             r"set_fs_clean\(\)",
@@ -196,7 +196,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 boot clears current FPU owner state",
-        path="third_party/sel4-lab/sel4test/kernel/src/kernel/boot.c",
+        path="third_party/sel4test/kernel/src/kernel/boot.c",
         patterns=(
             r"BOOT_CODE\s+void\s+init_core_state\(tcb_t \*scheduler_action\)",
             r"#ifdef\s+CONFIG_HAVE_FPU",
@@ -208,7 +208,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V FPU access shadow anchor",
-        path="third_party/sel4-lab/sel4test/kernel/include/arch/riscv/arch/machine/fpu.h",
+        path="third_party/sel4test/kernel/include/arch/riscv/arch/machine/fpu.h",
         patterns=(
             r"extern\s+bool_t\s+isFPUEnabled\[CONFIG_MAX_NUM_NODES\]",
             r"asm volatile\(\"csrs sstatus, %0\" :: \"rK\"\(SSTATUS_FS_CLEAN\)\)",
@@ -224,7 +224,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V FPU access toggles are shadow-only",
-        path="third_party/sel4-lab/sel4test/kernel/include/arch/riscv/arch/machine/fpu.h",
+        path="third_party/sel4test/kernel/include/arch/riscv/arch/machine/fpu.h",
         patterns=(
             r"static\s+inline\s+void\s+enableFpu\(void\)",
             r"isFPUEnabled\[CURRENT_CPU_INDEX\(\)\]\s*=\s*true",
@@ -241,12 +241,12 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V FPU access shadow is BSS-backed",
-        path="third_party/sel4-lab/sel4test/kernel/src/arch/riscv/machine/fpu.c",
+        path="third_party/sel4test/kernel/src/arch/riscv/machine/fpu.c",
         patterns=(r"bool_t\s+isFPUEnabled\[CONFIG_MAX_NUM_NODES\];",),
     ),
     Check(
         name="upstream seL4 RISC-V TCB FS-state helper clears then conditionally enables FS",
-        path="third_party/sel4-lab/sel4test/kernel/include/arch/riscv/arch/machine/fpu.h",
+        path="third_party/sel4test/kernel/include/arch/riscv/arch/machine/fpu.h",
         patterns=(
             r"static\s+inline\s+void\s+set_tcb_fs_state\(tcb_t \*tcb,\s*bool_t enabled\)",
             r"word_t\s+sstatus\s*=\s*getRegister\(tcb,\s*SSTATUS\)",
@@ -259,7 +259,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V sstatus FS bit encoding anchor",
-        path="third_party/sel4-lab/sel4test/kernel/include/arch/riscv/arch/machine/hardware.h",
+        path="third_party/sel4test/kernel/include/arch/riscv/arch/machine/hardware.h",
         patterns=(
             r"#define\s+SSTATUS_SPIE\s+0x00000020",
             r"#define\s+SSTATUS_FS\s+0x00006000",
@@ -271,7 +271,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V D FPU state layout anchor",
-        path="third_party/sel4-lab/sel4test/kernel/include/arch/riscv/arch/machine/registerset.h",
+        path="third_party/sel4test/kernel/include/arch/riscv/arch/machine/registerset.h",
         patterns=(
             r"SCAUSE\s*=\s*31",
             r"SSTATUS\s*=\s*32",
@@ -292,7 +292,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V context init does not pre-enable FPU state",
-        path="third_party/sel4-lab/sel4test/kernel/include/arch/riscv/arch/machine/registerset.h",
+        path="third_party/sel4test/kernel/include/arch/riscv/arch/machine/registerset.h",
         patterns=(
             r"static\s+inline\s+void\s+Arch_initContext\(user_context_t \*context\)",
             r"context->registers\[SSTATUS\]\s*=\s*SSTATUS_SPIE",
@@ -305,7 +305,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V fcsr CSR helper anchor",
-        path="third_party/sel4-lab/sel4test/kernel/include/arch/riscv/arch/machine.h",
+        path="third_party/sel4test/kernel/include/arch/riscv/arch/machine.h",
         patterns=(
             r"static\s+inline\s+uint32_t\s+read_fcsr\(void\)",
             r"asm\s+volatile\(\"csrr %0, fcsr\"\s*:\s*\"=r\"\(fcsr\)\)",
@@ -317,7 +317,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V FPU state save/load covers f0-f31 and fcsr",
-        path="third_party/sel4-lab/sel4test/kernel/include/arch/riscv/arch/machine/fpu.h",
+        path="third_party/sel4test/kernel/include/arch/riscv/arch/machine/fpu.h",
         patterns=(
             r"static\s+inline\s+void\s+saveFpuState\(tcb_t \*thread\)",
             r"set_fs_clean\(\)",
@@ -332,7 +332,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V restore FS boundary anchor",
-        path="third_party/sel4-lab/sel4test/kernel/src/arch/riscv/c_traps.c",
+        path="third_party/sel4test/kernel/src/arch/riscv/c_traps.c",
         patterns=(
             r"void\s+VISIBLE\s+NORETURN\s+restore_user_context\(void\)",
             r"set_tcb_fs_state\(NODE_STATE\(ksCurThread\),\s*isFpuEnable\(\)\)",
@@ -343,7 +343,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V fastpath restore FS boundary anchor",
-        path="third_party/sel4-lab/sel4test/kernel/include/arch/riscv/arch/fastpath/fastpath.h",
+        path="third_party/sel4test/kernel/include/arch/riscv/arch/fastpath/fastpath.h",
         patterns=(
             r"static\s+inline\s+void\s+NORETURN\s+FORCE_INLINE\s+fastpath_restore",
             r"c_exit_hook\(\)",
@@ -356,7 +356,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 signal fastpath slowpaths live FPU owners",
-        path="third_party/sel4-lab/sel4test/kernel/src/fastpath/fastpath.c",
+        path="third_party/sel4test/kernel/src/fastpath/fastpath.c",
         patterns=(
             r"void\s+NORETURN\s+fastpath_signal\(word_t cptr,\s*word_t msgInfo\)",
             r"dest\s*=\s*TCB_PTR\(notification_ptr_get_ntfnQueue_head\(ntfnPtr\)\)",
@@ -382,7 +382,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 TCB_SetFlags FPU anchor",
-        path="third_party/sel4-lab/sel4test/kernel/src/object/tcb.c",
+        path="third_party/sel4test/kernel/src/object/tcb.c",
         patterns=(
             r"static\s+void\s+invokeSetFlags",
             r"flags\s*&=\s*~clear",
@@ -399,7 +399,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 TCB_SetFlags decode boundary",
-        path="third_party/sel4-lab/sel4test/kernel/src/object/tcb.c",
+        path="third_party/sel4test/kernel/src/object/tcb.c",
         patterns=(
             r"static\s+exception_t\s+decodeSetFlags\(cap_t cap,\s*word_t length,\s*bool_t call,\s*word_t \*buffer\)",
             r"if\s*\(length\s*<\s*2\)",
@@ -414,7 +414,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream libsel4 TCB flag ABI anchor",
-        path="third_party/sel4-lab/sel4test/kernel/libsel4/include/sel4/constants.h",
+        path="third_party/sel4test/kernel/libsel4/include/sel4/constants.h",
         patterns=(
             r"seL4_TCBFlag_NoFlag\s*=\s*0x0",
             r"seL4_TCBFlag_fpuDisabled\s*=\s*0x1",
@@ -425,7 +425,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream libsel4 TCB_SetFlags XML contract keeps flags in first MR",
-        path="third_party/sel4-lab/sel4test/kernel/libsel4/include/interfaces/object-api.xml",
+        path="third_party/sel4test/kernel/libsel4/include/interfaces/object-api.xml",
         patterns=(
             r"<method\s+id=\"TCBSetFlags\"\s+name=\"SetFlags\"",
             r"Currently the only flag supported is\s+<texttt text=\"seL4_TCBFlag_fpuDisabled\"/>",
@@ -436,7 +436,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 untyped reset clears memory before ordinary TCB creation",
-        path="third_party/sel4-lab/sel4test/kernel/src/object/untyped.c",
+        path="third_party/sel4test/kernel/src/object/untyped.c",
         patterns=(
             r"static\s+exception_t\s+resetUntypedCap\(cte_t \*srcSlot\)",
             r"clearMemory\(regionBase,\s*block_size\)",
@@ -449,7 +449,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 ordinary TCB creation leaves fpuDisabled clear",
-        path="third_party/sel4-lab/sel4test/kernel/src/object/objecttype.c",
+        path="third_party/sel4test/kernel/src/object/objecttype.c",
         patterns=(
             r"cap_t\s+createObject\(object_t t,\s*void \*regionBase,\s*word_t userSize,\s*bool_t deviceMemory\)",
             r"case\s+seL4_TCBObject:",
@@ -465,7 +465,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 initial thread setup does not overwrite FPU state or flags",
-        path="third_party/sel4-lab/sel4test/kernel/src/kernel/boot.c",
+        path="third_party/sel4test/kernel/src/kernel/boot.c",
         patterns=(
             r"BOOT_CODE\s+tcb_t\s+\*create_initial_thread",
             r"tcb_t\s+\*tcb\s*=\s*TCB_PTR\(rootserver\.tcb\s+\+\s+TCB_OFFSET\)",
@@ -483,7 +483,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream RISC-V UserException fault ABI anchor",
-        path="third_party/sel4-lab/sel4test/kernel/libsel4/sel4_arch_include/riscv64/sel4/sel4_arch/constants.h",
+        path="third_party/sel4test/kernel/libsel4/sel4_arch_include/riscv64/sel4/sel4_arch/constants.h",
         patterns=(
             r"seL4_UserException_FaultIP",
             r"seL4_UserException_SP",
@@ -495,7 +495,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V illegal instruction fault number anchor",
-        path="third_party/sel4-lab/sel4test/kernel/include/arch/riscv/arch/machine/hardware.h",
+        path="third_party/sel4test/kernel/include/arch/riscv/arch/machine/hardware.h",
         patterns=(
             r"enum\s+vm_fault_type",
             r"RISCVInstructionIllegal\s*=\s*2",
@@ -504,7 +504,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V non-VM exceptions become UserException scause zero-code faults",
-        path="third_party/sel4-lab/sel4test/kernel/src/arch/riscv/c_traps.c",
+        path="third_party/sel4test/kernel/src/arch/riscv/c_traps.c",
         patterns=(
             r"word_t\s+scause\s*=\s*read_scause\(\)",
             r"case\s+RISCVInstructionAccessFault:",
@@ -521,7 +521,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 UserException stores Number and Code from user-level fault args",
-        path="third_party/sel4-lab/sel4test/kernel/src/api/syscall.c",
+        path="third_party/sel4test/kernel/src/api/syscall.c",
         patterns=(
             r"exception_t\s+handleUserLevelFault\(word_t w_a,\s*word_t w_b\)",
             r"current_fault\s*=\s*seL4_Fault_UserException_new\(w_a,\s*w_b\)",
@@ -533,7 +533,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream RISC-V UserException reply writes only FaultIP and SP",
-        path="third_party/sel4-lab/sel4test/kernel/include/arch/riscv/arch/machine/registerset.h",
+        path="third_party/sel4test/kernel/include/arch/riscv/arch/machine/registerset.h",
         patterns=(
             r"#define\s+EXCEPTION_MESSAGE",
             r"\[seL4_UserException_FaultIP\]\s*=\s*FaultIP",
@@ -544,7 +544,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 UserException fault replies use exception message length",
-        path="third_party/sel4-lab/sel4test/kernel/src/api/faults.c",
+        path="third_party/sel4test/kernel/src/api/faults.c",
         patterns=(
             r"static\s+inline\s+void\s+copyMRsFaultReply",
             r"fault_messages\[id\]\[i\]",
@@ -557,7 +557,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V TCB register ABI anchor",
-        path="third_party/sel4-lab/sel4test/kernel/src/arch/riscv/machine/registerset.c",
+        path="third_party/sel4test/kernel/src/arch/riscv/machine/registerset.c",
         patterns=(
             r"const\s+register_t\s+frameRegisters\[\]\s*=\s*\{",
             r"FaultIP,\s*ra,\s*sp,\s*gp",
@@ -571,7 +571,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream libsel4 RISC-V UserContext ABI anchor",
-        path="third_party/sel4-lab/sel4test/kernel/libsel4/arch_include/riscv/sel4/arch/types.h",
+        path="third_party/sel4test/kernel/libsel4/arch_include/riscv/sel4/arch/types.h",
         patterns=(
             r"typedef\s+struct\s+seL4_UserContext_",
             r"seL4_Word\s+pc;",
@@ -612,7 +612,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V CopyRegisters has no arch FPU transfer",
-        path="third_party/sel4-lab/sel4test/kernel/src/arch/riscv/object/tcb.c",
+        path="third_party/sel4test/kernel/src/arch/riscv/object/tcb.c",
         patterns=(
             r"word_t\s+CONST\s+Arch_decodeTransfer\(word_t flags\)",
             r"return\s+0;",
@@ -623,7 +623,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 idle thread starts FPU-disabled and idle handoff does not release owner",
-        path="third_party/sel4-lab/sel4test/kernel/src/kernel/thread.c",
+        path="third_party/sel4test/kernel/src/kernel/thread.c",
         patterns=(
             r"BOOT_CODE\s+void\s+configureIdleThread\(tcb_t \*tcb\)",
             r"tcb->tcbFlags\s*=\s*seL4_TCBFlag_fpuDisabled",
@@ -640,7 +640,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 domain handoff FPU release anchor",
-        path="third_party/sel4-lab/sel4test/kernel/src/kernel/thread.c",
+        path="third_party/sel4test/kernel/src/kernel/thread.c",
         patterns=(
             r"void\s+prepareSetDomain\(tcb_t \*tptr,\s*dom_t dom\)",
             r"ksCurDomain\s*!=\s*dom",
@@ -690,7 +690,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 SMP migration releases remote FPU owner anchor",
-        path="third_party/sel4-lab/sel4test/kernel/src/model/smp.c",
+        path="third_party/sel4test/kernel/src/model/smp.c",
         patterns=(
             r"void\s+migrateTCB\(tcb_t \*tcb,\s*word_t new_core\)",
             r"CONFIG_HAVE_FPU",
@@ -701,7 +701,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 Thread finalisation calls RISC-V FPU release hook",
-        path="third_party/sel4-lab/sel4test/kernel/src/object/objecttype.c",
+        path="third_party/sel4test/kernel/src/object/objecttype.c",
         patterns=(
             r"case\s+cap_thread_cap:",
             r"if\s*\(final\)",
@@ -714,7 +714,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V prepareThreadDelete releases FPU owner",
-        path="third_party/sel4-lab/sel4test/kernel/src/arch/riscv/object/objecttype.c",
+        path="third_party/sel4test/kernel/src/arch/riscv/object/objecttype.c",
         patterns=(
             r"void\s+Arch_prepareThreadDelete\(tcb_t \*thread\)",
             r"#ifdef\s+CONFIG_HAVE_FPU",
@@ -725,7 +725,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V remote FPU owner switch anchor",
-        path="third_party/sel4-lab/sel4test/kernel/src/arch/riscv/smp/ipi.c",
+        path="third_party/sel4test/kernel/src/arch/riscv/smp/ipi.c",
         patterns=(
             r"void\s+handleRemoteCall\(IpiRemoteCall_t call,\s*word_t arg0,\s*word_t arg1,\s*word_t arg2,\s*bool_t irqPath\)",
             r"case\s+IpiRemoteCall_switchFpuOwner:",
@@ -736,7 +736,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 keeps remote TCB stall separate from FPU owner switch",
-        path="third_party/sel4-lab/sel4test/kernel/src/arch/riscv/smp/ipi.c",
+        path="third_party/sel4test/kernel/src/arch/riscv/smp/ipi.c",
         patterns=(
             r"case\s+IpiRemoteCall_Stall:",
             r"ipiStallCoreCallback\(irqPath\)",
@@ -755,7 +755,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 RISC-V remote FPU owner request helper anchor",
-        path="third_party/sel4-lab/sel4test/kernel/include/arch/riscv/arch/smp/ipi_inline.h",
+        path="third_party/sel4test/kernel/include/arch/riscv/arch/smp/ipi_inline.h",
         patterns=(
             r"static\s+inline\s+void\s+doRemoteswitchFpuOwner\(tcb_t \*new_owner,\s*word_t cpu\)",
             r"doRemoteOp1Arg\(IpiRemoteCall_switchFpuOwner,\s*\(word_t\)new_owner,\s*cpu\)",
@@ -764,7 +764,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream seL4 FPU release only clears native owners",
-        path="third_party/sel4-lab/sel4test/kernel/src/machine/fpu.c",
+        path="third_party/sel4test/kernel/src/machine/fpu.c",
         patterns=(
             r"void\s+fpuRelease\(tcb_t \*thread\)",
             r"nativeThreadUsingFPU\(thread\)",
@@ -774,7 +774,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream sel4test FPU basic operation expectation",
-        path="third_party/sel4-lab/sel4test/projects/sel4test/apps/sel4test-tests/src/tests/fpu.c",
+        path="third_party/sel4test/projects/sel4test/apps/sel4test-tests/src/tests/fpu.c",
         patterns=(
             r"static\s+int\s+test_fpu_trivial\(env_t env\)",
             r"double\s+a\s*=\s*\(double\)3\.141592653589793238462643383279",
@@ -788,7 +788,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream sel4test FPU multithread context-switch expectation",
-        path="third_party/sel4-lab/sel4test/projects/sel4test/apps/sel4test-tests/src/tests/fpu.c",
+        path="third_party/sel4test/projects/sel4test/apps/sel4test-tests/src/tests/fpu.c",
         patterns=(
             r"static\s+int\s+test_fpu_multithreaded\(struct env \*env\)",
             r"const\s+int\s+NUM_THREADS\s*=\s*4",
@@ -804,7 +804,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream sel4test FPU migration validation scope anchor",
-        path="third_party/sel4-lab/sel4test/projects/sel4test/apps/sel4test-tests/src/tests/fpu.c",
+        path="third_party/sel4test/projects/sel4test/apps/sel4test-tests/src/tests/fpu.c",
         patterns=(
             r"int\s+smp_test_fpu\(env_t env\)",
             r"volatile\s+double\s+ex\s*=\s*fpu_calculation\(\)",
@@ -820,7 +820,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream sel4test FPU TCB_SetFlags ABI expectations",
-        path="third_party/sel4-lab/sel4test/projects/sel4test/apps/sel4test-tests/src/tests/fpu.c",
+        path="third_party/sel4test/projects/sel4test/apps/sel4test-tests/src/tests/fpu.c",
         patterns=(
             r"int\s+test_setflags\(env_t env\)",
             r"res\s*=\s*seL4_TCB_SetFlags\(t\.thread\.tcb\.cptr,\s*0,\s*0\)",
@@ -835,7 +835,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="upstream sel4test FPU disable fault and re-enable expectations",
-        path="third_party/sel4-lab/sel4test/projects/sel4test/apps/sel4test-tests/src/tests/fpu.c",
+        path="third_party/sel4test/projects/sel4test/apps/sel4test-tests/src/tests/fpu.c",
         patterns=(
             r"int\s+test_disable_enable\(env_t env\)",
             r"seL4_TCB_SetSpace\(t\.thread\.tcb\.cptr,\s*t\.local_endpoint\.cptr",

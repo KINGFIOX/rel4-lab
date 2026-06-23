@@ -38,7 +38,7 @@ microkernel/
 |   |-- uart-server/           # user console UART server
 |   `-- virtio-disk-server/    # virtio-blk device server
 |-- third_party/
-|   |-- sel4-lab/sel4test/     # upstream seL4/sel4test checkout
+|   |-- sel4test/              # upstream seL4/sel4test submodule tree
 |   `-- xv6-riscv/             # upstream xv6 tree for user programs/fs.img
 |-- tools/                     # build, pack, QEMU, and test helpers
 `-- docs/milestones/           # detailed project status
@@ -50,8 +50,14 @@ Use Nix with flakes enabled. The helper scripts assume the upstream seL4 tree
 and build directory are available at:
 
 ```text
-${SEL4_TREE_DIR:-./third_party/sel4-lab/sel4test}
-${SEL4_BUILD_DIR:-./third_party/sel4-lab/sel4test/build-riscv64}
+${SEL4_TREE_DIR:-./third_party/sel4test}
+${SEL4_BUILD_DIR:-./third_party/sel4test/build-riscv64}
+```
+
+Initialize the upstream seL4/sel4test components with normal git submodules:
+
+```sh
+git submodule update --init --recursive third_party/sel4test
 ```
 
 Enter the development environment with either:

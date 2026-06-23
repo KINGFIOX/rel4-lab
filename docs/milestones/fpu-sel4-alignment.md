@@ -2,7 +2,7 @@
 
 This note is the requirement-by-requirement checklist for aligning the Rust
 RV64 FPU implementation with the vendored upstream seL4 baseline under
-`third_party/sel4-lab/sel4test/kernel`. It covers the current
+`third_party/sel4test/kernel`. It covers the current
 `riscv64gc-unknown-none-elf`, `KernelHaveFPU`, two-hart-capable build for the
 single-domain rel4 scheduler. It does not claim a formal proof and does not
 expand scope beyond seL4's RISC-V FPU semantics.

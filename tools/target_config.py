@@ -188,7 +188,7 @@ class TargetConfig:
         )
 
 
-DEFAULT_SEL4_TREE_DIR = ROOT_DIR / "third_party" / "sel4-lab" / "sel4test"
+DEFAULT_SEL4_TREE_DIR = ROOT_DIR / "third_party" / "sel4test"
 
 
 def sel4_tree_dir_from_env(build_dir: Path) -> Path:
