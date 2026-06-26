@@ -26,6 +26,7 @@ from tool_common import (
 PREFIX = "audit-kernel-fpu"
 DEFAULT_RUST_TARGET = "riscv64gc-unknown-none-elf"
 DEFAULT_RISCV_ALLOWED_SOURCE = "kernel/src/arch/riscv64/fpu.rs"
+DEFAULT_LOONGARCH_ALLOWED_SOURCE = "kernel/src/arch/loongarch64/fpu.rs"
 
 INSTRUCTION_RE = re.compile(
     r"^\s*([0-9a-fA-F]+):(?:\s+[0-9a-fA-F]{2,8})+\s+([A-Za-z0-9_.]+)\b(?:\s+(.*))?$"
@@ -78,6 +79,8 @@ LOONGARCH_FPU_PSEUDO_MNEMONICS = {
     "fld.d",
     "fst.s",
     "fst.d",
+    "movcf2gr",
+    "movgr2cf",
     "movgr2fr.w",
     "movgr2fr.d",
     "movgr2fcsr",
@@ -86,9 +89,7 @@ LOONGARCH_FPU_PSEUDO_MNEMONICS = {
     "movfcsr2gr",
 }
 
-LOONGARCH_FPU_PREFIXES = (
-    "v",
-    "xv",
+LOONGARCH_SCALAR_FPU_PREFIXES = (
     "fadd.",
     "fsub.",
     "fmul.",
@@ -112,6 +113,11 @@ LOONGARCH_FPU_PREFIXES = (
     "ffint.",
     "frint.",
     "fcmp.",
+)
+
+LOONGARCH_VECTOR_PREFIXES = (
+    "v",
+    "xv",
 )
 
 CSR_FPU_REGISTERS = {
@@ -150,7 +156,7 @@ def default_allowed_source(target: str) -> str | None:
         case "riscv64":
             return DEFAULT_RISCV_ALLOWED_SOURCE
         case "loongarch64":
-            return None
+            return DEFAULT_LOONGARCH_ALLOWED_SOURCE
         case _:
             raise AssertionError("unreachable target architecture")
 
@@ -200,8 +206,12 @@ def is_riscv_fpu_mnemonic(mnemonic: str, operands: str = "") -> bool:
 
 def is_loongarch_fpu_mnemonic(mnemonic: str, _operands: str = "") -> bool:
     return mnemonic in LOONGARCH_FPU_PSEUDO_MNEMONICS or mnemonic.startswith(
-        LOONGARCH_FPU_PREFIXES
+        LOONGARCH_SCALAR_FPU_PREFIXES + LOONGARCH_VECTOR_PREFIXES
     )
+
+
+def is_loongarch_vector_mnemonic(mnemonic: str) -> bool:
+    return mnemonic.startswith(LOONGARCH_VECTOR_PREFIXES)
 
 
 def is_fpu_mnemonic(target: str, mnemonic: str, operands: str = "") -> bool:
@@ -268,22 +278,65 @@ def validate_loongarch_fpu_source() -> None:
     require_source_regex(
         errors,
         fpu_rs,
+        r"fn\s+set_scalar_fpu_enable\(\)\s*\{.*?"
+        r"set_euen\(\(euen\s*\|\s*EUEN_FPE\)\s*&\s*!EUEN_VECTOR_STATE_MASK\);.*?"
+        r"csr::dbar\(\);.*?\}",
+        "scalar FPU enable helper keeps LSX/LASX disabled",
+    )
+    require_source_regex(
+        errors,
+        fpu_rs,
+        r"unsafe\s+fn\s+save_fpu_state\(thread:\s*\*mut Tcb\).*?"
+        r"fst\.d\s+\$f0.*?"
+        r"fst\.d\s+\$f31.*?"
+        r"dest\.fcsr\s*=\s*read_fcsr\(\);.*?"
+        r"dest\.fcc\s*=\s*read_fcc\(\);",
+        "LoongArch scalar FPU save covers f0-f31, fcsr, and fcc",
+    )
+    require_source_regex(
+        errors,
+        fpu_rs,
+        r"fn\s+read_fcc\(\)\s*->\s*u64.*?"
+        r"movcf2gr\s+\{fcc0\},\s+\$fcc0.*?"
+        r"movcf2gr\s+\{fcc7\},\s+\$fcc7",
+        "LoongArch scalar FPU save reads fcc0-fcc7",
+    )
+    require_source_regex(
+        errors,
+        fpu_rs,
+        r"unsafe\s+fn\s+load_fpu_state\(thread:\s*\*const Tcb\).*?"
+        r"fld\.d\s+\$f0.*?"
+        r"fld\.d\s+\$f31.*?"
+        r"write_fcsr\(src\.fcsr\);.*?"
+        r"write_fcc\(src\.fcc\);",
+        "LoongArch scalar FPU load covers f0-f31, fcsr, and fcc",
+    )
+    require_source_regex(
+        errors,
+        fpu_rs,
+        r"fn\s+write_fcc\(fcc:\s*u64\).*?"
+        r"movgr2cf\s+\$fcc0,\s+\{fcc0\}.*?"
+        r"movgr2cf\s+\$fcc7,\s+\{fcc7\}",
+        "LoongArch scalar FPU load writes fcc0-fcc7",
+    )
+    require_source_regex(
+        errors,
+        fpu_rs,
         r"pub\s+fn\s+lazy_restore\(thread:\s*\*mut Tcb\)\s*\{.*?"
+        r"fpu_disabled_snapshot\(thread\).*?"
         r"disable_access\(\);.*?"
-        r"tcb::set_fpu_context_enabled\(thread,\s*false\);.*?\}",
-        "lazy restore keeps TCB FPU context disabled",
+        r"tcb::set_fpu_context_enabled\(thread,\s*false\).*?"
+        r"switch_local_owner\(thread\)",
+        "lazy restore honors fpuDisabled and switches scalar FPU owner",
     )
     require_source_regex(
         errors,
         trap_rs,
-        r"pub\s+const\s+SSTATUS_FS_MASK\s*:\s*u64\s*=\s*0\s*;",
-        "zero FPU status mask for LoongArch TCB context",
-    )
-    require_source_regex(
-        errors,
-        trap_rs,
-        r"pub\s+const\s+SSTATUS_FS_CLEAN\s*:\s*u64\s*=\s*0\s*;",
-        "zero FPU clean state for LoongArch TCB context",
+        r"pub\s+struct\s+FpuState\s*\{.*?"
+        r"pub\s+regs:\s*\[u64;\s*LOONGARCH_NUM_FP_REGS\].*?"
+        r"pub\s+fcsr:\s*u32.*?"
+        r"pub\s+fcc:\s*u64.*?\}",
+        "LoongArch scalar FPU state in UserContext",
     )
     require_source_regex(
         errors,
@@ -357,8 +410,7 @@ def main(argv: list[str]) -> int:
         default=None,
         help=(
             "repo-relative source file allowed to contain FPU instructions; "
-            "defaults to the RISC-V FPU helper for RISC-V and no allowed "
-            "source for LoongArch64"
+            "defaults to the architecture FPU helper for RISC-V and LoongArch64"
         ),
     )
     parser.add_argument(
@@ -405,6 +457,25 @@ def main(argv: list[str]) -> int:
     addr2line = tool_name(args.target, "ADDR2LINE", "addr2line")
     objdump_output = output([objdump, "-d", str(elf)])
     addresses = fpu_instruction_addresses(args.target, objdump_output)
+    if arch == "loongarch64":
+        vector_addresses = []
+        for line in objdump_output.splitlines():
+            match = INSTRUCTION_RE.match(line)
+            if match is None:
+                continue
+            address, mnemonic, _operands = match.groups()
+            if is_loongarch_vector_mnemonic(mnemonic):
+                vector_addresses.append(f"0x{address}")
+        if vector_addresses:
+            locations = resolve_locations(addr2line, elf, vector_addresses)
+            print(
+                f"FAIL: {len(vector_addresses)} LoongArch LSX/LASX instructions found",
+                file=sys.stderr,
+            )
+            for address, location in zip(vector_addresses, locations, strict=True):
+                print(f"  {address}: {location}", file=sys.stderr)
+            return 1
+
     locations = resolve_locations(addr2line, elf, addresses)
     offenders = [
         (address, location)

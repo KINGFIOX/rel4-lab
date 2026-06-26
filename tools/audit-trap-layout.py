@@ -39,6 +39,7 @@ LOONGARCH_USER_CONTEXT_FIELDS = {
     "pc": "USER_CONTEXT_PC",
     "sstatus": "USER_CONTEXT_SSTATUS",
     "restart_pc": "USER_CONTEXT_RESTART_PC",
+    "fpu": "USER_CONTEXT_FPU",
     "trap_record": "USER_CONTEXT_TRAP_RECORD",
 }
 

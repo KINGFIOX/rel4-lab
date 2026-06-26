@@ -16,6 +16,35 @@ use crate::abi::types::MessageInfo;
 use crate::arch::loongarch64::csr;
 use crate::object::cap::CapTag;
 
+pub const LOONGARCH_NUM_FP_REGS: usize = 32;
+pub const LOONGARCH_FP_REG_BYTES: usize = 8;
+pub const LOONGARCH_FPU_STATE_BYTES: usize =
+    LOONGARCH_NUM_FP_REGS * LOONGARCH_FP_REG_BYTES + 2 * WORD_BYTES;
+
+/// Scalar LoongArch64 FPU state saved lazily at ownership switches.
+///
+/// LSX/LASX vector state is intentionally not part of this context; the
+/// LoongArch FPU backend keeps `EUEN.SXE` and `EUEN.ASXE` disabled.
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+pub struct FpuState {
+    pub regs: [u64; LOONGARCH_NUM_FP_REGS],
+    pub fcsr: u32,
+    pub _pad: u32,
+    pub fcc: u64,
+}
+
+impl FpuState {
+    pub const fn zero() -> Self {
+        Self {
+            regs: [0; LOONGARCH_NUM_FP_REGS],
+            fcsr: 0,
+            _pad: 0,
+            fcc: 0,
+        }
+    }
+}
+
 /// User-mode register snapshot shape for the LoongArch64 trap entry.
 ///
 /// `regs[0]` is hardwired zero. The remaining indexes are architectural GPR
@@ -27,17 +56,25 @@ pub struct UserContext {
     pub pc: u64,
     pub sstatus: u64,
     pub restart_pc: u64,
+    pub fpu: FpuState,
     pub trap_record: TrapRecord,
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<UserContext>() == 39 * 8);
+    assert!(core::mem::size_of::<UserContext>() == 73 * 8);
+    assert!(core::mem::size_of::<FpuState>() == LOONGARCH_FPU_STATE_BYTES);
     assert!(core::mem::size_of::<TrapRecord>() == 4 * 8);
     assert!(core::mem::offset_of!(UserContext, regs) == 0);
     assert!(core::mem::offset_of!(UserContext, pc) == 32 * 8);
     assert!(core::mem::offset_of!(UserContext, sstatus) == 33 * 8);
     assert!(core::mem::offset_of!(UserContext, restart_pc) == 34 * 8);
-    assert!(core::mem::offset_of!(UserContext, trap_record) == 35 * 8);
+    assert!(core::mem::offset_of!(UserContext, fpu) == 35 * 8);
+    assert!(core::mem::offset_of!(UserContext, trap_record) == 69 * 8);
+    assert!(core::mem::offset_of!(FpuState, regs) == 0);
+    assert!(
+        core::mem::offset_of!(FpuState, fcsr) == LOONGARCH_NUM_FP_REGS * LOONGARCH_FP_REG_BYTES
+    );
+    assert!(core::mem::offset_of!(FpuState, fcc) == 33 * 8);
     assert!(core::mem::offset_of!(TrapRecord, era) == 0);
     assert!(core::mem::offset_of!(TrapRecord, prmd) == 1 * 8);
     assert!(core::mem::offset_of!(TrapRecord, estat) == 2 * 8);
@@ -51,6 +88,7 @@ impl UserContext {
             pc: 0,
             sstatus: 0,
             restart_pc: 0,
+            fpu: FpuState::zero(),
             trap_record: TrapRecord::zero(),
         }
     }
