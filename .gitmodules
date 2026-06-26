@@ -4,25 +4,25 @@
 
 [submodule "third_party/sel4test/kernel"]
 	path = third_party/sel4test/kernel
-	url = https://github.com/seL4/seL4.git
+	url = https://github.com/KINGFIOX/seL4.git
 [submodule "third_party/sel4test/projects/musllibc"]
 	path = third_party/sel4test/projects/musllibc
-	url = https://github.com/seL4/musllibc.git
+	url = https://github.com/KINGFIOX/musllibc.git
 [submodule "third_party/sel4test/projects/seL4_libs"]
 	path = third_party/sel4test/projects/seL4_libs
-	url = https://github.com/seL4/seL4_libs.git
+	url = https://github.com/KINGFIOX/seL4_libs.git
 [submodule "third_party/sel4test/projects/sel4_projects_libs"]
 	path = third_party/sel4test/projects/sel4_projects_libs
-	url = https://github.com/seL4/sel4_projects_libs
+	url = https://github.com/KINGFIOX/sel4_projects_libs.git
 [submodule "third_party/sel4test/projects/sel4runtime"]
 	path = third_party/sel4test/projects/sel4runtime
-	url = https://github.com/seL4/sel4runtime.git
+	url = https://github.com/KINGFIOX/sel4runtime.git
 [submodule "third_party/sel4test/projects/sel4test"]
 	path = third_party/sel4test/projects/sel4test
-	url = https://github.com/seL4/sel4test.git
+	url = https://github.com/KINGFIOX/sel4test.git
 [submodule "third_party/sel4test/projects/util_libs"]
 	path = third_party/sel4test/projects/util_libs
-	url = https://github.com/seL4/util_libs.git
+	url = https://github.com/KINGFIOX/util_libs.git
 [submodule "third_party/sel4test/tools/nanopb"]
 	path = third_party/sel4test/tools/nanopb
 	url = https://github.com/nanopb/nanopb
@@ -31,4 +31,4 @@
 	url = https://github.com/riscv/opensbi
 [submodule "third_party/sel4test/tools/seL4"]
 	path = third_party/sel4test/tools/seL4
-	url = https://github.com/seL4/seL4_tools.git
+	url = https://github.com/KINGFIOX/seL4_tools.git
