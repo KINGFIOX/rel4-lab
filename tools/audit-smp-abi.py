@@ -65,7 +65,9 @@ def audit_common_smp(errors: list[str]) -> None:
 
 def audit_riscv64(errors: list[str]) -> None:
     smp_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "smp.rs"
+    mod_rs = ROOT_DIR / "kernel" / "src" / "arch" / "riscv64" / "mod.rs"
     sbi_rs = ROOT_DIR / "kernel" / "src" / "arch" / "riscv64" / "sbi.rs"
+    require_text(errors, mod_rs, "pub use sbi as ipi;", "RISC-V SBI IPI alias")
     require_text(errors, sbi_rs, "pub const SUPPORTS_REMOTE_IPI: bool = true;", "SBI IPI")
     require_text(
         errors,
@@ -77,36 +79,38 @@ def audit_riscv64(errors: list[str]) -> None:
         errors,
         smp_rs,
         r"#\[cfg\(target_arch\s*=\s*\"riscv64\"\)\]\s*"
-        r"fn\s+remote_sfence_vma_core\([^)]*\).*?remote_sfence_vma\(1,\s*hart_id,\s*0,\s*0\)",
-        "RISC-V remote sfence.vma SBI path",
+        r"fn\s+remote_sfence_vma_core\([^)]*\).*?current::ipi::remote_sfence_vma\(1,\s*hart_id,\s*0,\s*0\)",
+        "RISC-V remote sfence.vma IPI/RFENCE path",
     )
     require_regex(
         errors,
         smp_rs,
         r"#\[cfg\(target_arch\s*=\s*\"riscv64\"\)\]\s*"
         r"fn\s+remote_sfence_vma_asid_core\([^)]*\).*?"
-        r"remote_sfence_vma_asid\(1,\s*hart_id,\s*0,\s*0,\s*asid\)",
-        "RISC-V remote sfence.vma.asid SBI path",
+        r"current::ipi::remote_sfence_vma_asid\(1,\s*hart_id,\s*0,\s*0,\s*asid\)",
+        "RISC-V remote sfence.vma.asid IPI/RFENCE path",
     )
 
 
 def audit_loongarch64(errors: list[str]) -> None:
     smp_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "smp.rs"
     irq_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "irq.rs"
-    sbi_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "sbi.rs"
+    mod_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "mod.rs"
+    ipi_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "ipi.rs"
     trap_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "trap.rs"
-    require_text(errors, sbi_rs, "pub const SUPPORTS_REMOTE_IPI: bool = true;", "IOCSR IPI")
+    require_text(errors, mod_rs, "pub mod ipi;", "LoongArch IPI module")
+    require_text(errors, ipi_rs, "pub const SUPPORTS_REMOTE_IPI: bool = true;", "IOCSR IPI")
     require_text(
         errors,
-        sbi_rs,
+        ipi_rs,
         "pub const SUPPORTS_REMOTE_TLB_FLUSH: bool = false;",
-        "no SBI RFENCE on LoongArch",
+        "no direct RFENCE backend on LoongArch",
     )
-    require_text(errors, sbi_rs, "IOCSR_IPI_SEND", "IOCSR IPI send register")
-    require_text(errors, sbi_rs, "IPI_SEND_ACTION_RESCHEDULE", "IPI reschedule action")
+    require_text(errors, ipi_rs, "IOCSR_IPI_SEND", "IOCSR IPI send register")
+    require_text(errors, ipi_rs, "IPI_SEND_ACTION_RESCHEDULE", "IPI reschedule action")
     require_regex(
         errors,
-        sbi_rs,
+        ipi_rs,
         r"pub\s+fn\s+init_ipi\(\)\s*\{\s*"
         r"csr::iocsr_write64\(IOCSR_IPI_CLEAR,\s*u64::MAX\);"
         r"\s*csr::iocsr_write64\(IOCSR_IPI_EN,\s*u64::MAX\);"
@@ -115,7 +119,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        sbi_rs,
+        ipi_rs,
         r"pub\s+fn\s+ack_ipi\(\)\s*->\s*bool\s*\{.*?"
         r"csr::iocsr_write64\(IOCSR_IPI_CLEAR,\s*pending\);"
         r"\s*csr::dbar\(\);",
@@ -123,8 +127,8 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        sbi_rs,
-        r"pub\s+fn\s+send_ipi\([^)]*\)\s*->\s*SbiRet\s*\{.*?"
+        ipi_rs,
+        r"pub\s+fn\s+send_ipi\([^)]*\)\s*->\s*IpiRet\s*\{.*?"
         r"csr::iocsr_write64\(\s*IOCSR_IPI_SEND,.*?"
         r"csr::dbar\(\);\s*OK",
         "LoongArch IPI send write barrier",
@@ -184,7 +188,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     require_text(
         errors,
         smp_rs,
-        "#[cfg(target_arch = \"loongarch64\")]\n    crate::arch::current::sbi::ack_ipi();",
+        "#[cfg(target_arch = \"loongarch64\")]\n    crate::arch::current::ipi::ack_ipi();",
         "LoongArch remote op IPI acknowledgement",
     )
     require_regex(
@@ -192,7 +196,7 @@ def audit_loongarch64(errors: list[str]) -> None:
         smp_rs,
         r"fn\s+complete_remote_core_op\(bit:\s*usize\)\s*\{\s*"
         r"#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
-        r"crate::arch::current::sbi::ack_ipi\(\);"
+        r"crate::arch::current::ipi::ack_ipi\(\);"
         r"\s*#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
         r"crate::arch::current::csr::dbar\(\);"
         r"\s*REMOTE_STALL_DONE_MASK\.fetch_or\(bit,\s*Ordering::AcqRel\);",

@@ -349,10 +349,10 @@ pub fn wake_core(core_id: usize) {
         return;
     };
     assert_remote_ipi_supported("wake_core");
-    let ret = crate::arch::current::sbi::send_ipi(1, hart_id);
+    let ret = crate::arch::current::ipi::send_ipi(1, hart_id);
     assert!(
         ret.error == 0,
-        "SBI send_ipi failed for core {core_id} hart {hart_id}: error={}",
+        "remote IPI send failed for core {core_id} hart {hart_id}: error={}",
         ret.error
     );
 }
@@ -449,14 +449,14 @@ fn remote_online_hart_id(core: usize) -> Option<usize> {
 
 fn assert_remote_ipi_supported(context: &str) {
     assert!(
-        crate::arch::current::sbi::SUPPORTS_REMOTE_IPI,
+        crate::arch::current::ipi::SUPPORTS_REMOTE_IPI,
         "{context}: remote IPI requested before this architecture has an IPI backend"
     );
 }
 
 fn assert_remote_tlb_flush_supported(context: &str) {
     assert!(
-        crate::arch::current::sbi::SUPPORTS_REMOTE_TLB_FLUSH,
+        crate::arch::current::ipi::SUPPORTS_REMOTE_TLB_FLUSH,
         "{context}: remote TLB flush requested before this architecture has an RFENCE backend"
     );
 }
@@ -521,7 +521,7 @@ pub(crate) fn service_pending_remote_core_op() -> RemoteCoreOpResult {
 
 fn complete_remote_core_op(bit: usize) {
     #[cfg(target_arch = "loongarch64")]
-    crate::arch::current::sbi::ack_ipi();
+    crate::arch::current::ipi::ack_ipi();
     #[cfg(target_arch = "loongarch64")]
     crate::arch::current::csr::dbar();
     REMOTE_STALL_DONE_MASK.fetch_or(bit, Ordering::AcqRel);
@@ -550,10 +550,10 @@ pub fn remote_sfence_vma_asid_all(asid: usize) {
 #[cfg(target_arch = "riscv64")]
 fn remote_sfence_vma_core(core: usize, hart_id: usize) {
     assert_remote_tlb_flush_supported("remote_sfence_vma_all");
-    let ret = crate::arch::current::sbi::remote_sfence_vma(1, hart_id, 0, 0);
+    let ret = crate::arch::current::ipi::remote_sfence_vma(1, hart_id, 0, 0);
     assert!(
         ret.error == 0,
-        "SBI remote_sfence_vma failed for core {core} hart {hart_id}: error={}",
+        "remote_sfence_vma failed for core {core} hart {hart_id}: error={}",
         ret.error
     );
 }
@@ -561,10 +561,10 @@ fn remote_sfence_vma_core(core: usize, hart_id: usize) {
 #[cfg(target_arch = "riscv64")]
 fn remote_sfence_vma_asid_core(core: usize, hart_id: usize, asid: usize) {
     assert_remote_tlb_flush_supported("remote_sfence_vma_asid_all");
-    let ret = crate::arch::current::sbi::remote_sfence_vma_asid(1, hart_id, 0, 0, asid);
+    let ret = crate::arch::current::ipi::remote_sfence_vma_asid(1, hart_id, 0, 0, asid);
     assert!(
         ret.error == 0,
-        "SBI remote_sfence_vma_asid failed for core {core} hart {hart_id}: error={}",
+        "remote_sfence_vma_asid failed for core {core} hart {hart_id}: error={}",
         ret.error
     );
 }

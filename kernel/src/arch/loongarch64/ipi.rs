@@ -1,4 +1,4 @@
-//! LoongArch64 IPI helpers behind the RISC-V SBI-shaped SMP call surface.
+//! LoongArch64 IOCSR IPI helpers for the shared SMP call surface.
 
 use crate::arch::loongarch64::csr;
 
@@ -14,17 +14,17 @@ const IPI_SEND_CPU_SHIFT: usize = 16;
 const IPI_SEND_BLOCKING: u64 = 1 << 31;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct SbiRet {
+pub struct IpiRet {
     pub error: isize,
     pub value: usize,
 }
 
-const UNSUPPORTED: SbiRet = SbiRet {
+const UNSUPPORTED: IpiRet = IpiRet {
     error: -1,
     value: 0,
 };
 
-const OK: SbiRet = SbiRet { error: 0, value: 0 };
+const OK: IpiRet = IpiRet { error: 0, value: 0 };
 
 #[inline]
 pub fn init_ipi() {
@@ -44,7 +44,7 @@ pub fn ack_ipi() -> bool {
     true
 }
 
-pub fn send_ipi(hart_mask: usize, hart_mask_base: usize) -> SbiRet {
+pub fn send_ipi(hart_mask: usize, hart_mask_base: usize) -> IpiRet {
     let mut mask = hart_mask;
     let mut bit = 0usize;
     while mask != 0 {
@@ -64,7 +64,7 @@ pub fn send_ipi(hart_mask: usize, hart_mask_base: usize) -> SbiRet {
     OK
 }
 
-pub fn remote_fence_i(_hart_mask: usize, _hart_mask_base: usize) -> SbiRet {
+pub fn remote_fence_i(_hart_mask: usize, _hart_mask_base: usize) -> IpiRet {
     UNSUPPORTED
 }
 
@@ -73,7 +73,7 @@ pub fn remote_sfence_vma(
     _hart_mask_base: usize,
     _start: usize,
     _size: usize,
-) -> SbiRet {
+) -> IpiRet {
     UNSUPPORTED
 }
 
@@ -83,7 +83,7 @@ pub fn remote_sfence_vma_asid(
     _start: usize,
     _size: usize,
     _asid: usize,
-) -> SbiRet {
+) -> IpiRet {
     UNSUPPORTED
 }
 

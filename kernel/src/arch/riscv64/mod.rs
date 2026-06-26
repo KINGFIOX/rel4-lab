@@ -8,4 +8,5 @@ pub mod sv39;
 pub mod trap;
 pub mod vspace;
 
+pub use sbi as ipi;
 pub use sv39 as paging;

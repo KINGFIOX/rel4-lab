@@ -460,7 +460,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         errors,
         irq_rs,
         r"pub\s+fn\s+init_current_core\(\)\s*\{\s*"
-        r"super::sbi::init_ipi\(\);"
+        r"super::ipi::init_ipi\(\);"
         r"\s*super::csr::set_ecfg\(super::csr::ecfg\(\)\s*\|\s*ECFG_LIE_EXTIOI0\s*\|\s*ECFG_LIE_IPI\);"
         r"\s*super::csr::dbar\(\);",
         "LoongArch enables external/IPI interrupt lines with barrier",

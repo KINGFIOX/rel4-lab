@@ -9,9 +9,9 @@
 pub mod boot;
 pub mod csr;
 pub mod fpu;
+pub mod ipi;
 pub mod irq;
 pub mod paging;
 pub mod platform;
-pub mod sbi;
 pub mod trap;
 pub mod vspace;

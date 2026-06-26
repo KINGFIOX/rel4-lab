@@ -11,7 +11,7 @@ pub fn init() {
 }
 
 pub fn init_current_core() {
-    super::sbi::init_ipi();
+    super::ipi::init_ipi();
     super::csr::set_ecfg(super::csr::ecfg() | ECFG_LIE_EXTIOI0 | ECFG_LIE_IPI);
     super::csr::dbar();
 }

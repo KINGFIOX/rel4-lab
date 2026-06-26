@@ -930,7 +930,7 @@ fn service_pending_interrupt(estat: usize) -> bool {
         serviced = true;
     }
     if ipi_pending(estat) {
-        serviced |= super::sbi::ack_ipi();
+        serviced |= super::ipi::ack_ipi();
     }
     if external_irq_pending(estat) {
         serviced |= service_pending_external_interrupt();
