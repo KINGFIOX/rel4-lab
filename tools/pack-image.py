@@ -75,6 +75,10 @@ def default_cmake_defs(target) -> dict[str, str]:
     if target.name == "riscv64":
         values["KernelRiscvExtD"] = "ON"
         values["KernelRiscvExtF"] = "ON"
+    elif target.name == "loongarch64":
+        values["KernelLoongArchExtD"] = "ON"
+        values["KernelLoongArchExtF"] = "ON"
+        values["KernelHaveFPU"] = "ON"
     return values
 
 
@@ -154,6 +158,9 @@ def cache_env_overrides_differ(build_dir: Path, cache: dict[str, str], target) -
     if "MCS" not in os.environ and cache.get("MCS") != defaults["MCS"]:
         return True
     for key in ("KernelRiscvExtD", "KernelRiscvExtF"):
+        if key in defaults and cache.get(key) != defaults[key]:
+            return True
+    for key in ("KernelLoongArchExtD", "KernelLoongArchExtF", "KernelHaveFPU"):
         if key in defaults and cache.get(key) != defaults[key]:
             return True
     if "SMP" in os.environ and cache.get("SMP") != cmake_smp(os.environ["SMP"]):

@@ -1282,7 +1282,11 @@ fn handle_thread_inner(
         }
 
         id if id == InvocationLabel::TcbResume.raw() => {
+            let caller = tcb::current();
             unsafe { tcb::resume(tcb_ptr) };
+            if caller != tcb_ptr {
+                tcb::continue_current_once(caller);
+            }
             Ok(())
         }
 

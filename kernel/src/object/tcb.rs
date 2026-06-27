@@ -16,6 +16,7 @@
 #![allow(dead_code)]
 
 use core::ptr::null_mut;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::abi::constants::MAX_NUM_NODES;
 use crate::arch::current::trap::{SSTATUS_FS_CLEAN, SSTATUS_FS_MASK, UserContext};
@@ -38,6 +39,24 @@ pub fn set_current(tcb: *mut Tcb) -> *mut Tcb {
     let prev = crate::kernel::smp::set_current_tcb(tcb);
     unsafe { crate::api::thread::refresh_from_tcb(tcb) };
     prev
+}
+
+static CONTINUE_CURRENT_ONCE: [AtomicUsize; MAX_NUM_NODES] =
+    [const { AtomicUsize::new(0) }; MAX_NUM_NODES];
+
+pub(crate) fn continue_current_once(tcb: *mut Tcb) {
+    let core = crate::kernel::smp::current_core_id();
+    CONTINUE_CURRENT_ONCE[core].store(tcb as usize, Ordering::Release);
+}
+
+pub(crate) fn take_continue_current_once(tcb: *mut Tcb) -> bool {
+    if tcb.is_null() {
+        return false;
+    }
+    let core = crate::kernel::smp::current_core_id();
+    CONTINUE_CURRENT_ONCE[core]
+        .compare_exchange(tcb as usize, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
 }
 
 // ---- Ready-queue runqueues ------------------------------------------------

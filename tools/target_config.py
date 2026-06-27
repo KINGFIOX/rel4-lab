@@ -247,8 +247,7 @@ TARGETS: dict[str, TargetConfig] = {
             "loongarch64-linux-gnu-",
         ),
         xv6_march="loongarch64",
-        # Keep xv6 user programs soft-float until that stack opts into FPU use.
-        xv6_mabi="lp64s",
+        xv6_mabi="lp64d",
         xv6_disk_transport="virtio-pci",
     ),
 }
@@ -324,6 +323,6 @@ def require_supported_xv6_user_abi(prefix: str, target: TargetConfig, mabi: str)
             prefix,
             (
                 f"ARCH=loongarch64 currently requires XV6_USER_MABI={target.xv6_mabi}; "
-                "the LoongArch xv6 compatibility stack is configured for soft-float."
+                "the LoongArch xv6 compatibility stack is configured for double-float."
             ),
         )

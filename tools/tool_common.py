@@ -114,6 +114,7 @@ RISCV_EFLAGS_FLOAT_ABI_MASK = 0x6
 RISCV_EFLAGS_FLOAT_ABI_SOFT = 0x0
 LOONGARCH64_EFLAGS_ABI_MASK = 0x7
 LOONGARCH64_EFLAGS_ABI_SOFT_FLOAT = 0x1
+LOONGARCH64_EFLAGS_ABI_DOUBLE_FLOAT = 0x3
 
 
 def require_xv6_user_elf(prefix: str, target, path: Path) -> None:
@@ -152,11 +153,11 @@ def require_xv6_user_elf(prefix: str, target, path: Path) -> None:
 
     if target.name != "loongarch64":
         return
-    if (flags & LOONGARCH64_EFLAGS_ABI_MASK) != LOONGARCH64_EFLAGS_ABI_SOFT_FLOAT:
+    if (flags & LOONGARCH64_EFLAGS_ABI_MASK) != LOONGARCH64_EFLAGS_ABI_DOUBLE_FLOAT:
         die(
             prefix,
             (
-                f"LoongArch64 xv6 user ELF must use the soft-float ABI: {path} "
+                f"LoongArch64 xv6 user ELF must use the double-float ABI: {path} "
                 f"has e_flags={flags:#x}"
             ),
         )
@@ -293,6 +294,34 @@ r_sp()
 #define MAXVA (1L << (9 + 9 + 9 + 12 - 1))
 """
 
+LOONGARCH_XV6_FPUTEST_C = """#include "kernel/types.h"
+#include "user/user.h"
+
+static double
+work(double x)
+{
+  for (int i = 0; i < 64; i++) {
+    x = x * 1.125 + 0.25;
+    x = x / 1.0625 - 0.125;
+  }
+  return x;
+}
+
+int
+main(int argc, char **argv)
+{
+  volatile double a = work(3.5);
+  volatile double b = work(3.5);
+
+  if (a != b || a < 3.0 || a > 64.0) {
+    fprintf(2, "fputest: failed\\n");
+    exit(1);
+  }
+  printf("fputest: ok\\n");
+  exit(0);
+}
+"""
+
 
 def default_xv6_dir_for_target(target) -> Path:
     requested = ROOT_DIR / "third_party" / target.xv6_dir_name
@@ -324,9 +353,11 @@ def prepare_xv6_dir_for_target(prefix: str, target, source_dir: Path, out_dir: P
     usys_pl = build_dir / "user" / "usys.pl"
     user_ld = build_dir / "user" / "user.ld"
     riscv_h = build_dir / "kernel" / "riscv.h"
+    fputest_c = build_dir / "user" / "fputest.c"
     require_file(prefix, user_ld, f"xv6 user linker script not found: {user_ld}")
     usys_pl.write_text(LOONGARCH_XV6_USYS_PL)
     riscv_h.write_text(LOONGARCH_XV6_RISCV_H)
+    fputest_c.write_text(LOONGARCH_XV6_FPUTEST_C)
     linker = user_ld.read_text()
     linker = re.sub(
         r'OUTPUT_ARCH\(\s*"?riscv"?\s*\)',

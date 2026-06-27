@@ -677,7 +677,7 @@ unsafe fn finish_fault_ipc_receive(
             handler_cap.endpoint_can_grant(),
             false,
         ) {
-            tcb::clear_waiting_on(fault_tcb);
+            tcb::set_blocked_on_reply(fault_tcb, reply_kva);
         } else {
             tcb::set_inactive(fault_tcb);
             tcb::clear_waiting_on(fault_tcb);
@@ -852,6 +852,10 @@ fn kernel_exit(
     loop {
         unsafe {
             tcb::enqueue_if_migrated_from_current_core(cur);
+            if tcb::take_continue_current_once(cur) && tcb::is_runnable_on_current_core(cur) {
+                tcb::prepare_for_user_restore(cur);
+                return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
+            }
             if tcb::is_runnable_on_current_core(cur) {
                 tcb::enqueue(cur);
             }
@@ -860,8 +864,8 @@ fn kernel_exit(
         let next = tcb::schedule();
         if !next.is_null() {
             if next != cur {
-                let ctx = unsafe { tcb::prepare_for_user_restore(next) };
                 tcb::set_current(next);
+                let ctx = unsafe { tcb::prepare_for_user_restore(next) };
                 switch_to_tcb_vspace(next);
                 return finish_kernel_exit(ctx, kernel_lock);
             }

@@ -122,6 +122,15 @@ def check_output_text(cmd: list[str], env: dict[str, str] | None = None) -> str:
     return subprocess.check_output(cmd, text=True, env=env).strip()
 
 
+def check_output_last_line(cmd: list[str], env: dict[str, str] | None = None) -> str:
+    output = check_output_text(cmd, env=env)
+    for line in reversed(output.splitlines()):
+        line = line.strip()
+        if line:
+            return line
+    return ""
+
+
 def main(argv: list[str]) -> int:
     ensure_rust_log_at_least_info()
     target = target_from_env(PREFIX)
@@ -154,7 +163,9 @@ def main(argv: list[str]) -> int:
     lock = BuildLock(ROOT_DIR)
     lock.acquire()
     try:
-        rootserver_elf = Path(check_output_text([str(ROOT_DIR / "tools" / "build-xv6-user-rootserver.py"), *program_args]))
+        rootserver_elf = Path(
+            check_output_last_line([str(ROOT_DIR / "tools" / "build-xv6-user-rootserver.py"), *program_args])
+        )
         image_suffix = image_suffix_from_env(target)
         packed_image = Path(getenv("OUT_IMAGE", str(ROOT_DIR / "images" / f"xv6-{run_id}-{image_suffix}")))
         log_file = Path(getenv("LOG_FILE", str(ROOT_DIR / "target" / f"xv6-{run_id}-last-run.log")))
@@ -165,7 +176,7 @@ def main(argv: list[str]) -> int:
         if attach_fs_img and build_fs_img:
             env = os.environ.copy()
             env["XV6_FS_IMG"] = str(xv6_fs_img)
-            xv6_fs_img = Path(check_output_text([str(ROOT_DIR / "tools" / "build-xv6-fs-img.py")], env=env))
+            xv6_fs_img = Path(check_output_last_line([str(ROOT_DIR / "tools" / "build-xv6-fs-img.py")], env=env))
         if attach_fs_img and not xv6_fs_img.is_file():
             die(PREFIX, f"XV6_FS_IMG not found: {xv6_fs_img}")
         if attach_fs_img and not fs_img_explicit:

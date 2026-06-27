@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tool_common import (
     LOONGARCH64_EFLAGS_ABI_MASK,
+    LOONGARCH64_EFLAGS_ABI_DOUBLE_FLOAT,
     LOONGARCH64_EFLAGS_ABI_SOFT_FLOAT,
     ROOT_DIR,
     command_exists,
@@ -387,7 +388,7 @@ def loongarch_abi_name(elf: Path) -> str:
         return "soft-float"
     if abi == 0x2:
         return "single-float"
-    if abi == 0x3:
+    if abi == LOONGARCH64_EFLAGS_ABI_DOUBLE_FLOAT:
         return "double-float"
     return f"unknown({abi:#x})"
 
