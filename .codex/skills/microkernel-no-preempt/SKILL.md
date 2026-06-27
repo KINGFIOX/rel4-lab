@@ -39,6 +39,9 @@ Keep these behaviors available:
 - Do not use CPU-bound busy loops, implicit time slicing, scheduler tick side effects, or assumed involuntary interleaving as part of a program's correctness, progress, timing, IPC ordering, or fairness story.
 - If a workflow needs another runnable thread to make progress, make that dependency explicit with `Yield`, blocking IPC, notifications, sleeps, or protocol-level synchronization. Treat explicit coordination as the portability boundary between seL4 and rel4.
 - Do not introduce tests, service loops, or user programs that assume a CPU-bound thread will be involuntarily preempted so another runnable thread can run.
+- sel4test adaptations for rel4 must disable tests whose expected result requires timer-driven preemption, timeslice expiry, or long-running kernel operations being preempted. This includes tests that count preemptions, require equal-priority CPU-bound threads to interleave without blocking/yielding, or use preemption as the mechanism for FPU context-switch coverage.
+- Current sel4test examples in this category include `FPU0001`, `SCHED0021`, and `PREEMPT_REVOKE`.
+- Keep cooperative equivalents when they test supported behavior, but do not rewrite a preemption test so broadly that it no longer checks the behavior named by the test.
 
 ## Workflow
 

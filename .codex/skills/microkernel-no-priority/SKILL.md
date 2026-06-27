@@ -25,6 +25,9 @@ Treat these as out of scope unless the user explicitly requests priority schedul
 - Keep `TCBSetPriority`, `TCBSetMCPriority`, and `TCBSetSchedParams` source-compatible when user-space needs to run on both seL4 and rel4.
 - These calls may validate obvious shape/range errors and store metadata if useful for debugging, but they must not affect ready-queue placement, runqueue ordering, IPC delivery order, donation, or wakeup behavior.
 - User-space written for this project must not depend on priority values for correctness, progress, timing, IPC ordering, or fairness. If a program needs ordering, make it explicit in IPC/protocol logic rather than relying on priority.
+- sel4test adaptations for rel4 must disable tests whose expected result is priority-sensitive scheduler behavior. This includes tests that require higher-priority runnable threads to run first or immediately, priority changes to force rescheduling, priority-ordered IPC delivery, or MCP/priority limits to be meaningful scheduler policy.
+- Current sel4test examples in this category include `SCHED0003`, `SCHED0004`, `SCHED0005`, `SCHED0006`, and `SCHED0020`.
+- Do not hide ordinary IPC rights, reply, CSpace, VSpace, or fault ABI failures behind this policy just because a test also uses helper priorities for setup. Only disable tests where priority scheduling is the behavior under test.
 
 ## Preserve
 
