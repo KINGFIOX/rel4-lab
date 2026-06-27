@@ -9,7 +9,7 @@ use log_crate::{info, warn};
 use crate::abi::bootinfo::{BootInfo, RootCNodeCapSlot, SlotRegion, UntypedDesc};
 use crate::abi::constants::{
     KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, MAX_NUM_NODES, ROOT_CNODE_SIZE_BITS,
-    SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
+    SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS, WORD_BYTES,
 };
 use crate::arch::current::paging::{
     LEAF_PARENT_COVERAGE_BITS, PAGE_SHIFT, PAGE_SIZE, PageTable, Pte, ROOT_CHILD_COVERAGE_BITS,
@@ -657,6 +657,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         t.context.regs[UserRegister::A0.index()] = USER_BOOTINFO_VA as u64;
         t.context.regs[UserRegister::A1.index()] = 0;
         t.context.regs[UserRegister::Sp.index()] = USER_STACK_TOP as u64;
+        t.affinity = crate::kernel::smp::current_core_id() as u8;
         t.state = crate::object::tcb::ThreadState::Running as u8;
         t as *mut Tcb
     });
@@ -667,6 +668,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     unsafe {
         tcb::enqueue(t);
     }
+    log_arch_restore_state(root_pt, args.user_ventry, USER_BOOTINFO_VA, USER_STACK_TOP);
     info!("  entering user mode at {:#x}", args.user_ventry);
     info!("  --- transferring control to rootserver ---");
     let kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
@@ -674,6 +676,91 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     unsafe {
         restore_user_context_with_kernel_lock(ROOTSERVER_TCB.context_ptr(), kernel_lock);
     }
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn log_arch_restore_state(
+    root_pt: *mut PageTable,
+    entry: usize,
+    bootinfo: usize,
+    stack_top: usize,
+) {
+    use crate::arch::current::csr;
+
+    info!(
+        "  loongarch64 restore csr: crmd={:#x} prmd={:#x} eentry={:#x} pgdl={:#x} pgdh={:#x} asid={:#x} pwcl={:#x} pwch={:#x} stlbps={:#x}",
+        csr::crmd(),
+        csr::prmd(),
+        csr::eentry(),
+        csr::pgdl(),
+        csr::pgdh(),
+        csr::asid(),
+        csr::pwcl(),
+        csr::pwch(),
+        csr::stlbps(),
+    );
+    for (label, va) in [
+        ("entry", entry),
+        ("bootinfo", bootinfo),
+        ("stack", stack_top - WORD_BYTES),
+    ] {
+        log_loongarch64_pte_walk(root_pt, label, va);
+    }
+}
+
+#[cfg(not(target_arch = "loongarch64"))]
+fn log_arch_restore_state(
+    _root_pt: *mut PageTable,
+    _entry: usize,
+    _bootinfo: usize,
+    _stack_top: usize,
+) {
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn log_loongarch64_pte_walk(root_pt: *mut PageTable, label: &str, va: usize) {
+    let l2_idx = pt_index(va, 2);
+    let l1_idx = pt_index(va, 1);
+    let l0_idx = pt_index(va, 0);
+    let l2 = unsafe { (*root_pt).entries[l2_idx] };
+    if !l2.is_valid() || l2.is_leaf() {
+        info!(
+            "  loongarch64 pte {} va={:#x}: l2[{}]={:#x}",
+            label,
+            va,
+            l2_idx,
+            l2.raw(),
+        );
+        return;
+    }
+    let l1_pt = paddr_to_kpptr(l2.next_pt_paddr() as usize) as *mut PageTable;
+    let l1 = unsafe { (*l1_pt).entries[l1_idx] };
+    if !l1.is_valid() || l1.is_leaf() {
+        info!(
+            "  loongarch64 pte {} va={:#x}: l2[{}]={:#x} l1[{}]={:#x}",
+            label,
+            va,
+            l2_idx,
+            l2.raw(),
+            l1_idx,
+            l1.raw(),
+        );
+        return;
+    }
+    let l0_pt = paddr_to_kpptr(l1.next_pt_paddr() as usize) as *mut PageTable;
+    let l0 = unsafe { (*l0_pt).entries[l0_idx] };
+    info!(
+        "  loongarch64 pte {} va={:#x}: l2[{}]={:#x} l1[{}]={:#x} l0[{}]={:#x} pa={:#x}",
+        label,
+        va,
+        l2_idx,
+        l2.raw(),
+        l1_idx,
+        l1.raw(),
+        l0_idx,
+        l0.raw(),
+        l0.leaf_pa(),
+    );
 }
 
 /// Map a contiguous VA range of the user image to its PA range. Both VAs

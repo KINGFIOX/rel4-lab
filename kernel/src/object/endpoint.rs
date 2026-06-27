@@ -139,7 +139,7 @@ pub(crate) unsafe fn enqueue_waiter_locked(ep: *mut Endpoint, tcb: *mut Tcb, sta
         }
 
         (*ep).set_tail(tcb);
-        tcb::set_wait_queue_links(tcb, core::ptr::null_mut(), tail);
+        tcb::set_wait_queue_links(tcb, tail, core::ptr::null_mut());
     }
 }
 

@@ -34,7 +34,7 @@ impl UartRegister {
 
 const LSR_DR: u8 = 1 << 0;
 const LSR_THRE: u8 = 1 << 5;
-const UART_WAIT_SPINS: usize = 1_000_000;
+const UART_WAIT_SPINS: usize = 1024;
 
 /// Called once the kernel has installed its MMIO mapping. Before this point
 /// PA-based UART MMIO addresses are not safe.

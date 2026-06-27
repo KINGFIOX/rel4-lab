@@ -86,6 +86,24 @@ def parse_consts(path: Path, initial: dict[str, int] | None = None) -> dict[str,
     return symbols
 
 
+def parse_c_defines(path: Path) -> dict[str, int]:
+    symbols: dict[str, int] = {}
+    define_re = re.compile(r"^\s*#define\s+([A-Za-z0-9_]+)\s+(.+?)\s*$")
+    for line in path.read_text().splitlines():
+        match = define_re.match(line)
+        if match is None:
+            continue
+        name = match.group(1)
+        expr = match.group(2).split("/*", 1)[0].strip()
+        if not expr:
+            continue
+        try:
+            symbols[name] = eval_expr(expr, symbols)
+        except (SyntaxError, ValueError):
+            continue
+    return symbols
+
+
 def expect(errors: list[str], label: str, got: int | None, expected: int) -> None:
     if got is None:
         errors.append(f"{label} is missing")
@@ -172,9 +190,22 @@ def audit_loongarch64(errors: list[str]) -> None:
     asid_rs = ROOT_DIR / "kernel" / "src" / "object" / "asid.rs"
     boot_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "boot.rs"
     invocation_rs = ROOT_DIR / "kernel" / "src" / "api" / "invocation.rs"
+    libsel4_consts_h = (
+        ROOT_DIR
+        / "third_party"
+        / "sel4test"
+        / "kernel"
+        / "libsel4"
+        / "sel4_arch_include"
+        / "loongarch64"
+        / "sel4"
+        / "sel4_arch"
+        / "constants.h"
+    )
     paging = parse_consts(paging_rs, abi_consts)
     csr = parse_consts(csr_rs)
     vspace = parse_consts(vspace_rs, {**abi_consts, **paging})
+    libsel4 = parse_c_defines(libsel4_consts_h)
     all_consts = {**abi_consts, **paging, **csr, **vspace}
 
     audit_common_paging(errors, paging, "loongarch64")
@@ -203,12 +234,19 @@ def audit_loongarch64(errors: list[str]) -> None:
         ("PTE_KERNEL_RWX", (1 << 7) | (1 << 0) | (1 << 1) | (1 << 8) | (1 << 6) | (0b01 << 4)),
         (
             "PTE_USER_RW",
-            (1 << 7) | (1 << 0) | (1 << 1) | (1 << 8) | (0b11 << 2) | (0b01 << 4) | (1 << 62),
+            (1 << 7)
+            | (1 << 0)
+            | (1 << 1)
+            | (1 << 8)
+            | (0b11 << 2)
+            | (0b01 << 4)
+            | (1 << 62)
+            | (1 << 63),
         ),
-        ("PTE_USER_RX", (1 << 7) | (1 << 0) | (0b11 << 2) | (0b01 << 4)),
+        ("PTE_USER_RX", (1 << 7) | (1 << 0) | (0b11 << 2) | (0b01 << 4) | (1 << 63)),
         (
             "PTE_USER_RWX",
-            (1 << 7) | (1 << 0) | (1 << 1) | (1 << 8) | (0b11 << 2) | (0b01 << 4),
+            (1 << 7) | (1 << 0) | (1 << 1) | (1 << 8) | (0b11 << 2) | (0b01 << 4) | (1 << 63),
         ),
     ):
         expect(errors, f"loongarch64 {name}", paging.get(name), value)
@@ -220,8 +258,41 @@ def audit_loongarch64(errors: list[str]) -> None:
         r"\}",
         "LoongArch PTE PFN decode uses PTE_PFN_MASK",
     )
+    require_regex(
+        errors,
+        paging_rs,
+        r"pub\s+const\s+fn\s+next\(pt_paddr:\s*u64\)\s*->\s*Pte\s*\{\s*"
+        r"Pte\(pt_paddr\s*&\s*!\(\(PAGE_SIZE\s+as\s+u64\)\s*-\s*1\)\)\s*"
+        r"\}",
+        "LoongArch non-leaf PTEs are pure page-table physical addresses",
+    )
+    require_regex(
+        errors,
+        paging_rs,
+        r"pub\s+const\s+fn\s+is_valid\(self\)\s*->\s*bool\s*\{\s*"
+        r"self\.0\s*!=\s*0\s*"
+        r"\}",
+        "LoongArch software page-table validity accepts pure-address non-leaf entries",
+    )
 
     expect(errors, "loongarch64 ASID_MASK", csr.get("ASID_MASK"), 0x3ff)
+    expect(errors, "loongarch64 libsel4 seL4_NumASIDPoolsBits", libsel4.get("seL4_NumASIDPoolsBits"), 1)
+    expect(
+        errors,
+        "loongarch64 libsel4 seL4_ASIDPoolIndexBits",
+        libsel4.get("seL4_ASIDPoolIndexBits"),
+        9,
+    )
+    if (
+        libsel4.get("seL4_NumASIDPoolsBits") is not None
+        and libsel4.get("seL4_ASIDPoolIndexBits") is not None
+    ):
+        expect(
+            errors,
+            "loongarch64 libsel4 ASID bits",
+            libsel4["seL4_NumASIDPoolsBits"] + libsel4["seL4_ASIDPoolIndexBits"],
+            10,
+        )
     require_regex(
         errors,
         asid_rs,
@@ -257,6 +328,7 @@ def audit_loongarch64(errors: list[str]) -> None:
         ("CSR_PWCL", 0x01C),
         ("CSR_PWCH", 0x01D),
         ("CSR_STLBPS", 0x01E),
+        ("CSR_TLBRENTRY", 0x088),
         ("CSR_DMW0", 0x180),
         ("CSR_DMW1", 0x181),
         ("CSR_DMW2", 0x182),
@@ -323,13 +395,19 @@ def audit_loongarch64(errors: list[str]) -> None:
         abi_consts.get("KERNEL_ELF_BASE"),
         0x0020_0000,
     )
-    expect(errors, "loongarch64 PAGE_WALK_DIR1_BASE", vspace.get("PAGE_WALK_DIR1_BASE"), 21)
+    expect(errors, "loongarch64 PAGE_WALK_DIR0_BASE", vspace.get("PAGE_WALK_DIR0_BASE"), 21)
     expect(errors, "loongarch64 PAGE_WALK_DIR2_BASE", vspace.get("PAGE_WALK_DIR2_BASE"), 30)
     expect(
         errors,
         "loongarch64 PAGE_WALK_CONTROL_LOW",
         vspace.get("PAGE_WALK_CONTROL_LOW"),
-        0x13e4_d52c,
+        0x4_d52c,
+    )
+    expect(
+        errors,
+        "loongarch64 PAGE_WALK_CONTROL_HIGH",
+        vspace.get("PAGE_WALK_CONTROL_HIGH"),
+        0x25e,
     )
     expect(errors, "loongarch64 DMW_MMIO_VSEG", vspace.get("DMW_MMIO_VSEG"), 0x8)
     expect(
@@ -373,6 +451,7 @@ def audit_loongarch64(errors: list[str]) -> None:
         r"if\s+current_satp\(\)\s*==\s*satp_val\s*\{\s*"
         r"enable_paging\(\);\s*"
         r"csr::dbar\(\);\s*"
+        r"(?:csr::sfence_vma_all\(\);\s*)?"
         r"return;",
         "LoongArch same-root paging enable barrier",
     )
@@ -429,6 +508,12 @@ def audit_loongarch64(errors: list[str]) -> None:
         "LoongArch remote-stall exit changes VSpace before user restore",
     )
     require_text(errors, vspace_rs, "csr::set_stlbps(PAGE_SHIFT)", "STLB page-size setup")
+    require_text(
+        errors,
+        vspace_rs,
+        "csr::set_pwch(PAGE_WALK_CONTROL_HIGH)",
+        "PWCH top-level page-walk setup",
+    )
     require_text(errors, vspace_rs, "csr::set_dmw0(DMW_LOW_DIRECT)", "low direct-map setup")
     require_text(errors, vspace_rs, "csr::set_dmw1(DMW_MMIO_DIRECT)", "MMIO direct-map setup")
     require_text(errors, vspace_rs, "csr::set_dmw2(0)", "DMW2 disabled")

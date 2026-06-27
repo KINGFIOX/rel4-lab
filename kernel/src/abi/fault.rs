@@ -2,18 +2,28 @@
 
 #![allow(dead_code)]
 
-#[repr(u64)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FaultLabel {
-    CapFault = 1,
-    UnknownSyscall = 2,
-    UserException = 3,
-    Timeout = 5,
-    VmFault = 6,
+    CapFault,
+    UnknownSyscall,
+    UserException,
+    #[cfg(not(target_arch = "loongarch64"))]
+    Timeout,
+    VmFault,
 }
 
 impl FaultLabel {
     pub const fn raw(self) -> u64 {
-        self as u64
+        match self {
+            Self::CapFault => 1,
+            Self::UnknownSyscall => 2,
+            Self::UserException => 3,
+            #[cfg(not(target_arch = "loongarch64"))]
+            Self::Timeout => 5,
+            #[cfg(target_arch = "loongarch64")]
+            Self::VmFault => 5,
+            #[cfg(not(target_arch = "loongarch64"))]
+            Self::VmFault => 6,
+        }
     }
 }

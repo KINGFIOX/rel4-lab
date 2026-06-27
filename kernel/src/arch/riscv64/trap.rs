@@ -13,8 +13,9 @@ use crate::abi::constants::{N_TOTAL_MSG_REGISTERS, WORD_BYTES};
 use crate::abi::fault::FaultLabel;
 use crate::abi::syscall::SyscallNumber;
 use crate::abi::types::MessageInfo;
+use crate::api::cspace;
 use crate::arch::riscv64::{csr, sbi};
-use crate::object::cap::CapTag;
+use crate::object::cap::{Cap, CapTag};
 
 /// RISC-V D-extension FPU state shape used by the current `riscv64gc` build.
 pub const RISCV_NUM_FP_REGS: usize = 32;
@@ -534,7 +535,6 @@ unsafe fn finish_fault_ipc_receive(
 }
 
 fn send_fault_ipc(uc: &mut UserContext, code: usize, stval: u64) -> bool {
-    use crate::object::cap::CapTag;
     use crate::object::endpoint;
     use crate::object::tcb;
 
@@ -543,7 +543,7 @@ fn send_fault_ipc(uc: &mut UserContext, code: usize, stval: u64) -> bool {
         return false;
     }
 
-    let handler_cap = tcb::fault_endpoint_snapshot(cur);
+    let handler_cap = fault_handler_cap(cur);
     if handler_cap.tag() != Some(CapTag::Endpoint)
         || !handler_cap.endpoint_can_send()
         || !(handler_cap.endpoint_can_grant() || handler_cap.endpoint_can_grant_reply())
@@ -612,7 +612,6 @@ fn send_unknown_syscall_fault(uc: &mut UserContext, sysno: isize) -> bool {
 }
 
 fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: [u64; 16]) -> bool {
-    use crate::object::cap::CapTag;
     use crate::object::endpoint;
     use crate::object::tcb;
 
@@ -620,7 +619,7 @@ fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: [u64; 16]) -> bool {
     if cur.is_null() {
         return false;
     }
-    let handler_cap = tcb::fault_endpoint_snapshot(cur);
+    let handler_cap = fault_handler_cap(cur);
     if handler_cap.tag() != Some(CapTag::Endpoint)
         || !handler_cap.endpoint_can_send()
         || !(handler_cap.endpoint_can_grant() || handler_cap.endpoint_can_grant_reply())
@@ -658,6 +657,17 @@ fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: [u64; 16]) -> bool {
         finish_fault_ipc_receive(receiver, cur, handler_cap, true);
     }
     true
+}
+
+fn fault_handler_cap(tcb: *const crate::object::tcb::Tcb) -> Cap {
+    let cptr = crate::object::tcb::fault_endpoint_cptr_snapshot(tcb);
+    if cptr != 0 {
+        let root = crate::object::tcb::cspace_cap_snapshot(tcb);
+        if let Ok((cap, _)) = cspace::lookup_cap_in(root, cptr, cspace::WORD_BITS) {
+            return cap;
+        }
+    }
+    crate::object::tcb::fault_endpoint_snapshot(tcb)
 }
 pub(crate) fn send_timeout_fault_ipc_for(fault_tcb: *mut crate::object::tcb::Tcb) -> bool {
     let _ = fault_tcb;
@@ -1012,22 +1022,15 @@ fn handle_syscall(uc: &mut UserContext) {
         Some(SyscallNumber::NonBlockingSend) => {
             crate::api::syscall::do_send(uc, true);
         }
+        Some(SyscallNumber::Reply) => {
+            crate::api::ipc::reply(uc);
+        }
         Some(SyscallNumber::Recv | SyscallNumber::NonBlockingRecv) => {
             let blocking = SyscallNumber::from_raw(raw_sysno) == Some(SyscallNumber::Recv);
-            crate::api::syscall::do_recv_mcs(uc, blocking, true);
-        }
-        Some(SyscallNumber::Wait | SyscallNumber::NonBlockingWait) => {
-            let blocking = SyscallNumber::from_raw(raw_sysno) == Some(SyscallNumber::Wait);
-            crate::api::syscall::do_recv_mcs(uc, blocking, false);
+            crate::api::syscall::do_recv(uc, blocking);
         }
         Some(SyscallNumber::ReplyRecv) => {
-            crate::api::syscall::do_reply_recv_mcs(uc);
-        }
-        Some(SyscallNumber::NonBlockingSendRecv) => {
-            crate::api::syscall::do_nbsend_recv_mcs(uc, false);
-        }
-        Some(SyscallNumber::NonBlockingSendWait) => {
-            crate::api::syscall::do_nbsend_recv_mcs(uc, true);
+            crate::api::ipc::reply_recv(uc);
         }
         None => {
             if !send_unknown_syscall_fault(uc, raw_sysno) {

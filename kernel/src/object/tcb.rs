@@ -193,6 +193,28 @@ pub(crate) fn fault_endpoint_snapshot(tcb: *const Tcb) -> Cap {
 }
 
 #[inline]
+pub(crate) fn fault_endpoint_cptr_snapshot(tcb: *const Tcb) -> u64 {
+    if tcb.is_null() {
+        return 0;
+    }
+    unsafe {
+        let _guard = lock_state(tcb);
+        (*tcb).fault_endpoint_cptr
+    }
+}
+
+#[inline]
+pub(crate) unsafe fn set_fault_endpoint_cptr(tcb: *mut Tcb, cptr: u64) {
+    if tcb.is_null() {
+        return;
+    }
+    unsafe {
+        let _guard = lock_state(tcb);
+        (*tcb).fault_endpoint_cptr = cptr;
+    }
+}
+
+#[inline]
 pub(crate) fn cspace_cap_snapshot(tcb: *const Tcb) -> Cap {
     if tcb.is_null() {
         return Cap::null();
@@ -299,6 +321,33 @@ pub(crate) fn reply_object_snapshot(tcb: *const Tcb) -> u64 {
     unsafe {
         let _guard = lock_state(tcb);
         (*tcb).reply_object
+    }
+}
+
+#[inline]
+pub(crate) unsafe fn set_caller_reply(tcb: *mut Tcb, reply_object: u64, can_grant: bool) {
+    if tcb.is_null() {
+        return;
+    }
+    unsafe {
+        let _guard = lock_state(tcb);
+        (*tcb).caller_reply_object = reply_object;
+        (*tcb).caller_can_grant = can_grant as u8;
+    }
+}
+
+#[inline]
+pub(crate) unsafe fn take_caller_reply(tcb: *mut Tcb) -> (u64, bool) {
+    if tcb.is_null() {
+        return (0, false);
+    }
+    unsafe {
+        let _guard = lock_state(tcb);
+        let reply_object = (*tcb).caller_reply_object;
+        let can_grant = (*tcb).caller_can_grant != 0;
+        (*tcb).caller_reply_object = 0;
+        (*tcb).caller_can_grant = 0;
+        (reply_object, can_grant)
     }
 }
 
@@ -744,6 +793,15 @@ pub(crate) unsafe fn cancel_endpoint_waiter(
     unsafe {
         let _guard = lock_state(tcb);
         let next = (*tcb).queue_next as *mut Tcb;
+        if (*tcb).state != ThreadState::BlockedOnSend as u8
+            && (*tcb).state != ThreadState::BlockedOnReceive as u8
+        {
+            (*tcb).queue_next = 0;
+            (*tcb).queue_prev = 0;
+            (*tcb).waiting_on = 0;
+            clear_endpoint_ipc_state_locked(tcb);
+            return (next, false);
+        }
         let was_call = (*tcb).sender_is_call != 0;
         let was_fault_sender =
             (*tcb).state == ThreadState::BlockedOnSend as u8 && (*tcb).sender_is_fault != 0;
@@ -1577,6 +1635,10 @@ pub struct Tcb {
     /// resolved; 0 means "not yet set up".
     pub ipc_buffer_kva: u64,
 
+    /// Non-MCS seL4 stores the fault handler as a CPtr resolved in the
+    /// target thread's current CSpace when a fault is delivered.
+    pub fault_endpoint_cptr: u64,
+
     /// seL4_TCBFlag bits. RISC-V currently uses bit 0 for fpuDisabled.
     pub flags: u64,
 
@@ -1598,6 +1660,8 @@ pub struct Tcb {
     /// Slot holding the reply cap that parked this TCB on a reply object.
     pub reply_slot: u64,
     pub reply_object: u64,
+    pub caller_reply_object: u64,
+    pub caller_can_grant: u8,
 
     /// Badge from the cap used to Send / Call. Stashed when a sender
     /// blocks on an Endpoint so the eventual receiver can read it back
@@ -1644,6 +1708,7 @@ impl Tcb {
             _sched_pad: [0; 6],
             ipc_buffer_uva: 0,
             ipc_buffer_kva: 0,
+            fault_endpoint_cptr: 0,
             flags: 0,
             bound_notification: 0,
             queue_next: 0,
@@ -1655,6 +1720,8 @@ impl Tcb {
             receive_reply_can_grant: 0,
             reply_slot: 0,
             reply_object: 0,
+            caller_reply_object: 0,
+            caller_can_grant: 0,
             sender_badge: 0,
             sender_extra_cap_slots: [0; TCB_SENDER_EXTRA_CAPS],
             sender_can_grant: 0,
@@ -1691,6 +1758,7 @@ pub unsafe fn init(tcb_kva: u64) {
     unsafe {
         let _guard = lock_state(t);
         (*t).state = ThreadState::Inactive as u8;
+        (*t).affinity = crate::kernel::smp::current_core_id() as u8;
         (*t).context.sstatus = crate::arch::current::trap::USER_SSTATUS;
     }
 }
@@ -1740,14 +1808,17 @@ pub unsafe fn suspend(tcb: *mut Tcb) {
         return;
     }
     unsafe {
+        crate::kernel::smp::remote_tcb_stall(tcb);
         // A suspended TCB must leave any EP wait list it's queued on,
         // otherwise the EP would later try to `pop_head` a TCB whose
         // backing slab might be reused.
         unlink_from_wait_object(tcb);
         dequeue(tcb);
         crate::object::reply::remove_tcb(tcb);
-        let _guard = lock_state(tcb);
-        (*tcb).state = ThreadState::Inactive as u8;
+        {
+            let _guard = lock_state(tcb);
+            (*tcb).state = ThreadState::Inactive as u8;
+        }
         crate::kernel::smp::wake_current_core_of_tcb(tcb);
     }
 }

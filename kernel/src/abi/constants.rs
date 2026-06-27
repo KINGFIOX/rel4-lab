@@ -58,7 +58,7 @@ pub const SEL4_PAGE_TABLE_ENTRIES: usize = 512;
 pub const SEL4_SLOT_BITS: usize = 5; // sizeof(cte_t) == 32
 pub const SEL4_TCB_BITS: usize = 11; // 2 KiB TCB
 pub const SEL4_ENDPOINT_BITS: usize = 4;
-pub const SEL4_NOTIFICATION_BITS: usize = 6;
+pub const SEL4_NOTIFICATION_BITS: usize = 5;
 pub const SEL4_REPLY_BITS: usize = 5;
 pub const SEL4_MIN_BUDGET_US: u64 = 20;
 pub const SEL4_TIMER_TICKS_PER_US: u64 = 10;

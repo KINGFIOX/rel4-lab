@@ -32,11 +32,11 @@ use crate::object::wait_queue_lock::{self, WaitQueueLockGuard};
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 pub struct Notification {
-    words: [u64; 8],
+    words: [u64; 4],
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<Notification>() == 64);
+    assert!(core::mem::size_of::<Notification>() == 32);
     assert!(core::mem::align_of::<Notification>() >= 8);
 };
 
@@ -67,7 +67,7 @@ fn is_kernel_pspace_kva(kva: u64) -> bool {
 
 impl Notification {
     pub const fn new() -> Self {
-        Notification { words: [0; 8] }
+        Notification { words: [0; 4] }
     }
 
     #[inline]
@@ -216,7 +216,7 @@ pub(crate) unsafe fn enqueue_waiter_locked(ntfn: *mut Notification, tcb: *mut Tc
         }
 
         (*ntfn).set_tail(tcb);
-        tcb::set_wait_queue_links(tcb, core::ptr::null_mut(), tail);
+        tcb::set_wait_queue_links(tcb, tail, core::ptr::null_mut());
     }
 }
 

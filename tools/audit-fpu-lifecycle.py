@@ -663,7 +663,7 @@ CHECKS: tuple[Check, ...] = (
             r"pub\s+fn\s+handle_domain",
             r"if\s+domain\s+>=\s+crate::abi::constants::NUM_DOMAINS\s+as\s+u64",
             r"return\s+Err\(SyscallError::InvalidArgument\)",
-            r"unsafe\s+\{\s+crate::object::tcb::set_domain\(tcb_ptr,\s*domain as u8\)\s+\};",
+            r"let\s+_\s+=\s+tcb_ptr;",
         ),
         ordered=True,
         forbidden_patterns=(

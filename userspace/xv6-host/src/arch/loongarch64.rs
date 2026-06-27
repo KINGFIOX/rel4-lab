@@ -2,14 +2,12 @@ pub(crate) const USER_CONTEXT_WORDS: usize = 32;
 pub(crate) const FAULT_REPLY_WORDS: usize = 11;
 pub(crate) type FaultReplyFrame = [u64; FAULT_REPLY_WORDS];
 
-// Project LoongArch64 `seL4_UserContext` order: pc followed by GPR r1..r31.
-// This keeps `$tp` before `$sp`, includes the reserved `$r21` slot, and
-// preserves `$fp/$s9` at its architectural register number.
+// Matches the vendored libsel4 LoongArch64 `seL4_UserContext` order.
 const USER_CONTEXT_PC: usize = 0;
 const USER_CONTEXT_RA: usize = 1;
-const USER_CONTEXT_SP: usize = 3;
-const USER_CONTEXT_A0: usize = 4;
-const USER_CONTEXT_A1: usize = 5;
+const USER_CONTEXT_SP: usize = 2;
+const USER_CONTEXT_A0: usize = 16;
+const USER_CONTEXT_A1: usize = 17;
 
 const UNKNOWN_SYSCALL_PC: usize = 0;
 const UNKNOWN_SYSCALL_SP: usize = 1;

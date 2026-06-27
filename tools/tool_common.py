@@ -81,8 +81,10 @@ def bare_metal_tool_env() -> dict[str, str]:
             env[key] = ""
     env["NIX_HARDENING_ENABLE"] = ""
     env["NIX_HARDENING_ENABLE_riscv64_none_elf"] = ""
+    env["NIX_HARDENING_ENABLE_loongarch64_unknown_linux_gnu"] = ""
     env["NIX_LDFLAGS_HARDEN"] = ""
     env["NIX_LDFLAGS_HARDEN_riscv64_none_elf"] = ""
+    env["NIX_LDFLAGS_HARDEN_loongarch64_unknown_linux_gnu"] = ""
     return env
 
 

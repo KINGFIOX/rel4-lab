@@ -67,7 +67,7 @@ def default_cmake_defs(target) -> dict[str, str]:
         "PLATFORM": platform_from_env(target),
         "KernelSel4Arch": sel4_arch_from_env(target),
         "SIMULATION": "ON",
-        "MCS": "ON",
+        "MCS": "OFF",
         "SMP": "ON",
         "NUM_NODES": "2",
         "LibSel4TestPrinterRegex": ".*",
@@ -183,7 +183,7 @@ def cache_env_overrides_differ(build_dir: Path, cache: dict[str, str], target) -
 
 
 def clear_cmake_state(build_dir: Path) -> None:
-    for name in ("CMakeCache.txt", "build.ninja", "cmake_install.cmake"):
+    for name in ("CMakeCache.txt", "build.ninja", "cmake_install.cmake", "gcc.cmake", "gcc.cmake.temp", "llvm.cmake", "llvm.cmake.temp"):
         try:
             (build_dir / name).unlink()
         except FileNotFoundError:
@@ -368,7 +368,7 @@ def main() -> int:
             require_target_executable_elf(PREFIX, target, rootserver_elf, "rootserver ELF")
 
         ensure_sel4_arch_available(sel4_build_dir, target)
-        require_dir(PREFIX, sel4_build_dir, f"SEL4_BUILD_DIR not found: {sel4_build_dir}")
+        sel4_build_dir.mkdir(parents=True, exist_ok=True)
         ensure_sel4_configured(sel4_build_dir, target)
 
         if rootserver_elf is None:

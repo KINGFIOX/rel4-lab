@@ -9,12 +9,16 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use log_crate::{error, warn};
 
+use crate::abi::constants::PT_INDEX_BITS;
 use crate::abi::constants::{N_TOTAL_MSG_REGISTERS, WORD_BYTES};
 use crate::abi::fault::FaultLabel;
 use crate::abi::syscall::SyscallNumber;
 use crate::abi::types::MessageInfo;
+use crate::api::cspace;
 use crate::arch::loongarch64::csr;
-use crate::object::cap::CapTag;
+use crate::arch::loongarch64::paging::{PAGE_SHIFT, PTE_V, PageTable, Pte, pt_index};
+use crate::arch::loongarch64::vspace::paddr_to_kpptr;
+use crate::object::cap::{Cap, CapTag};
 
 pub const LOONGARCH_NUM_FP_REGS: usize = 32;
 pub const LOONGARCH_FP_REG_BYTES: usize = 8;
@@ -157,16 +161,28 @@ impl UserRegister {
     }
 }
 
-/// LoongArch64 frame registers for seL4-style TCB copy operations.
+/// LoongArch64 `seL4_UserContext` word index to local GPR index.
 ///
-/// Until an upstream seL4 LoongArch port is vendored locally, the project ABI
-/// is `pc` followed by GPR r1..r31. The frame/integer split preserves the
-/// existing 16 + 16 seL4 TCB register-operation shape.
-pub const SEL4_TCB_FRAME_REGS: [usize; 16] = [
+/// This matches the vendored libsel4 LoongArch ABI:
+/// pc, ra, sp, gp, s0..s11, a0..a7, t0..t6, tp. The kernel trap frame does
+/// not track a separate gp or s9..s11 slot, so those context words are ignored.
+pub const SEL4_USER_CONTEXT_REGS: [usize; SEL4_USER_CONTEXT_WORDS] = [
     0,
     UserRegister::Ra.index(),
-    UserRegister::Tp.index(),
     UserRegister::Sp.index(),
+    0,
+    UserRegister::S0.index(),
+    UserRegister::S1.index(),
+    UserRegister::S2.index(),
+    UserRegister::S3.index(),
+    UserRegister::S4.index(),
+    UserRegister::S5.index(),
+    UserRegister::S6.index(),
+    UserRegister::S7.index(),
+    UserRegister::S8.index(),
+    0,
+    0,
+    0,
     UserRegister::A0.index(),
     UserRegister::A1.index(),
     UserRegister::A2.index(),
@@ -179,66 +195,52 @@ pub const SEL4_TCB_FRAME_REGS: [usize; 16] = [
     UserRegister::T1.index(),
     UserRegister::T2.index(),
     UserRegister::T3.index(),
+    UserRegister::T4.index(),
+    UserRegister::T5.index(),
+    UserRegister::T6.index(),
+    UserRegister::Tp.index(),
+];
+
+pub const SEL4_USER_CONTEXT_WORDS: usize = 32;
+
+/// LoongArch64 frame registers for seL4-style TCB copy operations.
+pub const SEL4_TCB_FRAME_REGS: [usize; 16] = [
+    SEL4_USER_CONTEXT_REGS[0],
+    SEL4_USER_CONTEXT_REGS[1],
+    SEL4_USER_CONTEXT_REGS[2],
+    SEL4_USER_CONTEXT_REGS[3],
+    SEL4_USER_CONTEXT_REGS[4],
+    SEL4_USER_CONTEXT_REGS[5],
+    SEL4_USER_CONTEXT_REGS[6],
+    SEL4_USER_CONTEXT_REGS[7],
+    SEL4_USER_CONTEXT_REGS[8],
+    SEL4_USER_CONTEXT_REGS[9],
+    SEL4_USER_CONTEXT_REGS[10],
+    SEL4_USER_CONTEXT_REGS[11],
+    SEL4_USER_CONTEXT_REGS[12],
+    SEL4_USER_CONTEXT_REGS[13],
+    SEL4_USER_CONTEXT_REGS[14],
+    SEL4_USER_CONTEXT_REGS[15],
 ];
 
 /// LoongArch64 integer registers for seL4-style TCB copy operations.
 pub const SEL4_TCB_GP_REGS: [usize; 16] = [
-    UserRegister::T4.index(),
-    UserRegister::T5.index(),
-    UserRegister::T6.index(),
-    UserRegister::T7.index(),
-    UserRegister::T8.index(),
-    UserRegister::R21.index(),
-    UserRegister::Fp.index(),
-    UserRegister::S0.index(),
-    UserRegister::S1.index(),
-    UserRegister::S2.index(),
-    UserRegister::S3.index(),
-    UserRegister::S4.index(),
-    UserRegister::S5.index(),
-    UserRegister::S6.index(),
-    UserRegister::S7.index(),
-    UserRegister::S8.index(),
-];
-
-pub const SEL4_USER_CONTEXT_WORDS: usize = SEL4_TCB_FRAME_REGS.len() + SEL4_TCB_GP_REGS.len();
-
-/// LoongArch64 `seL4_UserContext` word index to local GPR index.
-///
-/// Index 0 is the PC sentinel; indexes 1..31 are GPR r1..r31.
-pub const SEL4_USER_CONTEXT_REGS: [usize; SEL4_USER_CONTEXT_WORDS] = [
-    0,
-    UserRegister::Ra.index(),
-    UserRegister::Tp.index(),
-    UserRegister::Sp.index(),
-    UserRegister::A0.index(),
-    UserRegister::A1.index(),
-    UserRegister::A2.index(),
-    UserRegister::A3.index(),
-    UserRegister::A4.index(),
-    UserRegister::A5.index(),
-    UserRegister::A6.index(),
-    UserRegister::A7.index(),
-    UserRegister::T0.index(),
-    UserRegister::T1.index(),
-    UserRegister::T2.index(),
-    UserRegister::T3.index(),
-    UserRegister::T4.index(),
-    UserRegister::T5.index(),
-    UserRegister::T6.index(),
-    UserRegister::T7.index(),
-    UserRegister::T8.index(),
-    UserRegister::R21.index(),
-    UserRegister::Fp.index(),
-    UserRegister::S0.index(),
-    UserRegister::S1.index(),
-    UserRegister::S2.index(),
-    UserRegister::S3.index(),
-    UserRegister::S4.index(),
-    UserRegister::S5.index(),
-    UserRegister::S6.index(),
-    UserRegister::S7.index(),
-    UserRegister::S8.index(),
+    SEL4_USER_CONTEXT_REGS[16],
+    SEL4_USER_CONTEXT_REGS[17],
+    SEL4_USER_CONTEXT_REGS[18],
+    SEL4_USER_CONTEXT_REGS[19],
+    SEL4_USER_CONTEXT_REGS[20],
+    SEL4_USER_CONTEXT_REGS[21],
+    SEL4_USER_CONTEXT_REGS[22],
+    SEL4_USER_CONTEXT_REGS[23],
+    SEL4_USER_CONTEXT_REGS[24],
+    SEL4_USER_CONTEXT_REGS[25],
+    SEL4_USER_CONTEXT_REGS[26],
+    SEL4_USER_CONTEXT_REGS[27],
+    SEL4_USER_CONTEXT_REGS[28],
+    SEL4_USER_CONTEXT_REGS[29],
+    SEL4_USER_CONTEXT_REGS[30],
+    SEL4_USER_CONTEXT_REGS[31],
 ];
 
 pub const SSTATUS_FS_MASK: u64 = 0;
@@ -259,6 +261,7 @@ const ECFG_LIE_TIMER: usize = 1 << 11;
 const TCFG_ENABLE: usize = 1 << 0;
 const TCFG_INITVAL_SHIFT: usize = 2;
 const TICLR_CLR_TIMER: usize = 1 << 0;
+const TLBIDX_INVALID: usize = 1 << 31;
 const EXCCODE_INTERRUPT: usize = 0;
 const EXCCODE_PIL: usize = 1;
 const EXCCODE_PIS: usize = 2;
@@ -269,6 +272,7 @@ const EXCCODE_PNX: usize = 6;
 const EXCCODE_PPI: usize = 7;
 const EXCCODE_ADE: usize = 8;
 const EXCCODE_SYSCALL: usize = 11;
+const EXCCODE_INE: usize = 13;
 const EXSUBCODE_ADEF: usize = 0;
 const FAULT_MR_REG_COUNT: u64 = 4;
 const VM_FAULT_FSR_INSTRUCTION: u64 = 1;
@@ -283,6 +287,7 @@ global_asm!(include_str!("trap.S"));
 
 unsafe extern "C" {
     pub fn trap_entry();
+    pub fn tlbr_entry();
     pub fn restore_user_context(ctx: *mut UserContext) -> !;
     fn restore_user_context_locked(ctx: *mut UserContext) -> !;
 }
@@ -326,6 +331,9 @@ pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> *mut UserContext {
         }
         _ => {
             let esubcode = estat_esubcode(record.estat as usize);
+            if try_refill_user_tlb(uc, ecode, record.badv) {
+                return kernel_exit(uc, kernel_lock);
+            }
             if !send_fault_ipc(uc, ecode, esubcode, record.badv) {
                 warn!(
                     "loongarch64 user fault: ecode={} estat={:#x} badv={:#x} era={:#x} sp={:#x} ra={:#x}",
@@ -386,10 +394,135 @@ fn fault_message(
         None => {
             mrs[0] = uc.pc;
             mrs[1] = uc.regs[UserRegister::Sp.index()];
-            mrs[2] = code as u64;
+            mrs[2] = user_exception_number(code);
             mrs[3] = subcode as u64;
             (FaultLabel::UserException.raw(), 4, mrs)
         }
+    }
+}
+
+fn user_exception_number(code: usize) -> u64 {
+    match code {
+        EXCCODE_INE => 2,
+        _ => code as u64,
+    }
+}
+
+fn try_refill_user_tlb(uc: &UserContext, ecode: usize, badv: u64) -> bool {
+    if !matches!(ecode, EXCCODE_PIL | EXCCODE_PIS | EXCCODE_PIF) {
+        return false;
+    }
+    let vaddr = if badv == 0 { uc.pc } else { badv } as usize;
+    let Some(leaf_bits) = lookup_user_leaf_bits(vaddr) else {
+        return false;
+    };
+    let page_size = 1usize << leaf_bits;
+    let even_vaddr = vaddr & !(page_size * 2 - 1);
+    let Some((entry0, entry1)) = lookup_user_tlb_pair(even_vaddr, leaf_bits) else {
+        return false;
+    };
+    let elo0 = entry0.raw();
+    let elo1 = entry1.raw();
+    if (entry0.raw() & PTE_V == 0) && (entry1.raw() & PTE_V == 0) {
+        return false;
+    }
+    csr::set_tlbehi(even_vaddr);
+    csr::tlbsrch();
+    let found_idx = csr::tlbidx();
+    let tlbidx_ps = leaf_bits << 24;
+    csr::set_tlbelo0(elo0 as usize);
+    csr::set_tlbelo1(elo1 as usize);
+    if (found_idx & TLBIDX_INVALID) == 0 {
+        csr::set_tlbidx((found_idx & !TLBIDX_INVALID) | tlbidx_ps);
+        csr::tlbwr();
+    } else {
+        csr::set_tlbidx(tlbidx_ps);
+        csr::tlbfill();
+    }
+    true
+}
+
+fn lookup_user_leaf_bits(vaddr: usize) -> Option<usize> {
+    let root = current_user_root()?;
+    unsafe { lookup_user_leaf(root, vaddr).map(|leaf| leaf.bits) }
+}
+
+fn lookup_user_tlb_pair(even_vaddr: usize, leaf_bits: usize) -> Option<(Pte, Pte)> {
+    let root = current_user_root()?;
+    let page_size = 1usize << leaf_bits;
+    let entry0 = unsafe {
+        lookup_user_leaf(root, even_vaddr)
+            .filter(|leaf| leaf.bits == leaf_bits)
+            .map(|leaf| leaf.pte)
+            .unwrap_or(Pte::NULL)
+    };
+    let entry1 = unsafe {
+        lookup_user_leaf(root, even_vaddr + page_size)
+            .filter(|leaf| leaf.bits == leaf_bits)
+            .map(|leaf| leaf.pte)
+            .unwrap_or(Pte::NULL)
+    };
+    if (entry0.raw() & PTE_V == 0) && (entry1.raw() & PTE_V == 0) {
+        return None;
+    }
+    Some((entry0, entry1))
+}
+
+fn current_user_root() -> Option<*const PageTable> {
+    use crate::object::cap::CapTag;
+    use crate::object::tcb;
+
+    let cur = tcb::current();
+    if cur.is_null() {
+        return None;
+    }
+    let vroot = tcb::vspace_cap_snapshot(cur);
+    if vroot.tag() != Some(CapTag::PageTable) || !vroot.page_table_is_mapped() {
+        return None;
+    }
+    let root = vroot.page_table_base_ptr() as *const PageTable;
+    if root.is_null() {
+        return None;
+    }
+    Some(root)
+}
+
+struct UserLeaf {
+    pte: Pte,
+    bits: usize,
+}
+
+unsafe fn lookup_user_leaf(root: *const PageTable, vaddr: usize) -> Option<UserLeaf> {
+    let l2 = unsafe { (*root).entries[pt_index(vaddr, 2)] };
+    if !l2.is_valid() {
+        return None;
+    }
+    if l2.is_leaf() {
+        return Some(UserLeaf {
+            pte: l2,
+            bits: PAGE_SHIFT + 2 * PT_INDEX_BITS,
+        });
+    }
+    let l1 = paddr_to_kpptr(l2.next_pt_paddr() as usize) as *const PageTable;
+    let l1_entry = unsafe { (*l1).entries[pt_index(vaddr, 1)] };
+    if !l1_entry.is_valid() {
+        return None;
+    }
+    if l1_entry.is_leaf() {
+        return Some(UserLeaf {
+            pte: l1_entry,
+            bits: PAGE_SHIFT + PT_INDEX_BITS,
+        });
+    }
+    let l0 = paddr_to_kpptr(l1_entry.next_pt_paddr() as usize) as *const PageTable;
+    let leaf = unsafe { (*l0).entries[pt_index(vaddr, 0)] };
+    if leaf.is_leaf() {
+        Some(UserLeaf {
+            pte: leaf,
+            bits: PAGE_SHIFT,
+        })
+    } else {
+        None
     }
 }
 
@@ -444,7 +577,7 @@ fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: [u64; 16]) -> bool {
     if cur.is_null() {
         return false;
     }
-    let handler_cap = tcb::fault_endpoint_snapshot(cur);
+    let handler_cap = fault_handler_cap(cur);
     if handler_cap.tag() != Some(CapTag::Endpoint)
         || !handler_cap.endpoint_can_send()
         || !(handler_cap.endpoint_can_grant() || handler_cap.endpoint_can_grant_reply())
@@ -482,6 +615,17 @@ fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: [u64; 16]) -> bool {
         finish_fault_ipc_receive(receiver, cur, handler_cap, true);
     }
     true
+}
+
+fn fault_handler_cap(tcb: *const crate::object::tcb::Tcb) -> Cap {
+    let cptr = crate::object::tcb::fault_endpoint_cptr_snapshot(tcb);
+    if cptr != 0 {
+        let root = crate::object::tcb::cspace_cap_snapshot(tcb);
+        if let Ok((cap, _)) = cspace::lookup_cap_in(root, cptr, cspace::WORD_BITS) {
+            return cap;
+        }
+    }
+    crate::object::tcb::fault_endpoint_snapshot(tcb)
 }
 
 unsafe fn write_fault_ipc_message(
@@ -627,22 +771,15 @@ fn handle_syscall(uc: &mut UserContext) {
         Some(SyscallNumber::NonBlockingSend) => {
             crate::api::syscall::do_send(uc, true);
         }
+        Some(SyscallNumber::Reply) => {
+            crate::api::ipc::reply(uc);
+        }
         Some(SyscallNumber::Recv | SyscallNumber::NonBlockingRecv) => {
             let blocking = SyscallNumber::from_raw(raw_sysno) == Some(SyscallNumber::Recv);
-            crate::api::syscall::do_recv_mcs(uc, blocking, true);
-        }
-        Some(SyscallNumber::Wait | SyscallNumber::NonBlockingWait) => {
-            let blocking = SyscallNumber::from_raw(raw_sysno) == Some(SyscallNumber::Wait);
-            crate::api::syscall::do_recv_mcs(uc, blocking, false);
+            crate::api::syscall::do_recv(uc, blocking);
         }
         Some(SyscallNumber::ReplyRecv) => {
-            crate::api::syscall::do_reply_recv_mcs(uc);
-        }
-        Some(SyscallNumber::NonBlockingSendRecv) => {
-            crate::api::syscall::do_nbsend_recv_mcs(uc, false);
-        }
-        Some(SyscallNumber::NonBlockingSendWait) => {
-            crate::api::syscall::do_nbsend_recv_mcs(uc, true);
+            crate::api::ipc::reply_recv(uc);
         }
         None => {
             if !send_unknown_syscall_fault(uc, raw_sysno) {
@@ -723,8 +860,8 @@ fn kernel_exit(
         let next = tcb::schedule();
         if !next.is_null() {
             if next != cur {
-                tcb::set_current(next);
                 let ctx = unsafe { tcb::prepare_for_user_restore(next) };
+                tcb::set_current(next);
                 switch_to_tcb_vspace(next);
                 return finish_kernel_exit(ctx, kernel_lock);
             }
@@ -775,6 +912,7 @@ fn finish_kernel_exit(
     ctx: *mut UserContext,
     kernel_lock: crate::kernel::smp::KernelLockGuard,
 ) -> *mut UserContext {
+    let _ = ctx;
     program_next_timer();
     kernel_lock.defer_unlock_for_user_restore();
     ctx
@@ -840,8 +978,11 @@ pub extern "C" fn kernel_trap_panic() -> ! {
 
 pub fn install_trap_vector() {
     let addr = trap_entry as *const () as usize;
+    let tlbr_addr = tlbr_entry as *const () as usize;
     debug_assert!(addr & 0x3f == 0, "eentry must be 64-byte aligned");
+    debug_assert!(tlbr_addr & 0x3f == 0, "tlbrentry must be 64-byte aligned");
     csr::set_eentry(addr);
+    csr::set_tlbrentry(tlbr_addr);
     csr::ibar();
 }
 
@@ -873,6 +1014,12 @@ fn synthetic_timer_irq_deadline(now: u64) -> Option<u64> {
 }
 
 fn program_next_timer() {
+    csr::set_tcfg(0);
+    clear_timer_interrupt();
+    csr::dbar();
+}
+
+fn program_idle_timer() {
     let now = csr::time() as u64;
     let deadline = synthetic_timer_irq_deadline(now);
     let deadline = deadline.unwrap_or_else(|| now.wrapping_add(TIMER_INTERVAL_TICKS));
@@ -980,7 +1127,7 @@ pub fn idle_scheduler_loop() -> ! {
             if next.is_null() {
                 crate::kernel::smp::clear_current_state();
                 switch_to_kernel_vspace();
-                program_next_timer();
+                program_idle_timer();
                 None
             } else {
                 crate::object::tcb::set_current(next);

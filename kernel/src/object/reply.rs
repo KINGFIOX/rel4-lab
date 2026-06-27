@@ -43,6 +43,11 @@ fn is_kernel_pspace_kva(kva: u64) -> bool {
 }
 
 #[inline]
+pub(crate) fn is_reply_object_kva(kva: u64) -> bool {
+    is_kernel_pspace_kva(kva) && (kva as usize).is_multiple_of(core::mem::align_of::<Reply>())
+}
+
+#[inline]
 unsafe fn clear_locked(reply: *mut Reply) {
     unsafe {
         (*reply).tcb = 0;
@@ -240,6 +245,8 @@ unsafe fn unlink_locked(reply_kva: u64, reply: *mut Reply, tcb: *mut Tcb) {
                 && cap.reply_is_object()
                 && cap.reply_object_ptr() == reply_kva
             {
+                (*slot).cap = crate::object::cap::Cap::null();
+                (*slot).mdb = crate::object::mdb::MdbNode::NULL;
                 tcb::clear_reply_slot_if(tcb, slot as u64);
             }
         }
@@ -330,6 +337,19 @@ pub unsafe fn remove_tcb(tcb: *mut Tcb) {
     }
     unsafe {
         let reply_kva = tcb::reply_object_snapshot(tcb);
+        if reply_kva & 1 != 0 {
+            let slot = tcb::reply_slot_snapshot(tcb) as *mut Cte;
+            if !slot.is_null() {
+                let cap = cnode::cap_snapshot(slot);
+                if cap.tag() == Some(CapTag::Reply) && cap.reply_object_ptr() == reply_kva {
+                    (*slot).cap = crate::object::cap::Cap::null();
+                    (*slot).mdb = crate::object::mdb::MdbNode::NULL;
+                }
+            }
+            tcb::clear_reply_slot_if(tcb, slot as u64);
+            tcb::clear_reply_binding_if(tcb, reply_kva);
+            return;
+        }
         if reply_kva != 0 && is_kernel_pspace_kva(reply_kva) {
             let reply = reply_kva as *mut Reply;
             let _guard = lock(reply_kva);
@@ -374,6 +394,26 @@ pub unsafe fn tcb(reply_kva: u64) -> *mut Tcb {
     unsafe {
         let _guard = lock(reply_kva);
         (*reply).tcb as *mut Tcb
+    }
+}
+
+pub unsafe fn set_saved_reply_slot(reply_kva: u64, slot: *mut Cte) {
+    if reply_kva == 0 {
+        return;
+    }
+    if reply_kva & 1 != 0 {
+        unsafe {
+            tcb::set_reply_slot_and_object((reply_kva & !1) as *mut Tcb, slot as u64, reply_kva);
+        }
+        return;
+    }
+    let reply = reply_kva as *mut Reply;
+    unsafe {
+        let _guard = lock(reply_kva);
+        let owner = (*reply).tcb as *mut Tcb;
+        if !owner.is_null() && is_kernel_pspace_kva(owner as u64) {
+            tcb::set_reply_slot_and_object(owner, slot as u64, reply_kva);
+        }
     }
 }
 

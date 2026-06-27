@@ -34,7 +34,7 @@ const TCB_COPY_TRANSFER_INTEGER: u64 = 1 << 3;
 const SEL4_IPC_BUFFER_SIZE_BITS: u64 = 10;
 
 /// Object type IDs as defined by `seL4_ObjectType` (`api_object` +
-/// `_mode_object` + `_object` for RISC-V).
+/// `_mode_object` + `_object`) for the non-MCS 64-bit VSpace ABI.
 #[repr(u64)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ObjectType {
@@ -43,11 +43,10 @@ enum ObjectType {
     Endpoint = 2,
     Notification = 3,
     CapTable = 4,
-    Reply = 6,
-    GigaPage = 7,
-    FourKPage = 8,
-    MegaPage = 9,
-    PageTable = 10,
+    GigaPage = 5,
+    FourKPage = 6,
+    MegaPage = 7,
+    PageTable = 8,
 }
 
 impl ObjectType {
@@ -58,11 +57,10 @@ impl ObjectType {
             2 => Some(Self::Endpoint),
             3 => Some(Self::Notification),
             4 => Some(Self::CapTable),
-            6 => Some(Self::Reply),
-            7 => Some(Self::GigaPage),
-            8 => Some(Self::FourKPage),
-            9 => Some(Self::MegaPage),
-            10 => Some(Self::PageTable),
+            5 => Some(Self::GigaPage),
+            6 => Some(Self::FourKPage),
+            7 => Some(Self::MegaPage),
+            8 => Some(Self::PageTable),
             _ => None,
         }
     }
@@ -83,13 +81,13 @@ enum InvocationLabel {
     TcbSetPriority = 6,
     TcbSetMcPriority = 7,
     TcbSetSchedParams = 8,
-    TcbSetTimeoutEndpoint = 9,
-    TcbSetIpcBuffer = 10,
-    TcbSetSpace = 11,
-    TcbSuspend = 12,
-    TcbResume = 13,
-    TcbBindNotification = 14,
-    TcbUnbindNotification = 15,
+    TcbSetIpcBuffer = 9,
+    TcbSetSpace = 10,
+    TcbSuspend = 11,
+    TcbResume = 12,
+    TcbBindNotification = 13,
+    TcbUnbindNotification = 14,
+    TcbSetAffinity = 15,
     TcbSetTlsBase = 16,
     TcbSetFlags = 17,
     CNodeRevoke = 18,
@@ -100,19 +98,22 @@ enum InvocationLabel {
     CNodeMove = 23,
     CNodeMutate = 24,
     CNodeRotate = 25,
-    IrqIssueIrqHandler = 26,
-    IrqAck = 27,
-    IrqSetHandler = 28,
-    IrqClearHandler = 29,
-    DomainSet = 30,
-    RiscvPageTableMap = 39,
-    RiscvPageTableUnmap = 40,
-    RiscvPageMap = 41,
-    RiscvPageUnmap = 42,
-    RiscvPageGetAddress = 43,
-    RiscvAsidControlMakePool = 44,
-    RiscvAsidPoolAssign = 45,
-    RiscvIrqIssueIrqHandlerTrigger = 46,
+    CNodeSaveCaller = 26,
+    IrqIssueIrqHandler = 27,
+    IrqAck = 28,
+    IrqSetHandler = 29,
+    IrqClearHandler = 30,
+    DomainSet = 31,
+    DomainScheduleConfigure = 32,
+    DomainScheduleSetStart = 33,
+    RiscvPageTableMap = 34,
+    RiscvPageTableUnmap = 35,
+    RiscvPageMap = 36,
+    RiscvPageUnmap = 37,
+    RiscvPageGetAddress = 38,
+    RiscvAsidControlMakePool = 39,
+    RiscvAsidPoolAssign = 40,
+    RiscvIrqIssueIrqHandlerTrigger = 41,
 }
 
 impl InvocationLabel {
@@ -152,7 +153,6 @@ fn object_size_bits(ty: ObjectType, user_size: u64) -> u64 {
         ObjectType::Endpoint => SEL4_ENDPOINT_BITS as u64,
         ObjectType::Notification => SEL4_NOTIFICATION_BITS as u64,
         ObjectType::CapTable => user_size + SEL4_SLOT_BITS as u64,
-        ObjectType::Reply => crate::abi::constants::SEL4_REPLY_BITS as u64,
         ObjectType::FourKPage | ObjectType::PageTable => 12,
         ObjectType::MegaPage => 21,
         ObjectType::GigaPage => 30,
@@ -223,7 +223,6 @@ fn create_object_cap(ty: ObjectType, region_base: u64, user_size: u64, is_device
         ObjectType::Endpoint => Cap::new_endpoint(region_base),
         ObjectType::Notification => Cap::new_notification(region_base),
         ObjectType::Tcb => Cap::new_thread(region_base),
-        ObjectType::Reply => Cap::new_reply_object(region_base, true),
     }
 }
 
@@ -386,7 +385,6 @@ pub fn handle_untyped(
                 ObjectType::Tcb => unsafe { crate::object::tcb::init(obj_base) },
                 ObjectType::Endpoint => unsafe { crate::object::endpoint::init(obj_base) },
                 ObjectType::Notification => unsafe { crate::object::notification::init(obj_base) },
-                ObjectType::Reply => unsafe { crate::object::reply::init(obj_base) },
                 _ => {}
             }
             let dst = &mut dest_cnode[(node_offset + i) as usize];
@@ -997,8 +995,9 @@ pub fn handle_irq_handler(
     }
 }
 
-/// DomainSet is accepted for seL4 source compatibility, but rel4 collapses
-/// every requested value into the single effective scheduling domain.
+/// DomainSet is accepted for seL4 source compatibility, but this build has
+/// `CONFIG_NUM_DOMAINS = 1` and collapses every valid value into the single
+/// effective scheduling domain.
 pub fn handle_domain(
     thread: &Thread,
     _cap: Cap,
@@ -1014,13 +1013,17 @@ pub fn handle_domain(
     }
     require_extra_caps(uc, 1)?;
 
-    let _requested_domain = uc.regs[UserRegister::A2.index()];
+    let domain = uc.regs[UserRegister::A2.index()];
+    if domain >= crate::abi::constants::NUM_DOMAINS as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
     let tcb_cap = lookup_extra_cap(thread, 0)?;
     require_tag(tcb_cap, CapTag::Thread)?;
     let tcb_ptr = crate::object::tcb::from_cap(tcb_cap);
     if tcb_ptr.is_null() {
         return Err(SyscallError::InvalidCapability);
     }
+    let _ = tcb_ptr;
     Ok(())
 }
 
@@ -1089,18 +1092,20 @@ fn handle_thread_inner(
     match label_id {
         id if id == InvocationLabel::TcbConfigure.raw() => {
             {
-                // libsel4: tag = MessageInfo(TCBConfigure, 0, 3, 3)
+                // Non-MCS libsel4: tag = MessageInfo(TCBConfigure, 0, 3, 4)
                 //   extraCaps[0] = cspace_root
                 //   extraCaps[1] = vspace_root
                 //   extraCaps[2] = buffer_frame
-                //   mr0 = cspace_data, mr1 = vspace_data, mr2 = buffer_uva
-                if length < 3 {
+                //   mr0 = fault_ep, mr1 = cspace_data, mr2 = vspace_data,
+                //   mr3 = buffer_uva
+                if length < 4 {
                     return Err(SyscallError::TruncatedMessage);
                 }
                 require_extra_caps(uc, 3)?;
-                let cspace_data = uc.regs[UserRegister::A2.index()];
-                let vspace_data = uc.regs[UserRegister::A3.index()];
-                let buffer_uva = uc.regs[UserRegister::A4.index()];
+                let fault_ep = uc.regs[UserRegister::A2.index()];
+                let cspace_data = uc.regs[UserRegister::A3.index()];
+                let vspace_data = uc.regs[UserRegister::A4.index()];
+                let buffer_uva = uc.regs[UserRegister::A5.index()];
 
                 let (mut cspace_cap, cspace_slot) = lookup_tcb_space_cap_slot(thread, 0)?;
                 let (mut vspace_cap, vspace_slot) = lookup_tcb_space_cap_slot(thread, 1)?;
@@ -1125,6 +1130,16 @@ fn handle_thread_inner(
 
                 install_tcb_cap(slot, tcb_ptr, tcb::TCB_CTABLE_SLOT, cspace_cap, cspace_slot)?;
                 install_tcb_cap(slot, tcb_ptr, tcb::TCB_VTABLE_SLOT, vspace_cap, vspace_slot)?;
+                install_tcb_cap(
+                    slot,
+                    tcb_ptr,
+                    tcb::TCB_FAULT_HANDLER_SLOT,
+                    Cap::null(),
+                    ptr::null_mut(),
+                )?;
+                unsafe {
+                    tcb::set_fault_endpoint_cptr(tcb_ptr, fault_ep);
+                }
                 install_tcb_buffer_cap(slot, tcb_ptr, buffer_uva, buffer_cap, buffer_slot)?;
                 return Ok(());
             }
@@ -1132,19 +1147,19 @@ fn handle_thread_inner(
 
         id if id == InvocationLabel::TcbSetSpace.raw() => {
             {
-                // libsel4: tag = MessageInfo(TCBSetSpace, 0, 3, 2)
-                //   extraCaps[0] = fault_ep, [1] = cspace_root, [2] = vspace_root
-                //   mr0 = cspace_data, mr1 = vspace_data
-                if length < 2 {
+                // Non-MCS libsel4: tag = MessageInfo(TCBSetSpace, 0, 2, 3)
+                //   extraCaps[0] = cspace_root, [1] = vspace_root
+                //   mr0 = fault_ep, mr1 = cspace_data, mr2 = vspace_data
+                if length < 3 {
                     return Err(SyscallError::TruncatedMessage);
                 }
-                require_extra_caps(uc, 3)?;
-                let cspace_data = uc.regs[UserRegister::A2.index()];
-                let vspace_data = uc.regs[UserRegister::A3.index()];
+                require_extra_caps(uc, 2)?;
+                let fault_ep = uc.regs[UserRegister::A2.index()];
+                let cspace_data = uc.regs[UserRegister::A3.index()];
+                let vspace_data = uc.regs[UserRegister::A4.index()];
 
-                let fault_cap = lookup_optional_extra_cap_slot(thread, 0)?;
-                let (mut cspace_cap, cspace_slot) = lookup_tcb_space_cap_slot(thread, 1)?;
-                let (mut vspace_cap, vspace_slot) = lookup_tcb_space_cap_slot(thread, 2)?;
+                let (mut cspace_cap, cspace_slot) = lookup_tcb_space_cap_slot(thread, 0)?;
+                let (mut vspace_cap, vspace_slot) = lookup_tcb_space_cap_slot(thread, 1)?;
                 if tcb_space_slot_long_running_delete(tcb_ptr) {
                     return Err(SyscallError::IllegalOperation);
                 }
@@ -1161,20 +1176,17 @@ fn handle_thread_inner(
                 }
                 let vspace_cap = derive_cap_for_copy(vspace_slot, vspace_cap)?;
                 require_tcb_vspace_root(vspace_cap)?;
-                if let Some((fault_cap, _)) = fault_cap {
-                    require_endpoint_send_grant(fault_cap)?;
-                }
 
-                let (fault_ep_cap, fault_slot) = fault_cap
-                    .map(|(cap, slot)| (cap, slot))
-                    .unwrap_or((Cap::null(), ptr::null_mut()));
                 install_tcb_cap(
                     slot,
                     tcb_ptr,
                     tcb::TCB_FAULT_HANDLER_SLOT,
-                    fault_ep_cap,
-                    fault_slot,
+                    Cap::null(),
+                    ptr::null_mut(),
                 )?;
+                unsafe {
+                    tcb::set_fault_endpoint_cptr(tcb_ptr, fault_ep);
+                }
                 install_tcb_cap(slot, tcb_ptr, tcb::TCB_CTABLE_SLOT, cspace_cap, cspace_slot)?;
                 install_tcb_cap(slot, tcb_ptr, tcb::TCB_VTABLE_SLOT, vspace_cap, vspace_slot)?;
                 return Ok(());
@@ -1253,28 +1265,12 @@ fn handle_thread_inner(
 
             Ok(())
         }
-        id if id == InvocationLabel::TcbSetTimeoutEndpoint.raw() => {
-            require_extra_caps(uc, 1)?;
-            let timeout_cap = lookup_optional_extra_cap_slot(thread, 0)?;
-            let (timeout_ep_cap, timeout_slot) =
-                if let Some((timeout_cap, timeout_slot)) = timeout_cap {
-                    require_endpoint_send_grant(timeout_cap)?;
-                    (timeout_cap, timeout_slot)
-                } else {
-                    (Cap::null(), ptr::null_mut())
-                };
-            install_tcb_cap(
-                slot,
-                tcb_ptr,
-                tcb::TCB_TIMEOUT_HANDLER_SLOT,
-                timeout_ep_cap,
-                timeout_slot,
-            )?;
-            Ok(())
-        }
-
         id if id == InvocationLabel::TcbSuspend.raw() => {
+            let suspend_current = tcb::current() == tcb_ptr;
             unsafe { tcb::suspend(tcb_ptr) };
+            if suspend_current {
+                return Err(SyscallError::Preempted);
+            }
             Ok(())
         }
 
@@ -1458,6 +1454,18 @@ fn handle_thread_inner(
                 return Err(SyscallError::IllegalOperation);
             }
             unsafe { tcb::unbind_notification(tcb_ptr) };
+            Ok(())
+        }
+
+        id if id == InvocationLabel::TcbSetAffinity.raw() => {
+            if length < 1 {
+                return Err(SyscallError::TruncatedMessage);
+            }
+            let affinity = uc.regs[UserRegister::A2.index()];
+            if affinity >= crate::abi::constants::MAX_NUM_NODES as u64 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            let _ = affinity;
             Ok(())
         }
 
@@ -1812,11 +1820,43 @@ pub fn handle_cnode(
         id if invocation_label_matches(id, InvocationLabel::CNodeRotate) => {
             cnode_op_rotate(thread, dest_root_cap, length, uc)
         }
+        id if invocation_label_matches(id, InvocationLabel::CNodeSaveCaller) => {
+            cnode_op_save_caller(dest_root_cap, length, uc)
+        }
         _ => {
             let _ = label_id;
             Err(SyscallError::IllegalOperation)
         }
     }
+}
+
+fn cnode_op_save_caller(
+    dest_root_cap: Cap,
+    length: u64,
+    uc: &UserContext,
+) -> Result<(), SyscallError> {
+    if length < 2 {
+        return Err(SyscallError::TruncatedMessage);
+    }
+    let index = uc.regs[UserRegister::A2.index()];
+    let depth = uc.regs[UserRegister::A3.index()] as u32 & 0xff;
+    let dest = resolve_slot(dest_root_cap, index, depth)?;
+
+    unsafe {
+        let cspace_guard = crate::object::cnode::lock_cspace();
+        if !(*dest).cap.is_null() || (*dest).mdb.prev() != 0 || (*dest).mdb.next() != 0 {
+            return Err(SyscallError::DeleteFirst);
+        }
+        let (reply_object, can_grant) = tcb::take_caller_reply(tcb::current());
+        if reply_object == 0 {
+            return Ok(());
+        }
+        (*dest).cap = Cap::new_reply_object(reply_object, can_grant);
+        (*dest).mdb = MdbNode::NULL;
+        crate::object::reply::set_saved_reply_slot(reply_object, dest);
+        let _ = cspace_guard;
+    }
+    Ok(())
 }
 
 /// CNode_CancelBadgedSends: target slot must hold an Endpoint cap with
@@ -2804,12 +2844,13 @@ fn finalize_cap(
                 let root_pt_kva = crate::object::asid::lookup(asid);
                 if root_pt_kva != 0 {
                     unsafe {
-                        let _ = crate::arch::current::vspace::unmap_user_frame(
+                        let unmapped = crate::arch::current::vspace::unmap_user_frame(
                             root_pt_kva as *mut PageTable,
                             va as usize,
                             cap.frame_size(),
                             pa as usize,
                         );
+                        let _ = unmapped;
                     }
                 }
                 cap.set_frame_mapped_addr(0);

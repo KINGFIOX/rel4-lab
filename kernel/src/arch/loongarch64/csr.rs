@@ -26,6 +26,7 @@ pub const CSR_KS0: usize = 0x030;
 pub const CSR_TCFG: usize = 0x041;
 pub const CSR_TVAL: usize = 0x042;
 pub const CSR_TICLR: usize = 0x044;
+pub const CSR_TLBRENTRY: usize = 0x088;
 pub const CSR_DMW0: usize = 0x180;
 pub const CSR_DMW1: usize = 0x181;
 pub const CSR_DMW2: usize = 0x182;
@@ -96,6 +97,7 @@ rw_csr!(ks0, set_ks0, CSR_KS0);
 rw_csr!(tcfg, set_tcfg, CSR_TCFG);
 ro_csr!(tval, CSR_TVAL);
 rw_csr!(ticlr, set_ticlr, CSR_TICLR);
+rw_csr!(tlbrentry, set_tlbrentry, CSR_TLBRENTRY);
 rw_csr!(dmw0, set_dmw0, CSR_DMW0);
 rw_csr!(dmw1, set_dmw1, CSR_DMW1);
 rw_csr!(dmw2, set_dmw2, CSR_DMW2);
@@ -216,6 +218,27 @@ pub fn sfence_vma_asid(asid: usize) {
 #[inline]
 pub fn fence_i() {
     ibar();
+}
+
+#[inline]
+pub fn tlbfill() {
+    unsafe {
+        asm!("tlbfill", options(nostack, nomem));
+    }
+}
+
+#[inline]
+pub fn tlbsrch() {
+    unsafe {
+        asm!("tlbsrch", options(nostack, nomem));
+    }
+}
+
+#[inline]
+pub fn tlbwr() {
+    unsafe {
+        asm!("tlbwr", options(nostack, nomem));
+    }
 }
 
 #[inline]

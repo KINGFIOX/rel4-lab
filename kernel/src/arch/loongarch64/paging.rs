@@ -2,7 +2,7 @@
 //!
 //! The software page-table shape still mirrors the repository's three-level
 //! seL4 object model, but the entry bits use LoongArch's TLB EntryLo format
-//! plus the software `Present`/`Write` bits used by LoongArch page walking.
+//! plus the software `Present`/`Write` bits used by LoongArch leaf PTEs.
 
 use crate::abi::constants::{PT_INDEX_BITS, SEL4_PAGE_BITS, SEL4_PAGE_TABLE_ENTRIES};
 
@@ -38,9 +38,10 @@ pub const PTE_RPLV: u64 = 1 << 63;
 pub const PTE_KERNEL_RWX: u64 =
     PTE_PRESENT | PTE_V | PTE_D | PTE_W | PTE_G | PTE_PLV_KERNEL | PTE_MAT_CC;
 pub const PTE_USER_RW: u64 =
-    PTE_PRESENT | PTE_V | PTE_D | PTE_W | PTE_PLV_USER | PTE_MAT_CC | PTE_NX;
-pub const PTE_USER_RX: u64 = PTE_PRESENT | PTE_V | PTE_PLV_USER | PTE_MAT_CC;
-pub const PTE_USER_RWX: u64 = PTE_PRESENT | PTE_V | PTE_D | PTE_W | PTE_PLV_USER | PTE_MAT_CC;
+    PTE_PRESENT | PTE_V | PTE_D | PTE_W | PTE_PLV_USER | PTE_MAT_CC | PTE_NX | PTE_RPLV;
+pub const PTE_USER_RX: u64 = PTE_PRESENT | PTE_V | PTE_PLV_USER | PTE_MAT_CC | PTE_RPLV;
+pub const PTE_USER_RWX: u64 =
+    PTE_PRESENT | PTE_V | PTE_D | PTE_W | PTE_PLV_USER | PTE_MAT_CC | PTE_RPLV;
 
 #[repr(transparent)]
 #[derive(Copy, Clone)]
@@ -61,7 +62,7 @@ impl Pte {
 
     #[inline]
     pub const fn next(pt_paddr: u64) -> Pte {
-        Pte((pt_paddr & !((PAGE_SIZE as u64) - 1)) | PTE_PRESENT)
+        Pte(pt_paddr & !((PAGE_SIZE as u64) - 1))
     }
 
     #[inline]
@@ -71,7 +72,7 @@ impl Pte {
 
     #[inline]
     pub const fn is_valid(self) -> bool {
-        (self.0 & PTE_PRESENT) != 0
+        self.0 != 0
     }
 
     #[inline]

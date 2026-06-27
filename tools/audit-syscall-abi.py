@@ -19,26 +19,31 @@ KERNEL_SYSCALL_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*=\s*(-?\d+)\s*,",
 USER_SYSCALL_RE = re.compile(
     r"pub\s+const\s+(SYS_[A-Z0-9_]+)\s*:\s*isize\s*=\s*(-?\d+)\s*;"
 )
+KERNEL_CONST_RE = re.compile(r"pub\s+const\s+([A-Z0-9_]+)\s*:\s*usize\s*=\s*(\d+)\s*;")
 
 KERNEL_SYSCALLS = {
     "Call": -1,
     "ReplyRecv": -2,
-    "NonBlockingSendRecv": -3,
-    "NonBlockingSendWait": -4,
-    "Send": -5,
-    "NonBlockingSend": -6,
-    "Recv": -7,
+    "Send": -3,
+    "NonBlockingSend": -4,
+    "Recv": -5,
+    "Reply": -6,
+    "Yield": -7,
     "NonBlockingRecv": -8,
-    "Wait": -9,
-    "NonBlockingWait": -10,
-    "Yield": -11,
-    "DebugPutChar": -12,
-    "DebugDumpScheduler": -13,
-    "DebugHalt": -14,
-    "DebugCapIdentify": -15,
-    "DebugSnapshot": -16,
-    "DebugNameThread": -17,
-    "DebugSendIpi": -18,
+    "DebugPutChar": -9,
+    "DebugDumpScheduler": -10,
+    "DebugHalt": -11,
+    "DebugCapIdentify": -12,
+    "DebugSnapshot": -13,
+    "DebugNameThread": -14,
+    "DebugSendIpi": -15,
+}
+
+KERNEL_OBJECT_SIZE_BITS = {
+    "SEL4_SLOT_BITS": 5,
+    "SEL4_TCB_BITS": 11,
+    "SEL4_ENDPOINT_BITS": 4,
+    "SEL4_NOTIFICATION_BITS": 5,
 }
 
 USER_TO_KERNEL_SYSCALLS = {
@@ -47,8 +52,9 @@ USER_TO_KERNEL_SYSCALLS = {
     "SYS_SEND": "Send",
     "SYS_NB_RECV": "NonBlockingRecv",
     "SYS_RECV": "Recv",
-    "SYS_WAIT": "Wait",
-    "SYS_NB_WAIT": "NonBlockingWait",
+    "SYS_REPLY": "Reply",
+    "SYS_WAIT": "Recv",
+    "SYS_NB_WAIT": "NonBlockingRecv",
     "SYS_YIELD": "Yield",
     "SYS_DEBUG_PUT_CHAR": "DebugPutChar",
     "SYS_DEBUG_HALT": "DebugHalt",
@@ -74,6 +80,10 @@ def parse_userspace_syscalls(path: Path) -> dict[str, int]:
     return {name: int(value) for name, value in USER_SYSCALL_RE.findall(path.read_text())}
 
 
+def parse_kernel_consts(path: Path) -> dict[str, int]:
+    return {name: int(value) for name, value in KERNEL_CONST_RE.findall(path.read_text())}
+
+
 def require_text(errors: list[str], path: Path, text: str, description: str) -> None:
     source = path.read_text()
     if text not in source:
@@ -84,6 +94,34 @@ def require_regex(errors: list[str], path: Path, pattern: str, description: str)
     source = path.read_text()
     if re.search(pattern, source, re.S) is None:
         errors.append(f"{path.relative_to(ROOT_DIR)} is missing {description}")
+
+
+def arch_function_source(errors: list[str], path: Path, name: str) -> str:
+    source = path.read_text()
+    pattern = (
+        rf"pub\(crate\)\s+unsafe\s+fn\s+{re.escape(name)}\s*"
+        rf"\([^{{]*\)\s*(?:->\s*[^\{{]+)?\{{.*?\n\}}\n"
+        rf"(?=\n#\[inline\(always\)\]|\Z)"
+    )
+    match = re.search(pattern, source, re.S)
+    if match is None:
+        errors.append(f"{path.relative_to(ROOT_DIR)} is missing {name} syscall stub")
+        return ""
+    return match.group(0)
+
+
+def require_function_text(
+    errors: list[str], path: Path, function: str, text: str, description: str
+) -> None:
+    if text not in function:
+        errors.append(f"{path.relative_to(ROOT_DIR)} {description}: {text}")
+
+
+def forbid_function_text(
+    errors: list[str], path: Path, function: str, text: str, description: str
+) -> None:
+    if text in function:
+        errors.append(f"{path.relative_to(ROOT_DIR)} unexpectedly has {description}: {text}")
 
 
 def audit_syscall_numbers(errors: list[str]) -> None:
@@ -109,9 +147,9 @@ def audit_syscall_numbers(errors: list[str]) -> None:
         )
     extra_kernel_syscalls = set(kernel_syscalls) - set(KERNEL_SYSCALLS)
     for kernel_name in sorted(extra_kernel_syscalls):
-        errors.append(f"kernel SyscallNumber::{kernel_name} is not in audited seL4 MCS set")
-    if "MCS" not in kernel_source or "api-master" not in kernel_source:
-        errors.append("kernel syscall source no longer documents the seL4 MCS api-master ABI")
+        errors.append(f"kernel SyscallNumber::{kernel_name} is not in audited seL4 non-MCS set")
+    if "non-MCS" not in kernel_source or "api-master" not in kernel_source:
+        errors.append("kernel syscall source no longer documents the seL4 non-MCS api-master ABI")
 
     for user_name, kernel_name in USER_TO_KERNEL_SYSCALLS.items():
         kernel_value = kernel_syscalls.get(kernel_name)
@@ -124,6 +162,16 @@ def audit_syscall_numbers(errors: list[str]) -> None:
             errors.append(
                 f"{user_name}={user_value}, expected SyscallNumber::{kernel_name}={kernel_value}"
             )
+
+
+def audit_object_size_bits(errors: list[str]) -> None:
+    consts = parse_kernel_consts(ROOT_DIR / "kernel" / "src" / "abi" / "constants.rs")
+    for name, expected_value in KERNEL_OBJECT_SIZE_BITS.items():
+        value = consts.get(name)
+        if value is None:
+            errors.append(f"kernel {name} is missing")
+        elif value != expected_value:
+            errors.append(f"kernel {name}={value}, expected {expected_value}")
 
 
 def audit_userspace_arch(errors: list[str], target_name: str) -> None:
@@ -154,6 +202,67 @@ def audit_userspace_arch(errors: list[str], target_name: str) -> None:
         "SYS_DEBUG_HALT",
     ):
         require_text(errors, path, syscall, f"{syscall} use")
+
+    regs = {name: f'inlateout("{reg}{name}")' for name in ("a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7")}
+    call = arch_function_source(errors, path, "call")
+    for name in ("a0", "a1", "a2", "a3", "a4", "a5"):
+        require_function_text(errors, path, call, regs[name], f"call uses {name}")
+    require_function_text(errors, path, call, regs["a7"], "call uses syscall-number register")
+    require_function_text(errors, path, call, "SYS_CALL", "call uses SYS_CALL")
+    forbid_function_text(errors, path, call, regs["a6"], "call reply-cap register")
+
+    recv = arch_function_source(errors, path, "recv_with_reply")
+    for name in ("a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"):
+        require_function_text(errors, path, recv, regs[name], f"recv_with_reply uses {name}")
+    require_function_text(errors, path, recv, "reply => _", "recv_with_reply passes reply cap")
+    require_function_text(errors, path, recv, "syscall => _", "recv_with_reply passes syscall argument")
+
+    wait = arch_function_source(errors, path, "wait")
+    for name in ("a0", "a1", "a2", "a3", "a4", "a5", "a7"):
+        require_function_text(errors, path, wait, regs[name], f"wait uses {name}")
+    require_function_text(errors, path, wait, "syscall => _", "wait passes syscall argument")
+    forbid_function_text(errors, path, wait, regs["a6"], "wait reply-cap register")
+
+    reply_recv = arch_function_source(errors, path, "reply_recv_with_reply")
+    for name in ("a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"):
+        require_function_text(errors, path, reply_recv, regs[name], f"reply_recv_with_reply uses {name}")
+    require_function_text(
+        errors,
+        path,
+        reply_recv,
+        "SYS_REPLY_RECV",
+        "reply_recv_with_reply uses SYS_REPLY_RECV",
+    )
+    require_function_text(
+        errors, path, reply_recv, "reply => _", "reply_recv_with_reply passes reply cap"
+    )
+
+    send = arch_function_source(errors, path, "send")
+    for name in ("a0", "a1", "a2", "a3", "a4", "a5", "a7"):
+        require_function_text(errors, path, send, regs[name], f"send uses {name}")
+    require_function_text(errors, path, send, "SYS_SEND", "send uses SYS_SEND")
+    forbid_function_text(errors, path, send, regs["a6"], "send reply-cap register")
+
+    yield_now = arch_function_source(errors, path, "yield_now")
+    require_function_text(errors, path, yield_now, regs["a7"], "yield_now uses a7")
+    require_function_text(errors, path, yield_now, "SYS_YIELD", "yield_now uses SYS_YIELD")
+
+    debug_put_char = arch_function_source(errors, path, "debug_put_char")
+    require_function_text(errors, path, debug_put_char, regs["a0"], "debug_put_char uses a0")
+    require_function_text(errors, path, debug_put_char, regs["a7"], "debug_put_char uses a7")
+    require_function_text(
+        errors,
+        path,
+        debug_put_char,
+        "SYS_DEBUG_PUT_CHAR",
+        "debug_put_char uses SYS_DEBUG_PUT_CHAR",
+    )
+
+    debug_halt = arch_function_source(errors, path, "debug_halt")
+    require_function_text(errors, path, debug_halt, regs["a7"], "debug_halt uses a7")
+    require_function_text(
+        errors, path, debug_halt, "SYS_DEBUG_HALT", "debug_halt uses SYS_DEBUG_HALT"
+    )
 
 
 def audit_userspace_common(errors: list[str]) -> None:
@@ -228,34 +337,20 @@ def audit_kernel_trap(errors: list[str], target_name: str) -> None:
         path,
         r"Some\(SyscallNumber::Recv\s*\|\s*SyscallNumber::NonBlockingRecv\)\s*=>\s*\{\s*"
         r"let\s+blocking\s*=\s*SyscallNumber::from_raw\(raw_sysno\)\s*==\s*Some\(SyscallNumber::Recv\);\s*"
-        r"crate::api::syscall::do_recv_mcs\(uc,\s*blocking,\s*true\);\s*\}",
+        r"crate::api::syscall::do_recv\(uc,\s*blocking\);\s*\}",
         "Recv and NonBlockingRecv syscall handler",
     )
     require_regex(
         errors,
         path,
-        r"Some\(SyscallNumber::Wait\s*\|\s*SyscallNumber::NonBlockingWait\)\s*=>\s*\{\s*"
-        r"let\s+blocking\s*=\s*SyscallNumber::from_raw\(raw_sysno\)\s*==\s*Some\(SyscallNumber::Wait\);\s*"
-        r"crate::api::syscall::do_recv_mcs\(uc,\s*blocking,\s*false\);\s*\}",
-        "Wait and NonBlockingWait syscall handler",
+        r"Some\(SyscallNumber::Reply\)\s*=>\s*\{\s*crate::api::ipc::reply\(uc\);\s*\}",
+        "Reply syscall handler",
     )
     require_regex(
         errors,
         path,
-        r"Some\(SyscallNumber::ReplyRecv\)\s*=>\s*\{\s*crate::api::syscall::do_reply_recv_mcs\(uc\);\s*\}",
+        r"Some\(SyscallNumber::ReplyRecv\)\s*=>\s*\{\s*crate::api::ipc::reply_recv\(uc\);\s*\}",
         "ReplyRecv syscall handler",
-    )
-    require_regex(
-        errors,
-        path,
-        r"Some\(SyscallNumber::NonBlockingSendRecv\)\s*=>\s*\{\s*crate::api::syscall::do_nbsend_recv_mcs\(uc,\s*false\);\s*\}",
-        "NonBlockingSendRecv syscall handler",
-    )
-    require_regex(
-        errors,
-        path,
-        r"Some\(SyscallNumber::NonBlockingSendWait\)\s*=>\s*\{\s*crate::api::syscall::do_nbsend_recv_mcs\(uc,\s*true\);\s*\}",
-        "NonBlockingSendWait syscall handler",
     )
     require_regex(
         errors,
@@ -282,6 +377,7 @@ def main(argv: list[str]) -> int:
     target = target_from_env(PREFIX)
     errors: list[str] = []
     audit_syscall_numbers(errors)
+    audit_object_size_bits(errors)
     audit_userspace_common(errors)
     audit_userspace_arch(errors, target.name)
     audit_kernel_trap(errors, target.name)

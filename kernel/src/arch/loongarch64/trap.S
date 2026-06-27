@@ -109,6 +109,19 @@ trap_entry:
 
     b       restore_user_context_locked
 
+    .align 6
+    .globl tlbr_entry
+tlbr_entry:
+    csrwr   $t0, 0x08b
+    csrrd   $t0, 0x01b
+    lddir   $t0, $t0, 3
+    lddir   $t0, $t0, 1
+    ldpte   $t0, 0
+    ldpte   $t0, 1
+    tlbfill
+    csrrd   $t0, 0x08b
+    ertn
+
     .globl restore_user_context_locked
 restore_user_context_locked:
     addi.d  $sp, $sp, -16

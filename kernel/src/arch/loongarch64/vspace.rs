@@ -11,7 +11,7 @@ use crate::abi::constants::{
 use crate::arch::loongarch64::csr;
 use crate::arch::loongarch64::paging::{
     PAGE_SHIFT, PAGE_SIZE, PTE_D, PTE_MAT_CC, PTE_MAT_SUC, PTE_NR, PTE_NX, PTE_PLV_USER,
-    PTE_PRESENT, PTE_V, PTE_W, PageTable, Pte, pt_index,
+    PTE_PRESENT, PTE_RPLV, PTE_V, PTE_W, PageTable, Pte, pt_index,
 };
 use crate::kernel::smp::{BklCell, BklObjectGuard};
 
@@ -54,23 +54,24 @@ const BOOT_PT_POOL_PAGES: usize = 1024;
 
 const PWCL_PTBASE_SHIFT: usize = 0;
 const PWCL_PTWIDTH_SHIFT: usize = 5;
-const PWCL_DIR1_BASE_SHIFT: usize = 10;
-const PWCL_DIR1_WIDTH_SHIFT: usize = 15;
-const PWCL_DIR2_BASE_SHIFT: usize = 20;
-const PWCL_DIR2_WIDTH_SHIFT: usize = 25;
+const PWCL_DIR0_BASE_SHIFT: usize = 10;
+const PWCL_DIR0_WIDTH_SHIFT: usize = 15;
+const PWCL_DIR1_BASE_SHIFT: usize = 20;
+const PWCL_DIR1_WIDTH_SHIFT: usize = 25;
 const PWCL_PTEWIDTH_SHIFT: usize = 30;
+const PWCH_DIR2_BASE_SHIFT: usize = 0;
+const PWCH_DIR2_WIDTH_SHIFT: usize = 6;
 const PAGE_WALK_PTE_WIDTH_64: usize = 0;
 
-const PAGE_WALK_DIR1_BASE: usize = PAGE_SHIFT + PT_INDEX_BITS;
+const PAGE_WALK_DIR0_BASE: usize = PAGE_SHIFT + PT_INDEX_BITS;
 const PAGE_WALK_DIR2_BASE: usize = PAGE_SHIFT + PT_INDEX_BITS * 2;
 const PAGE_WALK_CONTROL_LOW: usize = (PAGE_SHIFT << PWCL_PTBASE_SHIFT)
     | (PT_INDEX_BITS << PWCL_PTWIDTH_SHIFT)
-    | (PAGE_WALK_DIR1_BASE << PWCL_DIR1_BASE_SHIFT)
-    | (PT_INDEX_BITS << PWCL_DIR1_WIDTH_SHIFT)
-    | (PAGE_WALK_DIR2_BASE << PWCL_DIR2_BASE_SHIFT)
-    | (PT_INDEX_BITS << PWCL_DIR2_WIDTH_SHIFT)
+    | (PAGE_WALK_DIR0_BASE << PWCL_DIR0_BASE_SHIFT)
+    | (PT_INDEX_BITS << PWCL_DIR0_WIDTH_SHIFT)
     | (PAGE_WALK_PTE_WIDTH_64 << PWCL_PTEWIDTH_SHIFT);
-const PAGE_WALK_CONTROL_HIGH: usize = 0;
+const PAGE_WALK_CONTROL_HIGH: usize =
+    (PAGE_WALK_DIR2_BASE << PWCH_DIR2_BASE_SHIFT) | (PT_INDEX_BITS << PWCH_DIR2_WIDTH_SHIFT);
 
 const CRMD_DA: usize = 1 << 3;
 const CRMD_PG: usize = 1 << 4;
@@ -209,7 +210,7 @@ fn root_paddr(root: *const PageTable) -> Option<u64> {
 fn flush_vaddr_for_root(root: *const PageTable, vaddr: usize) {
     match root_paddr(root) {
         Some(root_pa) if root_pa == (current_satp() & !0xfffu64) => {
-            csr::sfence_vma_va(vaddr);
+            csr::sfence_vma_va(vaddr & !(PAGE_SIZE * 2 - 1));
         }
         _ => {
             csr::sfence_vma_all();
@@ -284,7 +285,7 @@ unsafe fn prepare_user_frame_map_at(
     if !user_range_aligned(vaddr, bits) || paddr & ((1usize << bits) - 1) != 0 {
         return Err(UserMapError::InvalidArgument);
     }
-    flags |= PTE_PRESENT | PTE_V | PTE_PLV_USER;
+    flags |= PTE_PRESENT | PTE_V | PTE_PLV_USER | PTE_RPLV;
 
     let _guard = lock_vspace(root);
     let lookup = unsafe { lookup_pt_slot_user(root, vaddr)? };
@@ -462,6 +463,7 @@ pub unsafe fn switch_satp(satp_val: u64) {
     if current_satp() == satp_val {
         enable_paging();
         csr::dbar();
+        csr::sfence_vma_all();
         return;
     }
     csr::set_pgdl((satp_val & !0xfffu64) as usize);
@@ -527,7 +529,7 @@ pub fn user_flags(read: bool, write: bool, exec: bool) -> u64 {
 
 pub fn user_frame_flags(read: bool, write: bool, exec: bool, is_device: bool) -> u64 {
     let mat = if is_device { PTE_MAT_SUC } else { PTE_MAT_CC };
-    let mut f = PTE_PRESENT | PTE_V | PTE_PLV_USER | mat;
+    let mut f = PTE_PRESENT | PTE_V | PTE_PLV_USER | PTE_RPLV | mat;
     if !read {
         f |= PTE_NR;
     }
@@ -564,7 +566,7 @@ const _: () = {
     assert!(PAGE_SIZE == 4096);
     assert!(PAGE_SHIFT < 32);
     assert!(PT_INDEX_BITS < 32);
-    assert!(PAGE_WALK_DIR1_BASE < 32);
+    assert!(PAGE_WALK_DIR0_BASE < 32);
     assert!(PAGE_WALK_DIR2_BASE < 32);
     assert!(PAGE_WALK_PTE_WIDTH_64 < 4);
     assert!(DMW_PSEG_SHIFT < DMW_VSEG_SHIFT);

@@ -215,9 +215,18 @@ pub fn do_send(uc: &mut UserContext, nb: bool) {
                 if reply == 0 {
                     return;
                 }
-                let caller = crate::object::reply::tcb(reply);
+                let caller = if reply & 1 != 0 {
+                    (reply & !1) as *mut crate::object::tcb::Tcb
+                } else {
+                    crate::object::reply::tcb(reply)
+                };
                 if crate::object::tcb::blocked_on_reply_snapshot(caller) {
-                    crate::object::reply::remove(reply, caller);
+                    if reply & 1 == 0 {
+                        crate::object::reply::remove(reply, caller);
+                    } else {
+                        (*slot).cap = crate::object::cap::Cap::null();
+                        (*slot).mdb = crate::object::mdb::MdbNode::NULL;
+                    }
                     crate::api::ipc::reply_to_tcb(uc, caller);
                     crate::object::tcb::clear_reply_slot_if(caller, slot as u64);
                 }

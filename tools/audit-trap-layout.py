@@ -374,6 +374,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         "EXCCODE_PPI",
         "EXCCODE_ADE",
         "EXCCODE_SYSCALL",
+        "EXCCODE_INE",
         "EXSUBCODE_ADEF",
         "FAULT_MR_REG_COUNT",
         "VM_FAULT_FSR_INSTRUCTION",
@@ -414,6 +415,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         "EXCCODE_PPI": 7,
         "EXCCODE_ADE": 8,
         "EXCCODE_SYSCALL": 11,
+        "EXCCODE_INE": 13,
         "EXSUBCODE_ADEF": 0,
         "FAULT_MR_REG_COUNT": 4,
         "VM_FAULT_FSR_INSTRUCTION": 1,
@@ -443,10 +445,13 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         trap_rs,
         r"pub\s+fn\s+install_trap_vector\(\)\s*\{\s*"
         r"let\s+addr\s*=\s*trap_entry\s+as\s+\*const\s+\(\)\s+as\s+usize;"
+        r"\s*let\s+tlbr_addr\s*=\s*tlbr_entry\s+as\s+\*const\s+\(\)\s+as\s+usize;"
         r"\s*debug_assert!\(addr\s*&\s*0x3f\s*==\s*0,\s*\"eentry must be 64-byte aligned\"\);"
+        r"\s*debug_assert!\(tlbr_addr\s*&\s*0x3f\s*==\s*0,\s*\"tlbrentry must be 64-byte aligned\"\);"
         r"\s*csr::set_eentry\(addr\);"
+        r"\s*csr::set_tlbrentry\(tlbr_addr\);"
         r"\s*csr::ibar\(\);\s*\}",
-        "LoongArch trap vector installation programs EENTRY then fences with ibar",
+        "LoongArch trap vector installation programs EENTRY/TLBRENTRY then fences with ibar",
     )
     require_regex(
         errors,
@@ -468,10 +473,18 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     require_regex(
         errors,
         trap_rs,
-        r"fn\s+program_next_timer\(\)\s*\{.*?crate::kernel::smp::set_next_timer_deadline\(deadline\);.*?"
+        r"fn\s+program_next_timer\(\)\s*\{\s*csr::set_tcfg\(0\);"
+        r"\s*clear_timer_interrupt\(\);"
+        r"\s*csr::dbar\(\);\s*\}",
+        "LoongArch user-entry timer disable path with barrier",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+program_idle_timer\(\)\s*\{.*?crate::kernel::smp::set_next_timer_deadline\(deadline\);.*?"
         r"csr::set_tcfg\(\(initval\s*<<\s*TCFG_INITVAL_SHIFT\)\s*\|\s*TCFG_ENABLE\);"
         r"\s*csr::dbar\(\);",
-        "LoongArch timer reprogramming path with barrier",
+        "LoongArch idle timer reprogramming path with barrier",
     )
     require_regex(
         errors,
@@ -494,7 +507,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     require_regex(
         errors,
         trap_rs,
-        r"if\s+next\.is_null\(\)\s*\{.*?switch_to_kernel_vspace\(\);.*?program_next_timer\(\);.*?None",
+        r"if\s+next\.is_null\(\)\s*\{.*?switch_to_kernel_vspace\(\);.*?program_idle_timer\(\);.*?None",
         "LoongArch idle scheduler reprograms timer before idle",
     )
     require_regex(
@@ -552,6 +565,15 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     require_regex(
         errors,
         trap_rs,
+        r"mrs\[2\]\s*=\s*user_exception_number\(code\);.*?"
+        r"fn\s+user_exception_number\(code:\s*usize\)\s*->\s*u64\s*\{.*?"
+        r"EXCCODE_INE\s*=>\s*2,.*?"
+        r"_\s*=>\s*code\s+as\s+u64",
+        "LoongArch UserException number ABI mapping",
+    )
+    require_regex(
+        errors,
+        trap_rs,
         r"fn\s+vm_fault_fsr\(code:\s*usize,\s*subcode:\s*usize\)\s*->\s*Option<\(bool,\s*u64\)>\s*\{.*?"
         r"EXCCODE_PIF\s*\|\s*EXCCODE_PNX\s*=>\s*Some\(\(true,\s*VM_FAULT_FSR_INSTRUCTION\)\).*?"
         r"EXCCODE_PIS\s*\|\s*EXCCODE_PME\s*=>\s*Some\(\(false,\s*VM_FAULT_FSR_STORE\)\).*?"
@@ -563,11 +585,17 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         errors,
         fault_rs,
         r"pub\s+enum\s+FaultLabel\s*\{.*?"
-        r"CapFault\s*=\s*1,.*?"
-        r"UnknownSyscall\s*=\s*2,.*?"
-        r"UserException\s*=\s*3,.*?"
-        r"Timeout\s*=\s*5,.*?"
-        r"VmFault\s*=\s*6,",
+        r"CapFault,.*?"
+        r"UnknownSyscall,.*?"
+        r"UserException,.*?"
+        r"VmFault,.*?"
+        r"Self::CapFault\s*=>\s*1,.*?"
+        r"Self::UnknownSyscall\s*=>\s*2,.*?"
+        r"Self::UserException\s*=>\s*3,.*?"
+        r"#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
+        r"Self::VmFault\s*=>\s*5,.*?"
+        r"#\[cfg\(not\(target_arch\s*=\s*\"loongarch64\"\)\)\]\s*"
+        r"Self::VmFault\s*=>\s*6,",
         "seL4 fault-label numeric ABI",
     )
     require_regex(
