@@ -35,6 +35,8 @@ const SEL4_IPC_BUFFER_SIZE_BITS: u64 = 10;
 
 /// Object type IDs as defined by `seL4_ObjectType` (`api_object` +
 /// `_mode_object` + `_object`) for the non-MCS 64-bit VSpace ABI.
+/// Reply objects are a local compatibility extension for userspace that keeps
+/// ordinary non-MCS scheduling semantics.
 #[repr(u64)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ObjectType {
@@ -47,6 +49,7 @@ enum ObjectType {
     FourKPage = 6,
     MegaPage = 7,
     PageTable = 8,
+    Reply = 9,
 }
 
 impl ObjectType {
@@ -61,6 +64,7 @@ impl ObjectType {
             6 => Some(Self::FourKPage),
             7 => Some(Self::MegaPage),
             8 => Some(Self::PageTable),
+            9 => Some(Self::Reply),
             _ => None,
         }
     }
@@ -153,6 +157,7 @@ fn object_size_bits(ty: ObjectType, user_size: u64) -> u64 {
         ObjectType::Endpoint => SEL4_ENDPOINT_BITS as u64,
         ObjectType::Notification => SEL4_NOTIFICATION_BITS as u64,
         ObjectType::CapTable => user_size + SEL4_SLOT_BITS as u64,
+        ObjectType::Reply => crate::abi::constants::SEL4_REPLY_BITS as u64,
         ObjectType::FourKPage | ObjectType::PageTable => 12,
         ObjectType::MegaPage => 21,
         ObjectType::GigaPage => 30,
@@ -223,6 +228,7 @@ fn create_object_cap(ty: ObjectType, region_base: u64, user_size: u64, is_device
         ObjectType::Endpoint => Cap::new_endpoint(region_base),
         ObjectType::Notification => Cap::new_notification(region_base),
         ObjectType::Tcb => Cap::new_thread(region_base),
+        ObjectType::Reply => Cap::new_reply_object(region_base, true),
     }
 }
 
@@ -385,6 +391,7 @@ pub fn handle_untyped(
                 ObjectType::Tcb => unsafe { crate::object::tcb::init(obj_base) },
                 ObjectType::Endpoint => unsafe { crate::object::endpoint::init(obj_base) },
                 ObjectType::Notification => unsafe { crate::object::notification::init(obj_base) },
+                ObjectType::Reply => unsafe { crate::object::reply::init(obj_base) },
                 _ => {}
             }
             let dst = &mut dest_cnode[(node_offset + i) as usize];

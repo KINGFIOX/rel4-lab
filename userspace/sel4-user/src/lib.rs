@@ -111,10 +111,11 @@ pub const OBJ_GIGA_PAGE: u64 = 5;
 pub const OBJ_4K: u64 = 6;
 pub const OBJ_MEGA_PAGE: u64 = 7;
 pub const OBJ_PAGE_TABLE: u64 = 8;
+pub const OBJ_REPLY: u64 = 9;
 
 pub const FAULT_UNKNOWN_SYSCALL: u64 = 2;
 pub const FAULT_USER_EXCEPTION: u64 = 3;
-pub const FAULT_VM_FAULT: u64 = 6;
+pub const FAULT_VM_FAULT: u64 = 5;
 
 pub const USER_EXCEPTION_FAULT_IP: usize = 0;
 pub const USER_EXCEPTION_SP: usize = 1;

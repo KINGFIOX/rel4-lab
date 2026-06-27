@@ -592,10 +592,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         r"Self::CapFault\s*=>\s*1,.*?"
         r"Self::UnknownSyscall\s*=>\s*2,.*?"
         r"Self::UserException\s*=>\s*3,.*?"
-        r"#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
-        r"Self::VmFault\s*=>\s*5,.*?"
-        r"#\[cfg\(not\(target_arch\s*=\s*\"loongarch64\"\)\)\]\s*"
-        r"Self::VmFault\s*=>\s*6,",
+        r"Self::VmFault\s*=>\s*5,",
         "seL4 fault-label numeric ABI",
     )
     require_regex(

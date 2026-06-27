@@ -20,10 +20,7 @@ impl FaultLabel {
             Self::UserException => 3,
             #[cfg(not(target_arch = "loongarch64"))]
             Self::Timeout => 5,
-            #[cfg(target_arch = "loongarch64")]
             Self::VmFault => 5,
-            #[cfg(not(target_arch = "loongarch64"))]
-            Self::VmFault => 6,
         }
     }
 }
