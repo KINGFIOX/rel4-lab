@@ -22,7 +22,6 @@
 
 #![allow(dead_code)]
 
-use crate::abi::types::MessageInfo;
 use crate::object::tcb::{self, Tcb};
 use crate::object::wait_queue_lock::{self, WaitQueueLockGuard};
 
@@ -311,8 +310,8 @@ unsafe fn take_all_locked(ep: *mut Endpoint) -> *mut Tcb {
 /// wait list and cancel every blocked sender whose `sender_badge` matches
 /// `badge`. Non-matching senders, and any blocked receivers, are left
 /// in place. Matching normal IPC senders move to `Restart` and re-enter the
-/// runqueue with a failed-call reply; matching fault senders are left inactive,
-/// mirroring seL4 `restart_thread_if_no_fault`.
+/// runqueue; matching fault senders are left inactive, mirroring seL4
+/// `restart_thread_if_no_fault`.
 pub unsafe fn cancel_badged_sends(ep: *mut Endpoint, badge: u64) {
     if ep.is_null() {
         return;
@@ -351,11 +350,9 @@ pub unsafe fn cancel_badged_sends(ep: *mut Endpoint, badge: u64) {
             }
         }
 
-        const SEL4_INVALID_CAPABILITY: u64 = 2;
-        let call_error_info = MessageInfo::new(SEL4_INVALID_CAPABILITY, 0, 0, 0).0;
         let mut cur = wake_head;
         while !cur.is_null() {
-            let (next, runnable) = tcb::cancel_endpoint_waiter(cur, Some(call_error_info));
+            let (next, runnable) = tcb::cancel_endpoint_waiter(cur, None);
             if runnable {
                 tcb::enqueue(cur);
             }

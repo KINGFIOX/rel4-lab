@@ -567,40 +567,39 @@ unsafe fn complete_receive_from_sender(
             );
         }
         if sender_state.is_call {
-            // Park the caller on the receiver's explicit reply object. If no
-            // valid reply object was provided, keep a non-MCS implicit reply
-            // token so the Call still blocks until Reply.
-            let (reply_set, reply_token, reply_can_grant) =
-                match reply_object_for_receive(cur, reply_cptr) {
-                    Some((reply_cptr, reply_kva, reply_can_grant)) => (
-                        set_reply_object_for(
-                            cur,
-                            reply_cptr,
+            if sender_state.can_grant || sender_state.can_grant_reply {
+                let (reply_set, reply_token, reply_can_grant) =
+                    match reply_object_for_receive(cur, reply_cptr) {
+                        Some((reply_cptr, reply_kva, reply_can_grant)) => (
+                            set_reply_object_for(
+                                cur,
+                                reply_cptr,
+                                reply_kva,
+                                reply_can_grant,
+                                sender,
+                                sender_state.can_grant,
+                                false,
+                            ),
                             reply_kva,
-                            reply_can_grant,
-                            sender,
-                            sender_state.can_grant,
-                            false,
+                            sender_state.can_grant && reply_can_grant,
                         ),
-                        reply_kva,
-                        sender_state.can_grant && reply_can_grant,
-                    ),
-                    None => {
-                        tcb::set_blocked_on_reply(sender, (sender as u64) | 1);
-                        (true, (sender as u64) | 1, false)
-                    }
+                        None => {
+                            tcb::set_blocked_on_reply(sender, (sender as u64) | 1);
+                            (true, (sender as u64) | 1, false)
+                        }
+                    };
+                if reply_set {
+                    tcb::set_caller_reply(cur, reply_token, reply_can_grant);
+                    // Caller is now parked on the reply object.
+                } else if sender_state.is_fault {
+                    tcb::set_inactive(sender);
+                    tcb::clear_waiting_on(sender);
+                } else {
+                    tcb::deactivate_queued_call_sender(sender);
                 };
-            if reply_set {
-                tcb::set_caller_reply(cur, reply_token, reply_can_grant);
-                // Caller is now parked on the reply object.
-            } else if sender_state.is_fault {
-                tcb::set_inactive(sender);
-                tcb::clear_waiting_on(sender);
             } else {
                 tcb::deactivate_queued_call_sender(sender);
-            };
-        } else if sender_state.is_call {
-            tcb::deactivate_queued_call_sender(sender);
+            }
         } else {
             // Plain Send: wake the sender, drop its badge.
             tcb::wake_queued_sender(sender);
@@ -828,32 +827,39 @@ pub fn call(uc: &mut UserContext) {
         let (receiver_reply_cptr, receiver_reply_kva, receiver_reply_can_grant) =
             tcb::start_receiver_rendezvous(receiver);
         tcb::dequeue(cur);
-        let reply_token = if receiver_reply_kva != 0 {
-            let reply_set = set_reply_object_for(
-                receiver,
-                receiver_reply_cptr,
-                receiver_reply_kva,
-                receiver_reply_can_grant,
-                cur,
-                cap.endpoint_can_grant(),
-                true,
-            );
-            if reply_set {
-                receiver_reply_kva
+        let has_reply_rights = cap.endpoint_can_grant() || cap.endpoint_can_grant_reply();
+        let reply_token = if has_reply_rights {
+            if receiver_reply_kva != 0 {
+                let reply_set = set_reply_object_for(
+                    receiver,
+                    receiver_reply_cptr,
+                    receiver_reply_kva,
+                    receiver_reply_can_grant,
+                    cur,
+                    cap.endpoint_can_grant(),
+                    true,
+                );
+                if reply_set {
+                    receiver_reply_kva
+                } else {
+                    tcb::set_blocked_on_reply(cur, (cur as u64) | 1);
+                    (cur as u64) | 1
+                }
             } else {
                 tcb::set_blocked_on_reply(cur, (cur as u64) | 1);
                 (cur as u64) | 1
             }
         } else {
-            tcb::set_blocked_on_reply(cur, (cur as u64) | 1);
-            (cur as u64) | 1
+            0
         };
-        tcb::set_caller_reply(
-            receiver,
-            reply_token,
-            cap.endpoint_can_grant() && receiver_reply_can_grant && receiver_reply_kva != 0,
-        );
-        tcb::finish_call_sender_after_rendezvous(cur, true);
+        if reply_token != 0 {
+            tcb::set_caller_reply(
+                receiver,
+                reply_token,
+                cap.endpoint_can_grant() && receiver_reply_can_grant && receiver_reply_kva != 0,
+            );
+        }
+        tcb::finish_call_sender_after_rendezvous(cur, reply_token != 0);
         tcb::finish_receiver_rendezvous(receiver);
         tcb::enqueue(receiver);
     }

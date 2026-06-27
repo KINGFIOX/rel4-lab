@@ -649,6 +649,7 @@ pub(crate) unsafe fn prepare_for_user_restore(tcb: *mut Tcb) -> *mut UserContext
     let ctx = unsafe {
         let _guard = lock_state(tcb);
         if (*tcb).state == ThreadState::Restart as u8 {
+            (*tcb).context.pc = (*tcb).context.restart_pc;
             (*tcb).state = ThreadState::Running as u8;
         }
         &raw mut (*tcb).context
