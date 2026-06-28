@@ -306,15 +306,8 @@ pub(crate) fn create_child_from_untyped(
     call_checked(cnode, LABEL_CNODE_MINT, &[ROOT_CNODE], &mrs);
 
     let cspace_data = cnode_cap_data(0, WORD_BITS - CHILD_CNODE_BITS);
-    let mrs = [cspace_data, 0, CHILD_IPC_BUFFER];
+    let mrs = [CHILD_FAULT_EP, cspace_data, 0, CHILD_IPC_BUFFER];
     call_checked(tcb, LABEL_TCB_CONFIGURE, &[cnode, vspace, ipc_frame], &mrs);
-    let mrs = [cspace_data, 0];
-    call_checked(
-        tcb,
-        LABEL_TCB_SET_SPACE,
-        &[fault_ep_cap, cnode, vspace],
-        &mrs,
-    );
     call_checked(
         tcb,
         LABEL_TCB_SET_SCHED_PARAMS,
@@ -322,7 +315,7 @@ pub(crate) fn create_child_from_untyped(
         &[CHILD_MCP, CHILD_PRIORITY],
     );
 
-    TaskStruct {
+    let child = TaskStruct {
         pid,
         parent_pid,
         state: PROC_RUNNABLE,
@@ -363,7 +356,29 @@ pub(crate) fn create_child_from_untyped(
         sleep_reply_mrs: [0; arch::FAULT_REPLY_WORDS],
         deferred_reply_slot: 0,
         deferred_mrs: [0; 64],
-    }
+    };
+
+    #[cfg(target_arch = "loongarch64")]
+    map_loongarch_null_guard_page(alloc, &child);
+
+    child
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn map_loongarch_null_guard_page(alloc: &mut Allocator, child: &TaskStruct) {
+    let frame_slot = alloc.retype_one_from(child.untyped, OBJ_4K, 0);
+    map_existing_frame(
+        alloc,
+        child.pid,
+        frame_slot,
+        child.vspace,
+        0,
+        false,
+        false,
+        false,
+        false,
+        true,
+    );
 }
 
 pub(crate) fn destroy_child_objects(alloc: &mut Allocator, child: &TaskStruct) {
@@ -524,6 +539,10 @@ pub(crate) fn frame_pool_available() -> usize {
     CHILD_MEMORY.frame_pool_len()
 }
 
+pub(crate) fn mapping_count() -> usize {
+    CHILD_MEMORY.mapping_count()
+}
+
 pub(crate) fn map_stack(alloc: &mut Allocator, child: &mut TaskStruct) {
     map_stack_pages(alloc, child, CHILD_STACK_PAGES);
 }
@@ -624,16 +643,17 @@ pub(crate) fn map_lazy_child_page(
     )
 }
 
-pub(crate) fn map_existing_child_frame(
+pub(crate) fn map_existing_child_frame_with_attrs(
     alloc: &mut Allocator,
     child: &TaskStruct,
     frame_slot: u64,
     child_va: u64,
     writable: bool,
     executable: bool,
+    extra_attrs: u64,
 ) -> u64 {
     let mapping_slot = alloc.copy_cap(frame_slot, cap_rights(false, false, true, writable));
-    map_existing_frame(
+    map_existing_frame_with_attrs(
         alloc,
         child.pid,
         mapping_slot,
@@ -644,6 +664,7 @@ pub(crate) fn map_existing_child_frame(
         false,
         false,
         false,
+        extra_attrs,
     )
 }
 
@@ -669,6 +690,25 @@ fn map_existing_frame(
     pool_frame: bool,
     zero_frame: bool,
 ) -> u64 {
+    map_existing_frame_with_attrs(
+        alloc, pid, frame_slot, vspace, child_va, writable, executable, with_alias, pool_frame,
+        zero_frame, 0,
+    )
+}
+
+fn map_existing_frame_with_attrs(
+    alloc: &mut Allocator,
+    pid: u64,
+    frame_slot: u64,
+    vspace: u64,
+    child_va: u64,
+    writable: bool,
+    executable: bool,
+    with_alias: bool,
+    pool_frame: bool,
+    zero_frame: bool,
+    extra_attrs: u64,
+) -> u64 {
     ensure_page_table_path(alloc, pid, vspace, child_va);
     let (mapping_slot, alias_va) =
         register_mapping(pid, child_va, frame_slot, writable, executable, pool_frame);
@@ -680,13 +720,31 @@ fn map_existing_frame(
     } else if zero_frame {
         zero_frame_with_temporary_alias(alloc, frame_slot, alias_va);
     }
-    page_map(frame_slot, vspace, child_va, writable, executable);
+    page_map_with_attrs(
+        frame_slot,
+        vspace,
+        child_va,
+        writable,
+        executable,
+        extra_attrs,
+    );
     alias_va
 }
 
 fn page_map(frame_slot: u64, vspace: u64, va: u64, writable: bool, executable: bool) {
+    page_map_with_attrs(frame_slot, vspace, va, writable, executable, 0);
+}
+
+fn page_map_with_attrs(
+    frame_slot: u64,
+    vspace: u64,
+    va: u64,
+    writable: bool,
+    executable: bool,
+    extra_attrs: u64,
+) {
     let rights = cap_rights(false, false, true, writable);
-    let attrs = if executable { 0 } else { 1 };
+    let attrs = (if executable { 0 } else { 1 }) | extra_attrs;
     call_checked(frame_slot, LABEL_PAGE_MAP, &[vspace], &[va, rights, attrs]);
 }
 
@@ -765,11 +823,11 @@ fn unmap_mapping_at(alloc: &mut Allocator, slot: usize) {
     }
     if mapping.alias_slot != 0 {
         page_unmap(mapping.alias_slot);
+        alloc.delete_cap_slot(mapping.alias_slot);
     }
     if mapping.frame_slot != 0 {
         page_unmap(mapping.frame_slot);
     }
-    alloc.delete_cap_slot(mapping.alias_slot);
     if mapping.pool_frame {
         release_process_frame(alloc, mapping.frame_slot);
     } else {
@@ -942,7 +1000,12 @@ pub(crate) fn clone_address_space(alloc: &mut Allocator, parent: &TaskStruct, ch
         let mapping = CHILD_MEMORY.mapping(i);
         let freed_heap_page =
             mapping.child_page >= live_heap_end && mapping.child_page < CHILD_HEAP_LIMIT;
-        if mapping.pid == parent.pid && mapping.child_page != CHILD_IPC_BUFFER && !freed_heap_page {
+        if mapping.pid == parent.pid
+            && mapping.child_page != CHILD_IPC_BUFFER
+            && mapping.child_page != 0
+            && !freed_heap_page
+        {
+            let had_src_alias = mapping.alias_slot != 0;
             let src_alias = ensure_alias_for_index(alloc, i);
             let dst_alias = map_fresh_child_page(
                 alloc,
@@ -958,6 +1021,12 @@ pub(crate) fn clone_address_space(alloc: &mut Allocator, parent: &TaskStruct, ch
                     PAGE_SIZE as usize,
                 );
             }
+            if !had_src_alias {
+                let alias_slot = CHILD_MEMORY.mapping(i).alias_slot;
+                page_unmap(alias_slot);
+                alloc.delete_cap_slot(alias_slot);
+                CHILD_MEMORY.set_mapping_alias_slot(i, 0);
+            }
         }
         i += 1;
     }
@@ -971,7 +1040,11 @@ pub(crate) fn clone_page_count(parent: &TaskStruct) -> usize {
         let mapping = CHILD_MEMORY.mapping(i);
         let freed_heap_page =
             mapping.child_page >= live_heap_end && mapping.child_page < CHILD_HEAP_LIMIT;
-        if mapping.pid == parent.pid && mapping.child_page != CHILD_IPC_BUFFER && !freed_heap_page {
+        if mapping.pid == parent.pid
+            && mapping.child_page != CHILD_IPC_BUFFER
+            && mapping.child_page != 0
+            && !freed_heap_page
+        {
             count += 1;
         }
         i += 1;

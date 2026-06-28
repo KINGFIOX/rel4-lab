@@ -107,7 +107,7 @@ pub(crate) fn handle_xv6_syscall(
         Some(Xv6Syscall::GetPid) => procs[proc_idx].pid as i64,
         Some(Xv6Syscall::Uptime) => ticks_now() as i64,
         Some(Xv6Syscall::Pause) => {
-            return sys_pause(&mut procs[proc_idx], a0 as i64, ticks_now(), mrs);
+            return sys_pause(a0 as i64);
         }
         Some(Xv6Syscall::Kill) => sys_kill(alloc, procs, a0 as i64),
         Some(Xv6Syscall::Chdir) => return sys_chdir(alloc, &mut procs[proc_idx], a0, mrs),

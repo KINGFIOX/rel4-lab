@@ -221,13 +221,14 @@ pub fn do_send(uc: &mut UserContext, nb: bool) {
                     crate::object::reply::tcb(reply)
                 };
                 if crate::object::tcb::blocked_on_reply_snapshot(caller) {
-                    if reply & 1 == 0 {
-                        crate::object::reply::remove(reply, caller);
-                    } else {
+                    if reply & 1 != 0 {
                         (*slot).cap = crate::object::cap::Cap::null();
                         (*slot).mdb = crate::object::mdb::MdbNode::NULL;
                     }
                     crate::api::ipc::reply_to_tcb(uc, caller);
+                    if reply & 1 == 0 {
+                        crate::object::reply::complete_reply(reply, caller);
+                    }
                     crate::object::tcb::clear_reply_slot_if(caller, slot as u64);
                 }
             }
@@ -247,7 +248,12 @@ pub fn do_send(uc: &mut UserContext, nb: bool) {
 /// we walk the EP state machine in `api::ipc::recv`. Invalid receive caps
 /// raise a receive-phase CapFault, matching seL4 `handleRecv`.
 pub fn do_recv(uc: &mut UserContext, blocking: bool) {
-    do_recv_inner(uc, blocking, 0, false)
+    let reply_cptr = uc.regs[UserRegister::A6.index()];
+    if reply_cptr == 0 {
+        do_recv_inner(uc, blocking, 0, false)
+    } else {
+        do_recv_inner(uc, blocking, reply_cptr, true)
+    }
 }
 
 pub fn do_recv_mcs(uc: &mut UserContext, blocking: bool, can_reply: bool) {

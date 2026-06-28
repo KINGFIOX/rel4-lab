@@ -485,6 +485,9 @@ async fn wait_for_request_completion(request_slot: usize) -> [u64; 4] {
         let msg = unsafe { sel4_nb_recv(XV6_DISK_IRQ_NTFN_CPTR) };
         if msg.badge == 0 {
             rt::yield_now().await;
+            if let Some(reply) = take_completed_request(request_slot) {
+                return reply;
+            }
             continue;
         }
         if is_disk_irq(&msg) {

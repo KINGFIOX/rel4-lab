@@ -856,8 +856,11 @@ fn kernel_exit(
                 unsafe { switch_to_tcb_vspace(next) };
                 return finish_kernel_exit(ctx, kernel_lock);
             }
-            unsafe { tcb::prepare_for_user_restore(cur) };
-            return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
+            if unsafe { tcb::is_runnable_on_current_core(cur) } {
+                unsafe { tcb::prepare_for_user_restore(cur) };
+                return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
+            }
+            continue;
         }
 
         // schedule() returned null. Safe to fall through *only* if

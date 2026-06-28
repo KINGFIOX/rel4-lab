@@ -527,13 +527,16 @@ pub fn handle_frame(
             // libsel4 packs `seL4_CapRights_t` (from `shared_types.pbf`):
             //   bit 0 capAllowWrite, bit 1 capAllowRead,
             //   bit 2 capAllowGrant, bit 3 capAllowGrantReply.
-            // VM attributes (RISC-V) bit 0 = riscvExecuteNever.
+            // VM attributes bit 0 = execute never. This project also accepts
+            // bit 1 as a userspace cacheability hint so LoongArch services can
+            // map ordinary RAM used for device DMA as strongly uncached.
             let rights_packed = uc.regs[UserRegister::A3.index()];
             let attrs = uc.regs[UserRegister::A4.index()];
             let vm_rights = mask_frame_vm_rights(cap.frame_vm_rights(), rights_packed);
             let can_write = frame_vm_rights_allow_write(vm_rights);
             let can_read = frame_vm_rights_allow_read(vm_rights);
             let exec_never = (attrs & 0x1) != 0;
+            let uncached_mapping = (attrs & 0x2) != 0;
 
             let vspace_cptr = read_extra_cap(thread, 0);
             let (vspace_cap, _) = cspace::lookup_cap(thread, vspace_cptr)
@@ -575,7 +578,7 @@ pub fn handle_frame(
                     can_read,
                     can_write,
                     !exec_never,
-                    current_cap.frame_is_device(),
+                    current_cap.frame_is_device() || uncached_mapping,
                 );
                 let prepared_map = if current_cap.frame_is_mapped() {
                     if current_cap.frame_mapped_asid() != asid {

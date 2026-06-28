@@ -1,6 +1,8 @@
 use core::arch::asm;
 
-use crate::{SYS_CALL, SYS_DEBUG_HALT, SYS_DEBUG_PUT_CHAR, SYS_REPLY_RECV, SYS_SEND, SYS_YIELD};
+use crate::{
+    SYS_CALL, SYS_DEBUG_HALT, SYS_DEBUG_PUT_CHAR, SYS_REPLY, SYS_REPLY_RECV, SYS_SEND, SYS_YIELD,
+};
 
 pub(crate) const KERNEL_TIMER_IRQ: u64 = 96;
 
@@ -92,6 +94,7 @@ pub(crate) unsafe fn wait(ep: u64, syscall: isize) -> (u64, u64, u64, u64, u64, 
 }
 
 #[inline(always)]
+#[allow(dead_code)]
 pub(crate) unsafe fn reply_recv_with_reply(
     ep: u64,
     info: u64,
@@ -137,6 +140,23 @@ pub(crate) unsafe fn send(dest: u64, info: u64, mr0: u64, mr1: u64, mr2: u64, mr
             inlateout("a4") mr2 => _,
             inlateout("a5") mr3 => _,
             inlateout("a7") SYS_SEND => _,
+            clobber_abi("C"),
+            options(nostack)
+        );
+    }
+}
+
+#[inline(always)]
+pub(crate) unsafe fn reply(info: u64, mr0: u64, mr1: u64, mr2: u64, mr3: u64) {
+    unsafe {
+        asm!(
+            "ecall",
+            inlateout("a1") info => _,
+            inlateout("a2") mr0 => _,
+            inlateout("a3") mr1 => _,
+            inlateout("a4") mr2 => _,
+            inlateout("a5") mr3 => _,
+            inlateout("a7") SYS_REPLY => _,
             clobber_abi("C"),
             options(nostack)
         );

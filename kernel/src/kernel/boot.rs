@@ -9,7 +9,7 @@ use log_crate::{info, warn};
 use crate::abi::bootinfo::{BootInfo, RootCNodeCapSlot, SlotRegion, UntypedDesc};
 use crate::abi::constants::{
     KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, MAX_NUM_NODES, ROOT_CNODE_SIZE_BITS,
-    SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS, WORD_BYTES,
+    SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
 };
 use crate::arch::current::paging::{
     LEAF_PARENT_COVERAGE_BITS, PAGE_SHIFT, PAGE_SIZE, PageTable, Pte, ROOT_CHILD_COVERAGE_BITS,
@@ -299,7 +299,8 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
 
     // --- Root CNode -------------------------------------------------------
     //
-    // 2^13 = 8192 slots * 32 B/cte = 256 KiB. Allocate from the boot pool
+    // Allocate the root CNode from the boot pool so the initial task has
+    // enough capability slots for xv6 service processes and usertest churn.
     // in 64 contiguous 4 KiB chunks.
     let cnode_pages = cnode_bytes(ROOT_CNODE_SIZE_BITS) / PAGE_SIZE;
     let cnode_base = bootmem::alloc_pages(cnode_pages);
@@ -685,6 +686,7 @@ fn log_arch_restore_state(
     bootinfo: usize,
     stack_top: usize,
 ) {
+    use crate::abi::constants::WORD_BYTES;
     use crate::arch::current::csr;
 
     info!(

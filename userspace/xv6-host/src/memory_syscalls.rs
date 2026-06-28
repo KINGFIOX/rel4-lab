@@ -3,8 +3,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::allocator::Allocator;
 use crate::child::{
-    frame_pool_available, is_child_page_mapped, map_lazy_child_page, mapping_slots_available,
-    unmap_child_range,
+    frame_pool_available, is_child_page_mapped, map_lazy_child_page, mapping_count,
+    mapping_slots_available, unmap_child_range,
 };
 use crate::consts::*;
 use crate::types::TaskStruct;
@@ -52,9 +52,12 @@ pub(crate) fn sys_sbrk(
         if needed <= SBRK_EAGER_MAP_LIMIT {
             let mapping_available = mapping_slots_available();
             let pooled_frames = frame_pool_available();
-            let slot_available = alloc.slots_available().saturating_add(pooled_frames);
+            let new_frame_slots_needed = needed.saturating_sub(pooled_frames);
             if needed > mapping_available.saturating_sub(SBRK_MAPPING_HEADROOM)
-                || needed > slot_available.saturating_sub(SBRK_MAPPING_HEADROOM)
+                || new_frame_slots_needed
+                    > alloc
+                        .slots_available()
+                        .saturating_sub(SBRK_MAPPING_HEADROOM)
             {
                 return -1;
             }
@@ -135,9 +138,25 @@ pub(crate) fn handle_lazy_page_fault(
         return false;
     }
     if mapping_slots_available() <= SBRK_MAPPING_HEADROOM {
+        crate::util::warn!(
+            "xv6-host: lazy fault mapping slots exhausted pid={} mapped={} slots={} frame_pool={} cslots={}",
+            child.pid,
+            mapping_count(),
+            mapping_slots_available(),
+            frame_pool_available(),
+            alloc.slots_available()
+        );
         return false;
     }
     if frame_pool_available() == 0 && alloc.slots_available() <= SBRK_MAPPING_HEADROOM {
+        crate::util::warn!(
+            "xv6-host: lazy fault CSpace exhausted pid={} mapped={} slots={} frame_pool={} cslots={}",
+            child.pid,
+            mapping_count(),
+            mapping_slots_available(),
+            frame_pool_available(),
+            alloc.slots_available()
+        );
         return false;
     }
     map_lazy_child_page(alloc, child, fault_addr, true, false);

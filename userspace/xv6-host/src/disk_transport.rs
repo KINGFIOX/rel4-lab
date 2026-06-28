@@ -1,5 +1,4 @@
-pub(crate) type FrameMap = (u64, u64, bool, bool);
-pub(crate) const MAX_DEVICE_FRAME_MAPS: usize = 80;
+pub(crate) type FrameMap = (u64, u64, bool, bool, u64);
 
 pub(crate) fn push_frame_map(maps: &mut [FrameMap], len: &mut usize, map: FrameMap) -> bool {
     if *len >= maps.len() {

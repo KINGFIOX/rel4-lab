@@ -1,8 +1,8 @@
 //! CNode (capability node) — a flat array of `cte_t` slots.
 //!
 //! A CNode of radix `r` has `2^r` slots, each `sizeof(cte_t) = 32` bytes.
-//! Slot 0 is the null cap by convention. The root CNode for our build is
-//! `radix = CONFIG_ROOT_CNODE_SIZE_BITS = 13`, i.e. 8192 slots = 256 KiB.
+//! Slot 0 is the null cap by convention. The root CNode radix is configured
+//! by `ROOT_CNODE_SIZE_BITS`.
 
 #![allow(dead_code)]
 

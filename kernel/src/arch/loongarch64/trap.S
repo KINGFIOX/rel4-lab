@@ -22,8 +22,14 @@
     .equ CSR_ERA, 0x006
     .equ CSR_BADV, 0x007
     .equ CSR_KS0, 0x030
+    .equ CSR_TLBRBADV, 0x089
+    .equ CSR_TLBRERA, 0x08a
+    .equ CSR_TLBRSAVE, 0x08b
+    .equ CSR_TLBRPRMD, 0x08f
     .equ PRMD_PPLV_MASK, 0x3
     .equ PRMD_PPLV_USER, 0x3
+    .equ USER_SSTATUS, 0x7
+    .equ TLBR_FALLBACK_ESTAT_PIS, 0x20000
 
     .globl trap_entry
 trap_entry:
@@ -112,15 +118,100 @@ trap_entry:
     .align 6
     .globl tlbr_entry
 tlbr_entry:
-    csrwr   $t0, 0x08b
+    csrwr   $t0, CSR_TLBRSAVE
     csrrd   $t0, 0x01b
     lddir   $t0, $t0, 3
     lddir   $t0, $t0, 1
     ldpte   $t0, 0
     ldpte   $t0, 1
     tlbfill
-    csrrd   $t0, 0x08b
+    csrrd   $t0, CSR_TLBRSAVE
     ertn
+
+tlbr_fault_entry:
+    csrrd   $t0, CSR_KS0
+    beqz    $t0, kernel_trap_panic
+
+    st.d    $sp, $t0, TRAP_SCRATCH_SAVED_USER_SP
+    st.d    $t1, $t0, TRAP_SCRATCH_SAVED_USER_T1
+    st.d    $t2, $t0, TRAP_SCRATCH_SAVED_USER_T2
+
+    csrrd   $t1, CSR_TLBRPRMD
+    andi    $t1, $t1, PRMD_PPLV_MASK
+    li.w    $t2, PRMD_PPLV_USER
+    beq     $t1, $t2, tlbr_user_fault
+    b       kernel_trap_panic
+
+tlbr_user_fault:
+    ld.d    $sp, $t0, TRAP_SCRATCH_USER_CONTEXT
+    bnez    $sp, tlbr_save_context
+    b       kernel_trap_panic
+
+tlbr_save_context:
+    st.d    $zero, $sp,  0*8
+    st.d    $ra,   $sp,  1*8
+    st.d    $tp,   $sp,  2*8
+    st.d    $a0,   $sp,  4*8
+    st.d    $a1,   $sp,  5*8
+    st.d    $a2,   $sp,  6*8
+    st.d    $a3,   $sp,  7*8
+    st.d    $a4,   $sp,  8*8
+    st.d    $a5,   $sp,  9*8
+    st.d    $a6,   $sp, 10*8
+    st.d    $a7,   $sp, 11*8
+    st.d    $t3,   $sp, 15*8
+    st.d    $t4,   $sp, 16*8
+    st.d    $t5,   $sp, 17*8
+    st.d    $t6,   $sp, 18*8
+    st.d    $t7,   $sp, 19*8
+    st.d    $t8,   $sp, 20*8
+    st.d    $r21,  $sp, 21*8
+    st.d    $fp,   $sp, 22*8
+    st.d    $s0,   $sp, 23*8
+    st.d    $s1,   $sp, 24*8
+    st.d    $s2,   $sp, 25*8
+    st.d    $s3,   $sp, 26*8
+    st.d    $s4,   $sp, 27*8
+    st.d    $s5,   $sp, 28*8
+    st.d    $s6,   $sp, 29*8
+    st.d    $s7,   $sp, 30*8
+    st.d    $s8,   $sp, 31*8
+
+    ld.d    $t1, $t0, TRAP_SCRATCH_SAVED_USER_SP
+    st.d    $t1, $sp,  3*8
+    csrrd   $t1, CSR_TLBRSAVE
+    st.d    $t1, $sp, 12*8
+    ld.d    $t1, $t0, TRAP_SCRATCH_SAVED_USER_T1
+    st.d    $t1, $sp, 13*8
+    ld.d    $t1, $t0, TRAP_SCRATCH_SAVED_USER_T2
+    st.d    $t1, $sp, 14*8
+
+    csrrd   $t1, CSR_TLBRERA
+    st.d    $t1, $sp, USER_CONTEXT_PC
+    st.d    $t1, $sp, USER_CONTEXT_RESTART_PC
+    csrrd   $t1, CSR_TLBRPRMD
+    st.d    $t1, $sp, USER_CONTEXT_SSTATUS
+
+    csrrd   $t2, CSR_TLBRERA
+    st.d    $t2, $sp, USER_CONTEXT_TRAP_RECORD_ERA
+    csrrd   $t2, CSR_TLBRPRMD
+    st.d    $t2, $sp, USER_CONTEXT_TRAP_RECORD_PRMD
+    li.w    $t2, TLBR_FALLBACK_ESTAT_PIS
+    st.d    $t2, $sp, USER_CONTEXT_TRAP_RECORD_ESTAT
+    csrrd   $t2, CSR_TLBRBADV
+    st.d    $t2, $sp, USER_CONTEXT_TRAP_RECORD_BADV
+
+    ld.d    $t2, $t0, TRAP_SCRATCH_KERNEL_STACK_TOP
+    move    $a0, $sp
+    move    $sp, $t2
+    addi.d  $sp, $sp, -16
+    st.d    $a0, $sp, 0
+    bl      handle_tlbr_trap_record
+    ld.d    $a0, $sp, 0
+    addi.d  $sp, $sp, 16
+    bl      handle_trap_rust
+
+    b       restore_user_context_locked
 
     .globl restore_user_context_locked
 restore_user_context_locked:
@@ -143,6 +234,10 @@ restore_user_context:
     csrwr   $t1, CSR_ERA
     ld.d    $t1, $t0, USER_CONTEXT_SSTATUS
     csrwr   $t1, CSR_PRMD
+    ld.d    $t1, $t0, USER_CONTEXT_PC
+    csrwr   $t1, CSR_TLBRERA
+    ld.d    $t1, $t0, USER_CONTEXT_SSTATUS
+    csrwr   $t1, CSR_TLBRPRMD
 
     ld.d    $ra, $t0,  1*8
     ld.d    $tp, $t0,  2*8

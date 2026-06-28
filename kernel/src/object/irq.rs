@@ -154,6 +154,8 @@ pub unsafe fn signal_irq(irq: u64) -> bool {
         }
     });
     if cap.tag() == Some(CapTag::Notification) && cap.notification_can_send() {
+        #[cfg(target_arch = "loongarch64")]
+        crate::arch::current::irq::complete_external_irq(irq);
         let ntfn = cap.notification_ptr() as *mut crate::object::notification::Notification;
         unsafe { crate::object::notification::signal(ntfn, cap.notification_badge()) };
         return true;

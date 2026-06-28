@@ -165,7 +165,8 @@ impl UserRegister {
 ///
 /// This matches the vendored libsel4 LoongArch ABI:
 /// pc, ra, sp, gp, s0..s11, a0..a7, t0..t6, tp. The kernel trap frame does
-/// not track a separate gp or s9..s11 slot, so those context words are ignored.
+/// not track separate gp, s10, or s11 slots, so those context words are
+/// ignored. The local `Fp` register is the psABI s9/fp register.
 pub const SEL4_USER_CONTEXT_REGS: [usize; SEL4_USER_CONTEXT_WORDS] = [
     0,
     UserRegister::Ra.index(),
@@ -180,7 +181,7 @@ pub const SEL4_USER_CONTEXT_REGS: [usize; SEL4_USER_CONTEXT_WORDS] = [
     UserRegister::S6.index(),
     UserRegister::S7.index(),
     UserRegister::S8.index(),
-    0,
+    UserRegister::Fp.index(),
     0,
     0,
     UserRegister::A0.index(),
@@ -274,6 +275,7 @@ const EXCCODE_ADE: usize = 8;
 const EXCCODE_SYSCALL: usize = 11;
 const EXCCODE_INE: usize = 13;
 const EXSUBCODE_ADEF: usize = 0;
+const TLBR_FAULT_ESTAT: usize = EXCCODE_PIS << ESTAT_ECODE_SHIFT;
 const FAULT_MR_REG_COUNT: u64 = 4;
 const VM_FAULT_FSR_INSTRUCTION: u64 = 1;
 const VM_FAULT_FSR_LOAD: u64 = 5;
@@ -869,8 +871,11 @@ fn kernel_exit(
                 switch_to_tcb_vspace(next);
                 return finish_kernel_exit(ctx, kernel_lock);
             }
-            unsafe { tcb::prepare_for_user_restore(cur) };
-            return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
+            if unsafe { tcb::is_runnable_on_current_core(cur) } {
+                unsafe { tcb::prepare_for_user_restore(cur) };
+                return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
+            }
+            continue;
         }
 
         let cur_runnable = if !cur.is_null() {
@@ -978,6 +983,25 @@ pub extern "C" fn kernel_trap_panic() -> ! {
         estat, badv, era
     );
     panic!("kernel trap");
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn handle_tlbr_trap_record(uc: *mut UserContext) {
+    if uc.is_null() {
+        return;
+    }
+    let uc = unsafe { &mut *uc };
+    let era = csr::tlbrera() as u64;
+    let prmd = csr::tlbrprmd() as u64;
+    uc.pc = era;
+    uc.restart_pc = era;
+    uc.sstatus = prmd;
+    uc.trap_record = TrapRecord {
+        era,
+        prmd,
+        estat: TLBR_FAULT_ESTAT as u64,
+        badv: csr::tlbrbadv() as u64,
+    };
 }
 
 pub fn install_trap_vector() {

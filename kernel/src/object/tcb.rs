@@ -557,6 +557,10 @@ pub(crate) unsafe fn clear_wait_queue_links(tcb: *mut Tcb) {
     }
 }
 
+pub(crate) unsafe fn clear_queue_links(tcb: *mut Tcb) {
+    unsafe { clear_wait_queue_links(tcb) };
+}
+
 pub(crate) unsafe fn set_reply_slot_and_object(tcb: *mut Tcb, slot: u64, reply_object: u64) {
     if tcb.is_null() {
         return;

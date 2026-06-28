@@ -28,8 +28,8 @@ use crate::arch::current as host_arch;
 use allocator::Allocator;
 use child::{
     create_child, create_child_from_untyped, ensure_host_page_table_path, frame_paddr, load_elf,
-    load_payload, map_existing_child_frame, map_stack, map_stack_pages, mint_cap_to_child,
-    start_child, start_child_with_a0_a1,
+    load_payload, map_existing_child_frame_with_attrs, map_stack, map_stack_pages,
+    mint_cap_to_child, start_child, start_child_with_a0_a1,
 };
 use consts::{
     DISK_SERVER_ELF, DISK_SERVER_PID, FAULT_UNKNOWN_SYSCALL, FAULT_VM_FAULT,
@@ -48,7 +48,7 @@ use consts::{
 use consts::{LABEL_TCB_BIND_NOTIFICATION, PAGE_SIZE, ROOT_CNODE_DEPTH};
 use consts::{
     PROC_RUNNABLE, PROC_UNUSED, PROC_VFS_DEFERRED, ROOT_CNODE, SERVICE_UNTYPED_BITS,
-    XV6_SERVER_RECV_REPLY_CPTR, XV6_SERVICE_ENDPOINT_CPTR,
+    VM_ATTR_UNCACHED, XV6_SERVER_RECV_REPLY_CPTR, XV6_SERVICE_ENDPOINT_CPTR,
 };
 use sel4_user::{
     call_checked, cap_rights, cnode_cap_data, init_ipc_buffer, msg_info, msg_label, sel4_call,
@@ -303,13 +303,19 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
     let disk_completion_ring_frame = alloc.retype_one(OBJ_4K, 0);
     let shared_maps = shared_frame_maps(&disk_shared_frames);
     let mut disk_maps: [disk_transport::FrameMap; MAX_DISK_MAPS] =
-        [(0, 0, false, false); MAX_DISK_MAPS];
+        [(0, 0, false, false, 0); MAX_DISK_MAPS];
     let mut disk_maps_len = 0usize;
     disk_transport::append_device_frame_maps(alloc, &mut disk_maps, &mut disk_maps_len);
     push_disk_map(
         &mut disk_maps,
         &mut disk_maps_len,
-        (virtio_dma_frame, XV6_VIRTIO_DMA_VADDR, true, false),
+        (
+            virtio_dma_frame,
+            XV6_VIRTIO_DMA_VADDR,
+            true,
+            false,
+            VM_ATTR_UNCACHED,
+        ),
     );
     push_disk_map(&mut disk_maps, &mut disk_maps_len, shared_maps[0]);
     push_disk_map(&mut disk_maps, &mut disk_maps_len, shared_maps[1]);
@@ -323,6 +329,7 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
             XV6_DISK_COMPLETION_RING_VADDR,
             true,
             false,
+            VM_ATTR_UNCACHED,
         ),
     );
     let xv6fs_maps = [
@@ -335,6 +342,7 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
             XV6_DISK_COMPLETION_RING_VADDR,
             true,
             false,
+            VM_ATTR_UNCACHED,
         ),
     ];
     let vfs_maps = [
@@ -357,7 +365,7 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
             cap_rights(false, false, false, true),
             Xv6Badge::UartReply.raw(),
         )],
-        &[(uart_mmio_frame, XV6_UART_MMIO_FRAME_VADDR, true, false)],
+        &[(uart_mmio_frame, XV6_UART_MMIO_FRAME_VADDR, true, false, 0)],
         0,
         0,
     );
@@ -462,26 +470,35 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> ServiceEndpoin
 
 fn shared_frame_maps(
     frames: &[u64; XV6_DISK_SHARED_BUFFER_PAGES],
-) -> [(u64, u64, bool, bool); XV6_DISK_SHARED_BUFFER_PAGES] {
+) -> [disk_transport::FrameMap; XV6_DISK_SHARED_BUFFER_PAGES] {
     [
-        (frames[0], XV6_DISK_SHARED_BUFFER_VADDR, true, false),
+        (
+            frames[0],
+            XV6_DISK_SHARED_BUFFER_VADDR,
+            true,
+            false,
+            VM_ATTR_UNCACHED,
+        ),
         (
             frames[1],
             XV6_DISK_SHARED_BUFFER_VADDR + PAGE_SIZE,
             true,
             false,
+            VM_ATTR_UNCACHED,
         ),
         (
             frames[2],
             XV6_DISK_SHARED_BUFFER_VADDR + PAGE_SIZE * 2,
             true,
             false,
+            VM_ATTR_UNCACHED,
         ),
         (
             frames[3],
             XV6_DISK_SHARED_BUFFER_VADDR + PAGE_SIZE * 3,
             true,
             false,
+            VM_ATTR_UNCACHED,
         ),
     ]
 }
@@ -506,7 +523,11 @@ fn map_shared_frame_into_host(alloc: &mut Allocator, frame_slot: u64, page: usiz
         frame_slot,
         LABEL_PAGE_MAP,
         &[INIT_VSPACE],
-        &[vaddr, cap_rights(false, false, true, true), 1],
+        &[
+            vaddr,
+            cap_rights(false, false, true, true),
+            1 | VM_ATTR_UNCACHED,
+        ],
     );
 }
 
@@ -519,7 +540,7 @@ fn spawn_service_server(
     name: &str,
     fault_ep: u64,
     extra_caps: &[(u64, u64, u64, u64)],
-    mapped_frames: &[(u64, u64, bool, bool)],
+    mapped_frames: &[disk_transport::FrameMap],
     start_a1: u64,
     bound_notification: u64,
 ) {
@@ -552,8 +573,16 @@ fn spawn_service_server(
     }
     load_elf(alloc, &mut service, elf);
     map_stack_pages(alloc, &mut service, consts::SERVICE_STACK_PAGES);
-    for &(frame_slot, va, writable, executable) in mapped_frames {
-        map_existing_child_frame(alloc, &service, frame_slot, va, writable, executable);
+    for &(frame_slot, va, writable, executable, extra_attrs) in mapped_frames {
+        map_existing_child_frame_with_attrs(
+            alloc,
+            &service,
+            frame_slot,
+            va,
+            writable,
+            executable,
+            extra_attrs,
+        );
     }
     if bound_notification != 0 {
         call_checked(

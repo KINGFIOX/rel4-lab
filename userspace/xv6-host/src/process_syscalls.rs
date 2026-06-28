@@ -20,6 +20,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use sel4_user::{call_checked, msg_info, sel4_yield};
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(2);
+#[cfg(target_arch = "loongarch64")]
+const ARCH_FORK_EXTRA_SLOTS: usize = 1;
+#[cfg(not(target_arch = "loongarch64"))]
+const ARCH_FORK_EXTRA_SLOTS: usize = 0;
 
 pub(crate) fn sys_fork(
     alloc: &mut Allocator,
@@ -33,9 +37,14 @@ pub(crate) fn sys_fork(
     let parent = procs[parent_idx];
     let clone_pages = clone_page_count(&parent);
     let frame_slots_needed = clone_pages.saturating_sub(frame_pool_available());
-    let slots_needed = 4usize
+    let child_alias_slots_needed = clone_pages;
+    let source_alias_slots_needed = clone_pages;
+    let slots_needed = 16usize
         .saturating_add(clone_pages)
-        .saturating_add(frame_slots_needed);
+        .saturating_add(frame_slots_needed)
+        .saturating_add(child_alias_slots_needed)
+        .saturating_add(source_alias_slots_needed)
+        .saturating_add(ARCH_FORK_EXTRA_SLOTS);
     if alloc.slots_available() < slots_needed.saturating_add(FORK_SLOT_HEADROOM) {
         return -1;
     }

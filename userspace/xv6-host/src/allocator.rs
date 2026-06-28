@@ -152,7 +152,10 @@ impl Allocator {
             return RECYCLED_SLOTS.get(self.recycled_len);
         }
         if self.next_slot >= self.empty_end {
-            warn!("xv6-host: out of CSpace slots");
+            warn!(
+                "xv6-host: out of CSpace slots next={} end={} recycled={}",
+                self.next_slot, self.empty_end, self.recycled_len
+            );
             halt_loop();
         }
         let slot = self.next_slot;

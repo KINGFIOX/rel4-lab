@@ -14,6 +14,15 @@ use crate::consts::{
 use crate::disk_transport::{FrameMap, push_frame_map};
 use crate::util::{halt_loop, warn};
 
+const fn pages(size: u64) -> usize {
+    ((size + PAGE_SIZE - 1) / PAGE_SIZE) as usize
+}
+
+pub(crate) const MAX_DEVICE_FRAME_MAPS: usize = pages(XV6_PCIE_ECAM_MAP_SIZE)
+    + pages(XV6_PCIE_MEM_MAP_SIZE)
+    + pages(XV6_PCIE_IO_MAP_SIZE)
+    + pages(XV6_PCIE_MSI_MAP_SIZE);
+
 pub(crate) fn issue_irq_handler(alloc: &mut Allocator, disk_irq_ntfn: u64) -> u64 {
     let disk_irq_handler = alloc.alloc_slot();
     call_checked(
@@ -94,7 +103,7 @@ fn append_device_window(
     let mut offset = 0u64;
     while offset < size {
         let frame = alloc.retype_device_4k_at(paddr + offset);
-        if !push_frame_map(maps, len, (frame, vaddr + offset, true, false)) {
+        if !push_frame_map(maps, len, (frame, vaddr + offset, true, false, 0)) {
             warn!("xv6-host: disk frame map table exhausted");
             halt_loop();
         }

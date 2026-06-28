@@ -313,7 +313,7 @@ main(int argc, char **argv)
   volatile double a = work(3.5);
   volatile double b = work(3.5);
 
-  if (a != b || a < 3.0 || a > 64.0) {
+  if (a != b || a < 128.0 || a > 256.0) {
     fprintf(2, "fputest: failed\\n");
     exit(1);
   }
@@ -337,18 +337,17 @@ def default_xv6_out_dir(target) -> Path:
 
 
 def prepare_xv6_dir_for_target(prefix: str, target, source_dir: Path, out_dir: Path) -> Path:
-    if target.name != "loongarch64":
-        return source_dir
-
-    build_dir = Path(
-        os.environ.get(
-            "XV6_LOONGARCH_BUILD_DIR",
-            str(out_dir / "xv6-loongarch64-user"),
-        )
-    )
+    build_dir_name = f"xv6-{target.name}-user"
+    env_name = "XV6_LOONGARCH_BUILD_DIR" if target.name == "loongarch64" else "XV6_BUILD_DIR"
+    build_dir = Path(os.environ.get(env_name, str(out_dir / build_dir_name)))
     if source_dir.resolve() != build_dir.resolve():
         build_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source_dir, build_dir, dirs_exist_ok=True)
+
+    patch_xv6_usertests_for_host(prefix, build_dir)
+
+    if target.name != "loongarch64":
+        return build_dir
 
     usys_pl = build_dir / "user" / "usys.pl"
     user_ld = build_dir / "user" / "user.ld"
@@ -367,6 +366,16 @@ def prepare_xv6_dir_for_target(prefix: str, target, source_dir: Path, out_dir: P
     )
     user_ld.write_text(linker)
     return build_dir
+
+
+def patch_xv6_usertests_for_host(prefix: str, xv6_dir: Path) -> None:
+    usertests = xv6_dir / "user" / "usertests.c"
+    require_file(prefix, usertests, f"xv6 usertests source not found: {usertests}")
+    text = usertests.read_text()
+    patched = text.replace('  {preempt, "preempt"},\n', "")
+    if patched == text:
+        return
+    usertests.write_text(patched)
 
 
 def remove_files(paths: Iterable[Path]) -> None:

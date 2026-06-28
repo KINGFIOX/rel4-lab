@@ -11,6 +11,8 @@ use crate::consts::{
 use crate::disk_transport::{FrameMap, push_frame_map};
 use crate::util::{halt_loop, warn};
 
+pub(crate) const MAX_DEVICE_FRAME_MAPS: usize = 1;
+
 pub(crate) fn issue_irq_handler(alloc: &mut Allocator, disk_irq_ntfn: u64) -> u64 {
     let disk_irq_handler = alloc.alloc_slot();
     call_checked(
@@ -42,7 +44,13 @@ pub(crate) fn append_device_frame_maps(
     if !push_frame_map(
         maps,
         len,
-        (virtio_mmio_frame, XV6_VIRTIO_MMIO_FRAME_VADDR, true, false),
+        (
+            virtio_mmio_frame,
+            XV6_VIRTIO_MMIO_FRAME_VADDR,
+            true,
+            false,
+            0,
+        ),
     ) {
         warn!("xv6-host: disk frame map table exhausted");
         halt_loop();

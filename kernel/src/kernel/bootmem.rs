@@ -1,13 +1,13 @@
 //! Tiny bump allocator for boot-time kernel data structures.
 //!
-//! Everything we allocate here lives inside a fixed 1 MiB pool in the
+//! Everything we allocate here lives inside a fixed 3 MiB pool in the
 //! kernel ELF's BSS. The pool is 4 KiB-aligned so callers can hand pages
 //! back to user-space via the active architecture's paging objects.
 
 use crate::arch::current::paging::PAGE_SIZE;
 use crate::kernel::smp::BklCell;
 
-const BOOT_POOL_PAGES: usize = 256; // 1 MiB
+const BOOT_POOL_PAGES: usize = 768; // 3 MiB
 
 #[repr(C, align(4096))]
 struct BootPool {

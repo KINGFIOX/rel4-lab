@@ -331,6 +331,24 @@ pub unsafe fn remove(reply_kva: u64, tcb: *mut Tcb) {
     }
 }
 
+pub unsafe fn complete_reply(reply_kva: u64, tcb: *mut Tcb) {
+    if reply_kva == 0 || tcb.is_null() {
+        return;
+    }
+    let reply = reply_kva as *mut Reply;
+    unsafe {
+        let _guard = lock(reply_kva);
+        if (*reply).tcb != tcb as u64 {
+            return;
+        }
+        (*reply).tcb = 0;
+        (*reply).prev = 0;
+        (*reply).next = 0;
+        (*reply).can_grant = 0;
+        tcb::clear_reply_binding_if(tcb, reply_kva);
+    }
+}
+
 pub unsafe fn remove_tcb(tcb: *mut Tcb) {
     if tcb.is_null() {
         return;

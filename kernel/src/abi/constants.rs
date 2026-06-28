@@ -15,7 +15,7 @@ pub const WORD_BYTES: usize = WORD_BITS / 8;
 
 pub const NUM_DOMAINS: usize = 1;
 pub const NUM_PRIORITIES: usize = 256;
-pub const ROOT_CNODE_SIZE_BITS: usize = 13;
+pub const ROOT_CNODE_SIZE_BITS: usize = 16;
 #[cfg(kernel_num_nodes = "2")]
 pub const MAX_NUM_NODES: usize = 2;
 #[cfg(kernel_num_nodes = "3")]

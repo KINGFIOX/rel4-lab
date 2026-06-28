@@ -493,10 +493,12 @@ pub(crate) unsafe fn set_reply_object_for(
         return false;
     }
     unsafe {
-        let slot = match lookup_reply_object_for(receiver, reply_cptr) {
-            Some((slot, looked_up_reply_kva, _)) if looked_up_reply_kva == reply_kva => slot as u64,
-            _ => 0,
-        };
+        if !matches!(
+            lookup_reply_object_for(receiver, reply_cptr),
+            Some((_slot, looked_up_reply_kva, _)) if looked_up_reply_kva == reply_kva
+        ) {
+            return false;
+        }
         if !crate::object::reply::push(
             caller,
             receiver,
@@ -506,7 +508,6 @@ pub(crate) unsafe fn set_reply_object_for(
         ) {
             return false;
         }
-        tcb::set_reply_slot_and_object(caller, slot, reply_kva);
         true
     }
 }
@@ -553,6 +554,12 @@ unsafe fn complete_receive_from_sender(
     let sender_state = tcb::queued_sender_snapshot(sender);
     let info_in = MessageInfo(sender_state.info_word);
     unsafe {
+        let receive_reply =
+            if sender_state.is_call && (sender_state.can_grant || sender_state.can_grant_reply) {
+                reply_object_for_receive(cur, reply_cptr)
+            } else {
+                None
+            };
         if sender_state.is_fault {
             transfer_fault_message(sender, cur, sender_state.badge);
         } else {
@@ -568,26 +575,25 @@ unsafe fn complete_receive_from_sender(
         }
         if sender_state.is_call {
             if sender_state.can_grant || sender_state.can_grant_reply {
-                let (reply_set, reply_token, reply_can_grant) =
-                    match reply_object_for_receive(cur, reply_cptr) {
-                        Some((reply_cptr, reply_kva, reply_can_grant)) => (
-                            set_reply_object_for(
-                                cur,
-                                reply_cptr,
-                                reply_kva,
-                                reply_can_grant,
-                                sender,
-                                sender_state.can_grant,
-                                false,
-                            ),
+                let (reply_set, reply_token, reply_can_grant) = match receive_reply {
+                    Some((reply_cptr, reply_kva, reply_can_grant)) => (
+                        set_reply_object_for(
+                            cur,
+                            reply_cptr,
                             reply_kva,
-                            sender_state.can_grant && reply_can_grant,
+                            reply_can_grant,
+                            sender,
+                            sender_state.can_grant,
+                            false,
                         ),
-                        None => {
-                            tcb::set_blocked_on_reply(sender, (sender as u64) | 1);
-                            (true, (sender as u64) | 1, false)
-                        }
-                    };
+                        reply_kva,
+                        sender_state.can_grant && reply_can_grant,
+                    ),
+                    None => {
+                        tcb::set_blocked_on_reply(sender, (sender as u64) | 1);
+                        (true, (sender as u64) | 1, false)
+                    }
+                };
                 if reply_set {
                     tcb::set_caller_reply(cur, reply_token, reply_can_grant);
                     // Caller is now parked on the reply object.
@@ -929,6 +935,7 @@ pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb) {
         }
         tcb::finish_reply_state(caller, was_fault, wake_caller);
         if wake_caller {
+            tcb::clear_queue_links(caller);
             tcb::enqueue(caller);
         }
     }
@@ -1013,8 +1020,13 @@ unsafe fn apply_unknown_syscall_reply(
 /// `seL4_ReplyRecv`: send on the explicit Reply cap selected by the syscall
 /// wrapper, then immediately Recv on the supplied EP cap.
 pub fn reply_recv(uc: &mut UserContext) {
-    reply(uc);
-    recv(uc, true);
+    let reply_cptr = uc.regs[UserRegister::A6.index()];
+    if reply_cptr != 0 {
+        crate::api::syscall::do_reply_recv_mcs(uc);
+    } else {
+        reply(uc);
+        recv(uc, true);
+    }
 }
 
 /// "No sender, no payload" reply written into the syscall return

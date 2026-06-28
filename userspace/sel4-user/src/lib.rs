@@ -77,29 +77,44 @@ pub const LABEL_TCB_WRITE_REGISTERS: u64 = 3;
 pub const LABEL_TCB_CONFIGURE: u64 = 5;
 pub const LABEL_TCB_SET_PRIORITY: u64 = 6;
 pub const LABEL_TCB_SET_SCHED_PARAMS: u64 = 8;
-pub const LABEL_TCB_SET_SPACE: u64 = 11;
-pub const LABEL_TCB_SUSPEND: u64 = 12;
-pub const LABEL_TCB_BIND_NOTIFICATION: u64 = 14;
+pub const LABEL_TCB_SET_SPACE: u64 = 10;
+pub const LABEL_TCB_SUSPEND: u64 = 11;
+pub const LABEL_TCB_RESUME: u64 = 12;
+pub const LABEL_TCB_BIND_NOTIFICATION: u64 = 13;
+pub const LABEL_TCB_UNBIND_NOTIFICATION: u64 = 14;
+pub const LABEL_TCB_SET_AFFINITY: u64 = 15;
+pub const LABEL_TCB_SET_TLS_BASE: u64 = 16;
 pub const LABEL_TCB_SET_FLAGS: u64 = 17;
 pub const LABEL_CNODE_REVOKE: u64 = 18;
 pub const LABEL_CNODE_DELETE: u64 = 19;
+pub const LABEL_CNODE_CANCEL_BADGED_SENDS: u64 = 20;
 pub const LABEL_CNODE_COPY: u64 = 21;
 pub const LABEL_CNODE_MINT: u64 = 22;
-pub const LABEL_CNODE_SAVE_CALLER: u64 = 255;
-pub const LABEL_IRQ_ISSUE_IRQ_HANDLER: u64 = 26;
-pub const LABEL_IRQ_ACK: u64 = 27;
-pub const LABEL_IRQ_SET_NOTIFICATION: u64 = 28;
-pub const LABEL_RISCV_PAGE_TABLE_MAP: u64 = 39;
-pub const LABEL_RISCV_PAGE_TABLE_UNMAP: u64 = 40;
-pub const LABEL_RISCV_PAGE_MAP: u64 = 41;
-pub const LABEL_RISCV_PAGE_UNMAP: u64 = 42;
-pub const LABEL_RISCV_PAGE_GET_ADDRESS: u64 = 43;
-pub const LABEL_RISCV_ASID_POOL_ASSIGN: u64 = 45;
+pub const LABEL_CNODE_MOVE: u64 = 23;
+pub const LABEL_CNODE_MUTATE: u64 = 24;
+pub const LABEL_CNODE_ROTATE: u64 = 25;
+pub const LABEL_CNODE_SAVE_CALLER: u64 = 26;
+pub const LABEL_IRQ_ISSUE_IRQ_HANDLER: u64 = 27;
+pub const LABEL_IRQ_ACK: u64 = 28;
+pub const LABEL_IRQ_SET_NOTIFICATION: u64 = 29;
+pub const LABEL_IRQ_CLEAR: u64 = 30;
+pub const LABEL_DOMAIN_SET: u64 = 31;
+pub const LABEL_DOMAIN_SCHEDULE_CONFIGURE: u64 = 32;
+pub const LABEL_DOMAIN_SCHEDULE_SET_START: u64 = 33;
+pub const LABEL_RISCV_PAGE_TABLE_MAP: u64 = 34;
+pub const LABEL_RISCV_PAGE_TABLE_UNMAP: u64 = 35;
+pub const LABEL_RISCV_PAGE_MAP: u64 = 36;
+pub const LABEL_RISCV_PAGE_UNMAP: u64 = 37;
+pub const LABEL_RISCV_PAGE_GET_ADDRESS: u64 = 38;
+pub const LABEL_RISCV_ASID_CONTROL_MAKE_POOL: u64 = 39;
+pub const LABEL_RISCV_ASID_POOL_ASSIGN: u64 = 40;
+pub const LABEL_RISCV_IRQ_ISSUE_IRQ_HANDLER_TRIGGER: u64 = 41;
 pub const LABEL_PAGE_TABLE_MAP: u64 = LABEL_RISCV_PAGE_TABLE_MAP;
 pub const LABEL_PAGE_TABLE_UNMAP: u64 = LABEL_RISCV_PAGE_TABLE_UNMAP;
 pub const LABEL_PAGE_MAP: u64 = LABEL_RISCV_PAGE_MAP;
 pub const LABEL_PAGE_UNMAP: u64 = LABEL_RISCV_PAGE_UNMAP;
 pub const LABEL_PAGE_GET_ADDRESS: u64 = LABEL_RISCV_PAGE_GET_ADDRESS;
+pub const LABEL_ASID_CONTROL_MAKE_POOL: u64 = LABEL_RISCV_ASID_CONTROL_MAKE_POOL;
 pub const LABEL_ASID_POOL_ASSIGN: u64 = LABEL_RISCV_ASID_POOL_ASSIGN;
 
 pub const OBJ_UNTYPED: u64 = 0;
@@ -304,6 +319,18 @@ pub unsafe fn sel4_send(dest: u64, info: u64, mrs: &[u64]) {
             i += 1;
         }
         arch::current::send(dest, info, mr(mrs, 0), mr(mrs, 1), mr(mrs, 2), mr(mrs, 3));
+    }
+}
+
+pub unsafe fn sel4_reply(info: u64, mrs: &[u64]) {
+    unsafe {
+        let ipc = &mut *ipc_buffer_ptr();
+        let mut i = 4;
+        while i < mrs.len() {
+            ipc.msg[i] = mrs[i];
+            i += 1;
+        }
+        arch::current::reply(info, mr(mrs, 0), mr(mrs, 1), mr(mrs, 2), mr(mrs, 3));
     }
 }
 

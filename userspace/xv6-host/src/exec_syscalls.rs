@@ -4,7 +4,7 @@ use crate::child::{
     copy_cstr_from_child, copy_from_child, copy_to_child, load_elf, map_stack,
     reset_process_mappings, write_user_context,
 };
-use crate::consts::{MAX_EXEC_ARG_LEN, MAX_EXEC_ARGS};
+use crate::consts::{MAX_EXEC_ARG_LEN, MAX_EXEC_ARGS, PAGE_SIZE};
 use crate::types::{SyscallResult, TaskStruct};
 use crate::util::{LogBytes, info, read_u64, write_u64_bytes};
 use crate::vfs::{basename, vfs_read_exec_image};
@@ -76,10 +76,14 @@ fn setup_exec_stack(
     argc: usize,
 ) -> Option<(u64, u64)> {
     let mut sp = child.heap_start;
+    let stack_base = child.heap_start.checked_sub(PAGE_SIZE)?;
     let mut arg_ptrs = [0u64; MAX_EXEC_ARGS];
     for i in 0..argc {
         let len = arg_lens[i];
         sp = sp.checked_sub((len + 1) as u64)?;
+        if sp < stack_base {
+            return None;
+        }
         if !copy_to_child(alloc, child, sp, &args[i][..len]) {
             return None;
         }
@@ -91,17 +95,26 @@ fn setup_exec_stack(
 
     sp &= !0xf;
     sp = sp.checked_sub(8)?;
+    if sp < stack_base {
+        return None;
+    }
     if !write_child_u64(alloc, child, sp, 0) {
         return None;
     }
     for i in (0..argc).rev() {
         sp = sp.checked_sub(8)?;
+        if sp < stack_base {
+            return None;
+        }
         if !write_child_u64(alloc, child, sp, arg_ptrs[i]) {
             return None;
         }
     }
     let argv_va = sp;
     sp &= !0xf;
+    if sp < stack_base {
+        return None;
+    }
     Some((sp, argv_va))
 }
 

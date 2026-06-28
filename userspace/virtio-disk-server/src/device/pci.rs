@@ -25,6 +25,7 @@ const PCI_MAX_DEVICES: u64 = 32;
 const PCI_MAX_CAPS: usize = 64;
 const PCI_VENDOR_INVALID: u16 = 0xffff;
 const PCI_VENDOR_VIRTIO: u16 = 0x1af4;
+const PCI_DEVICE_VIRTIO_BLK_LEGACY: u16 = 0x1000 + VIRTIO_BLK_DEVICE_ID as u16;
 const PCI_DEVICE_VIRTIO_BLK_MODERN: u16 = 0x1040 + VIRTIO_BLK_DEVICE_ID as u16;
 const PCI_CAP_ID_VNDR: u8 = 0x09;
 
@@ -344,7 +345,11 @@ fn discover_virtio_blk() -> Option<VirtioPciDevice> {
             }
 
             let device_id = pci_function.read16(PCI_DEVICE_ID);
-            if vendor == PCI_VENDOR_VIRTIO && device_id == PCI_DEVICE_VIRTIO_BLK_MODERN {
+            if vendor == PCI_VENDOR_VIRTIO
+                && (device_id == PCI_DEVICE_VIRTIO_BLK_MODERN
+                    || device_id == PCI_DEVICE_VIRTIO_BLK_LEGACY)
+            {
+                assign_pci_bars(pci_function);
                 return discover_virtio_caps(pci_function);
             }
 
@@ -357,6 +362,106 @@ fn discover_virtio_blk() -> Option<VirtioPciDevice> {
         device += 1;
     }
     None
+}
+
+fn assign_pci_bars(function: PciFunction) {
+    let mut next_mem = LOONGARCH64_PCIE_MEM_BASE;
+    let mut next_io = LOONGARCH64_PCIE_IO_PORT_BASE + 0x1000;
+    let mut bar = 0u8;
+    while bar < 6 {
+        let reg = PCI_BAR0 + bar as u64 * 4;
+        let original_low = function.read32(reg);
+        function.write32(reg, u32::MAX);
+        let mask_low = function.read32(reg);
+        if mask_low == 0 {
+            function.write32(reg, original_low);
+            bar += 1;
+            continue;
+        }
+
+        if (mask_low & PCI_BAR_IO) != 0 {
+            let size_mask = mask_low & !0x3;
+            if size_mask == 0 {
+                function.write32(reg, original_low);
+                bar += 1;
+                continue;
+            }
+            let size = (!(size_mask as u64)).wrapping_add(1) & 0xffff_fffc;
+            next_io = align_up(next_io, size);
+            if next_io
+                .checked_add(size)
+                .is_none_or(|end| end > LOONGARCH64_PCIE_IO_PORT_BASE + XV6_PCIE_IO_MAP_SIZE)
+            {
+                warn!(
+                    "virtio-disk-server: no PCI I/O space for BAR{} size={:#x}",
+                    bar, size
+                );
+                function.write32(reg, original_low);
+                bar += 1;
+                continue;
+            }
+            function.write32(reg, next_io as u32 | PCI_BAR_IO);
+            next_io += size;
+            bar += 1;
+            continue;
+        }
+
+        let is_64 = (mask_low & PCI_BAR_MEM_TYPE_MASK) == PCI_BAR_MEM_TYPE_64;
+        let mut mask = (mask_low & !0xf) as u64;
+        let original_high = if is_64 && bar < 5 {
+            let high_reg = reg + 4;
+            let original = function.read32(high_reg);
+            function.write32(high_reg, u32::MAX);
+            mask |= (function.read32(high_reg) as u64) << 32;
+            original
+        } else {
+            0
+        };
+        if mask == 0 {
+            function.write32(reg, original_low);
+            if is_64 && bar < 5 {
+                function.write32(reg + 4, original_high);
+                bar += 2;
+            } else {
+                bar += 1;
+            }
+            continue;
+        }
+
+        let size = if is_64 {
+            (!mask).wrapping_add(1)
+        } else {
+            (!(mask as u32)).wrapping_add(1) as u64
+        };
+        next_mem = align_up(next_mem, size);
+        if next_mem
+            .checked_add(size)
+            .is_none_or(|end| end > LOONGARCH64_PCIE_MEM_BASE + XV6_PCIE_MEM_MAP_SIZE)
+        {
+            warn!(
+                "virtio-disk-server: no PCI mem space for BAR{} size={:#x}",
+                bar, size
+            );
+            function.write32(reg, original_low);
+            if is_64 && bar < 5 {
+                function.write32(reg + 4, original_high);
+                bar += 2;
+            } else {
+                bar += 1;
+            }
+            continue;
+        }
+
+        let flags = mask_low & 0xf;
+        function.write32(reg, (next_mem as u32 & !0xf) | flags);
+        if is_64 && bar < 5 {
+            function.write32(reg + 4, (next_mem >> 32) as u32);
+            bar += 2;
+        } else {
+            bar += 1;
+        }
+        next_mem += size;
+    }
 }
 
 fn discover_virtio_caps(function: PciFunction) -> Option<VirtioPciDevice> {
@@ -380,7 +485,6 @@ fn discover_virtio_caps(function: PciFunction) -> Option<VirtioPciDevice> {
             let bar = function.read8(cap as u64 + 4);
             let offset = function.read32(cap as u64 + 8);
             let length = function.read32(cap as u64 + 12);
-
             match cfg_type {
                 VIRTIO_PCI_CAP_COMMON_CFG if cap_len >= VIRTIO_PCI_CAP_BASE_LEN => {
                     if common_cfg == 0 {
@@ -506,6 +610,14 @@ fn feature_bit(bit: u32) -> u64 {
     1u64 << bit
 }
 
+fn align_up(value: u64, align: u64) -> u64 {
+    if align == 0 {
+        value
+    } else {
+        (value + align - 1) & !(align - 1)
+    }
+}
+
 fn write_desc(index: u16, addr: u64, len: u32, flags: u16, next: u16) {
     let off = DESC_OFF + index as u64 * 16;
     write64(off, addr);
@@ -627,6 +739,10 @@ impl PciFunction {
 
     fn write16(self, offset: u64, value: u16) {
         unsafe { ptr::write_volatile((self.vaddr + offset) as *mut u16, value) }
+    }
+
+    fn write32(self, offset: u64, value: u32) {
+        unsafe { ptr::write_volatile((self.vaddr + offset) as *mut u32, value) }
     }
 }
 

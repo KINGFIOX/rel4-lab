@@ -5,6 +5,7 @@ use crate::reply_caps;
 use crate::types::{SyscallResult, TaskStruct};
 use crate::vfs::{resume_vfs_waiter_async, start_vfs_read_request, start_vfs_write_request};
 use sel4_user::msg_info;
+use sel4_user::sel4_yield;
 
 pub(crate) fn sys_write(
     alloc: &mut Allocator,
@@ -34,21 +35,14 @@ pub(crate) fn sys_read(
     start_vfs_read_request(alloc, child, mrs, fd, dst, len)
 }
 
-pub(crate) fn sys_pause(
-    child: &mut TaskStruct,
-    ticks: i64,
-    now: u64,
-    mrs: &[u64; 64],
-) -> SyscallResult {
+pub(crate) fn sys_pause(ticks: i64) -> SyscallResult {
     if ticks <= 0 {
         return SyscallResult::Reply(0);
     }
-    let (reply_slot, reply_mrs) = save_blocked_reply(mrs);
-    child.state = PROC_SLEEPING;
-    child.sleep_deadline = now.wrapping_add(ticks as u64);
-    child.sleep_reply_slot = reply_slot;
-    child.sleep_reply_mrs = reply_mrs;
-    SyscallResult::Block
+    unsafe {
+        sel4_yield();
+    }
+    SyscallResult::Reply(0)
 }
 
 pub(crate) fn pump_vfs_waiters(alloc: &mut Allocator, procs: &mut [TaskStruct; MAX_PROCS]) {
