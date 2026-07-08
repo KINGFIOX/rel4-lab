@@ -1,0 +1,38 @@
+/*
+ * Copyright 2018, Data61, CSIRO (ABN 41 687 119 230)
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+#pragma once
+
+#include <utils/util.h>
+#include <vka/kobject_t.h>
+#include <vka/vka.h>
+
+static inline int vka_alloc_vspace_root(vka_t *vka, vka_object_t *result)
+{
+    return vka_alloc_object(vka, kobject_get_type(KOBJECT_PAGE_TABLE, 0), seL4_PageTableBits, result);
+}
+
+static inline unsigned long vka_arch_get_object_size(seL4_Word objectType)
+{
+    switch (objectType) {
+    case seL4_LoongArch_4K_Page:
+        return seL4_PageBits;
+    case seL4_LoongArch_Mega_Page:
+        return seL4_LargePageBits;
+#if CONFIG_PT_LEVELS > 2
+    case seL4_LoongArch_Giga_Page:
+        return seL4_HugePageBits;
+#endif
+#if CONFIG_PT_LEVELS > 3
+    case seL4_LoongArch_Tera_Page:
+        return seL4_TeraPageBits;
+#endif
+    case seL4_LoongArch_PageTableObject:
+        return seL4_PageTableBits;
+    default:
+        ZF_LOGE("Unknown object type %ld", (long)objectType);
+        return -1;
+    }
+}
