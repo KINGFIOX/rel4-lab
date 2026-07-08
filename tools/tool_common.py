@@ -109,6 +109,7 @@ def require_dir(prefix: str, path: Path, message: str | None = None) -> None:
 
 RISCV_ELF_MACHINE = 243
 LOONGARCH64_ELF_MACHINE = 258
+X86_64_ELF_MACHINE = 62
 ELF_TYPE_EXECUTABLE = 2
 RISCV_EFLAGS_FLOAT_ABI_MASK = 0x6
 RISCV_EFLAGS_FLOAT_ABI_SOFT = 0x0
@@ -121,6 +122,7 @@ def require_xv6_user_elf(prefix: str, target, path: Path) -> None:
     expected_machines = {
         "riscv64": RISCV_ELF_MACHINE,
         "loongarch64": LOONGARCH64_ELF_MACHINE,
+        "x86_64": X86_64_ELF_MACHINE,
     }
     expected_machine = expected_machines.get(target.name)
     if expected_machine is None:
@@ -167,6 +169,7 @@ def require_target_executable_elf(prefix: str, target, path: Path, description: 
     expected_machines = {
         "riscv64": RISCV_ELF_MACHINE,
         "loongarch64": LOONGARCH64_ELF_MACHINE,
+        "x86_64": X86_64_ELF_MACHINE,
     }
     expected_machine = expected_machines.get(target.name)
     if expected_machine is None:

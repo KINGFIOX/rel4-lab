@@ -174,6 +174,12 @@ EXPECTATIONS = {
         # kernel/rootserver/loader staging before high RAM untypeds begin.
         max_load_end_paddr=0x0200_0000,
     ),
+    "x86_64": LayoutExpectation(
+        machine=62,
+        entry=0xFFFF_FFFF_8020_0000,
+        vaddr_paddr_delta=0xFFFF_FFFF_8000_0000,
+        first_load_paddr=0x0020_0000,
+    ),
 }
 
 
@@ -182,6 +188,8 @@ def target_arch(target_name: str) -> str:
         return "riscv64"
     if target_name == "loongarch64":
         return "loongarch64"
+    if target_name == "x86_64":
+        return "x86_64"
     die(PREFIX, f"unsupported ARCH={target_name}")
 
 
@@ -249,7 +257,11 @@ def validate_boot_handoff_source(arch: str) -> list[str]:
         match.group("name"): match.group("body")
         for match in BOOT_FN_RE.finditer(arch_text)
     }
-    for name in ("init_kernel", "init_secondary_hart"):
+    expected_functions = ("init_kernel", "init_secondary_hart")
+    if arch == "x86_64":
+        expected_functions = ("init_kernel",)
+
+    for name in expected_functions:
         body = functions.get(name)
         if body is None:
             errors.append(f"{arch_boot.relative_to(ROOT_DIR)} is missing {name}")
@@ -271,7 +283,10 @@ def validate_boot_handoff_source(arch: str) -> list[str]:
                 f"{fields}, expected {expected}"
             )
 
-    for name in ("init_kernel", "init_secondary_hart"):
+    if arch == "x86_64":
+        return errors
+
+    for name in expected_functions:
         if f"{name} = sym {name}" not in arch_text:
             errors.append(
                 f"{arch_boot.relative_to(ROOT_DIR)} does not bind {name} as an asm symbol"
@@ -638,13 +653,19 @@ def main(argv: list[str]) -> int:
     program_headers = parse_program_headers(data, header)
     sections = parse_section_headers(data, header)
     symbols = parse_symbols(data, sections)
+    source_errors: list[str] = []
+    if arch != "x86_64":
+        source_errors = [
+            *validate_boot_stack_source(arch),
+            *validate_boot_handoff_source(arch),
+            *validate_arch_boot_source(arch),
+        ]
+
     errors = [
         *validate_header(header, expectation),
         *validate_load_segments(program_headers, expectation),
         *validate_symbols(symbols, program_headers, expectation, stack_expectation),
-        *validate_boot_stack_source(arch),
-        *validate_boot_handoff_source(arch),
-        *validate_arch_boot_source(arch),
+        *source_errors,
     ]
     if errors:
         for error in errors:

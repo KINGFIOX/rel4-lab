@@ -110,3 +110,14 @@ pub const PPTR_TOP: usize = 0x0000_0002_0000_0000;
 pub const KERNEL_ELF_BASE: usize = PHYS_BASE_RAW;
 #[cfg(target_arch = "loongarch64")]
 pub const PADDR_BASE: usize = 0;
+
+#[cfg(target_arch = "x86_64")]
+pub const PHYS_BASE_RAW: usize = 0x0020_0000;
+#[cfg(target_arch = "x86_64")]
+pub const PPTR_BASE: usize = 0xFFFF_FF80_0000_0000;
+#[cfg(target_arch = "x86_64")]
+pub const PPTR_TOP: usize = 0xFFFF_FFFF_8000_0000;
+#[cfg(target_arch = "x86_64")]
+pub const KERNEL_ELF_BASE: usize = PPTR_TOP + PHYS_BASE_RAW;
+#[cfg(target_arch = "x86_64")]
+pub const PADDR_BASE: usize = 0;

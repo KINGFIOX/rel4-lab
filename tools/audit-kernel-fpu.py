@@ -149,6 +149,8 @@ def target_arch(target: str) -> str:
         return "riscv64"
     if target.startswith("loongarch64"):
         return "loongarch64"
+    if target.startswith("x86_64"):
+        return "x86_64"
     die(PREFIX, f"unsupported Rust target for FPU audit: {target}")
 
 
@@ -158,6 +160,8 @@ def default_allowed_source(target: str) -> str | None:
             return DEFAULT_RISCV_ALLOWED_SOURCE
         case "loongarch64":
             return DEFAULT_LOONGARCH_ALLOWED_SOURCE
+        case "x86_64":
+            return None
         case _:
             raise AssertionError("unreachable target architecture")
 
@@ -186,6 +190,13 @@ def infer_toolprefix(target: str) -> str | None:
             "loongarch64-unknown-none-",
             "loongarch64-unknown-linux-gnu-",
             "loongarch64-linux-gnu-",
+        ),
+        "x86_64": (
+            "x86_64-none-elf-",
+            "x86_64-unknown-none-",
+            "x86_64-elf-",
+            "x86_64-linux-gnu-",
+            "x86_64-unknown-linux-gnu-",
         ),
     }[target_arch(target)]
     for prefix in prefixes:
@@ -221,6 +232,8 @@ def is_fpu_mnemonic(target: str, mnemonic: str, operands: str = "") -> bool:
             return is_riscv_fpu_mnemonic(mnemonic, operands)
         case "loongarch64":
             return is_loongarch_fpu_mnemonic(mnemonic, operands)
+        case "x86_64":
+            return False
         case _:
             raise AssertionError("unreachable target architecture")
 

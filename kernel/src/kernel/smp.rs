@@ -579,6 +579,16 @@ fn remote_sfence_vma_asid_core(core: usize, _hart_id: usize, asid: usize) {
     remote_core_op(core, REMOTE_OP_FLUSH_VMA_ASID, asid);
 }
 
+#[cfg(target_arch = "x86_64")]
+fn remote_sfence_vma_core(core: usize, _hart_id: usize) {
+    remote_core_op(core, REMOTE_OP_FLUSH_VMA_ALL, 0);
+}
+
+#[cfg(target_arch = "x86_64")]
+fn remote_sfence_vma_asid_core(core: usize, _hart_id: usize, asid: usize) {
+    remote_core_op(core, REMOTE_OP_FLUSH_VMA_ASID, asid);
+}
+
 pub fn sfence_vma_all_harts() {
     crate::arch::current::csr::sfence_vma_all();
     remote_sfence_vma_all();

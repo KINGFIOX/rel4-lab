@@ -250,6 +250,31 @@ TARGETS: dict[str, TargetConfig] = {
         xv6_mabi="lp64d",
         xv6_disk_transport="virtio-pci",
     ),
+    "x86_64": TargetConfig(
+        name="x86_64",
+        rust_target="x86_64-unknown-none",
+        sel4_arch="x86_64",
+        sel4_source_arch="x86",
+        platform="pc99",
+        image_name="sel4test-driver-image-x86_64-pc99",
+        default_sel4_build_dir=DEFAULT_SEL4_TREE_DIR / "build-x86_64",
+        strip="x86_64-elf-strip",
+        qemu="qemu-system-x86_64",
+        qemu_machine="pc",
+        qemu_cpu=None,
+        qemu_bios=None,
+        xv6_dir_name="xv6-x86_64",
+        xv6_toolprefixes=(
+            "x86_64-none-elf-",
+            "x86_64-unknown-none-",
+            "x86_64-elf-",
+            "x86_64-linux-gnu-",
+            "x86_64-unknown-linux-gnu-",
+        ),
+        xv6_march="x86-64",
+        xv6_mabi="",
+        xv6_disk_transport="virtio-pci",
+    ),
 }
 
 
@@ -259,6 +284,8 @@ def normalize_arch(value: str) -> str:
         return "riscv64"
     if normalized in ("loongarch", "loongarch64", "la64"):
         return "loongarch64"
+    if normalized in ("x86-64", "x86_64", "amd64"):
+        return "x86_64"
     return normalized
 
 
@@ -270,6 +297,8 @@ def arch_from_env() -> str:
     rust_target = os.environ.get("RUST_TARGET", "")
     if rust_target.startswith("loongarch64-"):
         return "loongarch64"
+    if rust_target.startswith("x86_64-"):
+        return "x86_64"
     return "riscv64"
 
 

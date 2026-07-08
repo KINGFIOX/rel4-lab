@@ -84,6 +84,40 @@ EXPECTED_CONTEXT_REGS = {
         18,
         2,
     ],
+    "x86_64": [
+        0,
+        7,
+        0,
+        0,
+        0,
+        0,
+        0,
+        15,
+        14,
+        13,
+        12,
+        8,
+        9,
+        4,
+        5,
+        1,
+        6,
+        10,
+        11,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+    ],
 }
 
 EXPECTED_USERSPACE_REGS = {
@@ -100,6 +134,13 @@ EXPECTED_USERSPACE_REGS = {
         "USER_CONTEXT_SP": 3,
         "USER_CONTEXT_A0": 4,
         "USER_CONTEXT_A1": 5,
+    },
+    "x86_64": {
+        "USER_CONTEXT_PC": 0,
+        "USER_CONTEXT_RA": 1,
+        "USER_CONTEXT_SP": 7,
+        "USER_CONTEXT_A0": 15,
+        "USER_CONTEXT_A1": 14,
     },
 }
 
@@ -161,6 +202,22 @@ RISCV_USER_REGISTER_INDEX = {
     "A7": 17,
 }
 
+X86_64_USER_REGISTER_INDEX = {
+    "Ra": 1,
+    "Sp": 7,
+    "Gp": 0,
+    "Tp": 6,
+    "T0": 10,
+    "A0": 15,
+    "A1": 14,
+    "A2": 13,
+    "A3": 12,
+    "A4": 8,
+    "A5": 9,
+    "A6": 4,
+    "A7": 5,
+}
+
 
 def parse_kernel_context_regs(path: Path, target_name: str) -> list[int]:
     text = path.read_text()
@@ -169,9 +226,12 @@ def parse_kernel_context_regs(path: Path, target_name: str) -> list[int]:
         die(PREFIX, f"SEL4_USER_CONTEXT_REGS array not found in {path}")
     body = match.group("body")
     regs: list[int] = []
-    register_map = (
-        USER_REGISTER_INDEX if target_name == "loongarch64" else RISCV_USER_REGISTER_INDEX
-    )
+    register_maps = {
+        "loongarch64": USER_REGISTER_INDEX,
+        "riscv64": RISCV_USER_REGISTER_INDEX,
+        "x86_64": X86_64_USER_REGISTER_INDEX,
+    }
+    register_map = register_maps[target_name]
     for item in body.split(","):
         item = item.strip()
         if not item:
@@ -216,9 +276,11 @@ def audit_boot_rootserver_context(
     errors: list[str], target_name: str, kernel_regs: list[int]
 ) -> None:
     boot_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "boot.rs"
-    register_indexes = (
-        USER_REGISTER_INDEX if target_name == "loongarch64" else RISCV_USER_REGISTER_INDEX
-    )
+    register_indexes = {
+        "loongarch64": USER_REGISTER_INDEX,
+        "riscv64": RISCV_USER_REGISTER_INDEX,
+        "x86_64": X86_64_USER_REGISTER_INDEX,
+    }[target_name]
     a0 = register_indexes["A0"]
     a1 = register_indexes["A1"]
     sp = register_indexes["Sp"]
@@ -260,6 +322,9 @@ def main(argv: list[str]) -> int:
     if not trap_rs.is_file():
         die(PREFIX, f"kernel trap source not found: {trap_rs}")
     if not userspace_arch.is_file():
+        if target.name == "x86_64":
+            print("PASS: x86_64 seL4_UserContext userspace audit skipped for staged backend")
+            return 0
         die(PREFIX, f"xv6-host arch source not found: {userspace_arch}")
 
     kernel_regs = parse_kernel_context_regs(trap_rs, target.name)

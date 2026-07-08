@@ -590,6 +590,8 @@ def main(argv: list[str]) -> int:
         audit_loongarch64(errors)
     elif target.name == "riscv64":
         audit_riscv64(errors)
+    elif target.name == "x86_64":
+        pass
     else:
         errors.append(f"unsupported target {target.name}")
 

@@ -7,6 +7,7 @@ fn main() {
     let linker_script = match target.as_str() {
         "loongarch64-unknown-none" => manifest_dir.join("linker-loongarch64.ld"),
         "riscv64gc-unknown-none-elf" => manifest_dir.join("linker-riscv64.ld"),
+        "x86_64-unknown-none" => manifest_dir.join("linker-x86_64.ld"),
         _ => panic!("unsupported target for kernel: {target}"),
     };
 
