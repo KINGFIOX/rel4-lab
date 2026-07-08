@@ -162,7 +162,7 @@ impl SpinLock {
     }
 
     pub fn lock(&self) -> SpinLockGuard<'_> {
-        let irq_was_enabled = crate::arch::current::irq::local_irq_save();
+        let irq_was_enabled = crate::arch::current::machine::irq::local_irq_save();
         let mut remote_stalled_current = false;
         while self
             .locked
@@ -184,7 +184,7 @@ impl SpinLock {
 impl Drop for SpinLockGuard<'_> {
     fn drop(&mut self) {
         self.lock.locked.store(false, Ordering::Release);
-        crate::arch::current::irq::local_irq_restore(self.irq_was_enabled);
+        crate::arch::current::machine::irq::local_irq_restore(self.irq_was_enabled);
     }
 }
 
@@ -286,7 +286,7 @@ fn kernel_stack_top_for_core(core_id: usize) -> usize {
 
 #[inline]
 pub fn current_core_id() -> usize {
-    let scratch = crate::arch::current::csr::sscratch() as *const TrapScratch;
+    let scratch = crate::arch::current::machine::current_scratch() as *const TrapScratch;
     if scratch.is_null() {
         return 0;
     }
@@ -316,7 +316,7 @@ pub fn init_current_hart(hart_id: usize, core_id: usize) {
         scratch.saved_user_t2 = 0;
         scratch.core_id = core_id;
         scratch.hart_id = hart_id;
-        crate::arch::current::csr::set_sscratch(scratch as *mut TrapScratch as usize);
+        crate::arch::current::machine::set_current_scratch(scratch as *mut TrapScratch as usize);
     }
 
     hart.online.store(true, Ordering::Release);
@@ -324,14 +324,12 @@ pub fn init_current_hart(hart_id: usize, core_id: usize) {
 
 pub fn release_secondary_harts() {
     SECONDARY_BOOT_READY.store(SECONDARY_BOOT_READY_MAGIC, Ordering::Release);
-    #[cfg(target_arch = "loongarch64")]
-    crate::arch::current::csr::dbar();
+    crate::arch::current::machine::full_memory_barrier();
 }
 
 pub fn publish_kernel_satp(satp: u64) {
     KERNEL_SATP.store(satp, Ordering::Release);
-    #[cfg(target_arch = "loongarch64")]
-    crate::arch::current::csr::dbar();
+    crate::arch::current::machine::full_memory_barrier();
 }
 
 pub fn kernel_satp() -> Option<u64> {
@@ -349,11 +347,11 @@ pub fn wake_core(core_id: usize) {
         return;
     };
     assert_remote_ipi_supported("wake_core");
-    let ret = crate::arch::current::ipi::send_ipi(1, hart_id);
+    let error = crate::arch::current::smp::send_ipi(hart_id);
     assert!(
-        ret.error == 0,
+        error == 0,
         "remote IPI send failed for core {core_id} hart {hart_id}: error={}",
-        ret.error
+        error
     );
 }
 
@@ -412,8 +410,7 @@ fn remote_core_op(core: usize, op: usize, target_value: usize) {
     REMOTE_STALL_OP.store(op, Ordering::Release);
     REMOTE_STALL_DONE_MASK.store(0, Ordering::Release);
     REMOTE_STALL_PENDING_MASK.store(bit, Ordering::Release);
-    #[cfg(target_arch = "loongarch64")]
-    crate::arch::current::csr::dbar();
+    crate::arch::current::machine::full_memory_barrier();
     wake_core(core);
 
     while REMOTE_STALL_DONE_MASK.load(Ordering::Acquire) & bit == 0 {
@@ -449,14 +446,14 @@ fn remote_online_hart_id(core: usize) -> Option<usize> {
 
 fn assert_remote_ipi_supported(context: &str) {
     assert!(
-        crate::arch::current::ipi::SUPPORTS_REMOTE_IPI,
+        crate::arch::current::smp::SUPPORTS_REMOTE_IPI,
         "{context}: remote IPI requested before this architecture has an IPI backend"
     );
 }
 
 fn assert_remote_tlb_flush_supported(context: &str) {
     assert!(
-        crate::arch::current::ipi::SUPPORTS_REMOTE_TLB_FLUSH,
+        crate::arch::current::smp::SUPPORTS_REMOTE_TLB_FLUSH,
         "{context}: remote TLB flush requested before this architecture has an RFENCE backend"
     );
 }
@@ -485,18 +482,18 @@ pub(crate) fn service_pending_remote_core_op() -> RemoteCoreOpResult {
     match op {
         REMOTE_OP_RELEASE_FPU_OWNER => {
             if target != 0 {
-                crate::arch::current::fpu::release_on_current_core(target as *mut Tcb);
+                crate::arch::current::machine::fpu::release_on_current_core(target as *mut Tcb);
             }
             complete_remote_core_op(bit);
             return RemoteCoreOpResult::Serviced;
         }
         REMOTE_OP_FLUSH_VMA_ALL => {
-            crate::arch::current::csr::sfence_vma_all();
+            crate::arch::current::machine::tlb_flush_all();
             complete_remote_core_op(bit);
             return RemoteCoreOpResult::Serviced;
         }
         REMOTE_OP_FLUSH_VMA_ASID => {
-            crate::arch::current::csr::sfence_vma_asid(target);
+            crate::arch::current::machine::tlb_flush_asid(target);
             complete_remote_core_op(bit);
             return RemoteCoreOpResult::Serviced;
         }
@@ -520,10 +517,8 @@ pub(crate) fn service_pending_remote_core_op() -> RemoteCoreOpResult {
 }
 
 fn complete_remote_core_op(bit: usize) {
-    #[cfg(target_arch = "loongarch64")]
-    crate::arch::current::ipi::ack_ipi();
-    #[cfg(target_arch = "loongarch64")]
-    crate::arch::current::csr::dbar();
+    crate::arch::current::smp::complete_remote_call();
+    crate::arch::current::machine::full_memory_barrier();
     REMOTE_STALL_DONE_MASK.fetch_or(bit, Ordering::AcqRel);
 }
 
@@ -547,55 +542,33 @@ pub fn remote_sfence_vma_asid_all(asid: usize) {
     }
 }
 
-#[cfg(target_arch = "riscv64")]
 fn remote_sfence_vma_core(core: usize, hart_id: usize) {
     assert_remote_tlb_flush_supported("remote_sfence_vma_all");
-    let ret = crate::arch::current::ipi::remote_sfence_vma(1, hart_id, 0, 0);
+    let error = crate::arch::current::smp::remote_tlb_flush_all(hart_id);
     assert!(
-        ret.error == 0,
+        error == 0,
         "remote_sfence_vma failed for core {core} hart {hart_id}: error={}",
-        ret.error
+        error
     );
 }
 
-#[cfg(target_arch = "riscv64")]
 fn remote_sfence_vma_asid_core(core: usize, hart_id: usize, asid: usize) {
     assert_remote_tlb_flush_supported("remote_sfence_vma_asid_all");
-    let ret = crate::arch::current::ipi::remote_sfence_vma_asid(1, hart_id, 0, 0, asid);
+    let error = crate::arch::current::smp::remote_tlb_flush_asid(hart_id, asid);
     assert!(
-        ret.error == 0,
+        error == 0,
         "remote_sfence_vma_asid failed for core {core} hart {hart_id}: error={}",
-        ret.error
+        error
     );
-}
-
-#[cfg(target_arch = "loongarch64")]
-fn remote_sfence_vma_core(core: usize, _hart_id: usize) {
-    remote_core_op(core, REMOTE_OP_FLUSH_VMA_ALL, 0);
-}
-
-#[cfg(target_arch = "loongarch64")]
-fn remote_sfence_vma_asid_core(core: usize, _hart_id: usize, asid: usize) {
-    remote_core_op(core, REMOTE_OP_FLUSH_VMA_ASID, asid);
-}
-
-#[cfg(target_arch = "x86_64")]
-fn remote_sfence_vma_core(core: usize, _hart_id: usize) {
-    remote_core_op(core, REMOTE_OP_FLUSH_VMA_ALL, 0);
-}
-
-#[cfg(target_arch = "x86_64")]
-fn remote_sfence_vma_asid_core(core: usize, _hart_id: usize, asid: usize) {
-    remote_core_op(core, REMOTE_OP_FLUSH_VMA_ASID, asid);
 }
 
 pub fn sfence_vma_all_harts() {
-    crate::arch::current::csr::sfence_vma_all();
+    crate::arch::current::machine::tlb_flush_all();
     remote_sfence_vma_all();
 }
 
 pub fn sfence_vma_asid_all_harts(asid: usize) {
-    crate::arch::current::csr::sfence_vma_asid(asid);
+    crate::arch::current::machine::tlb_flush_asid(asid);
     remote_sfence_vma_asid_all(asid);
 }
 

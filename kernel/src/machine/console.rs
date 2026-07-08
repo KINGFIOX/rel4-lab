@@ -7,8 +7,8 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
-use crate::arch::current::platform;
-use crate::arch::current::vspace::paddr_to_mmio;
+use crate::arch::current::object::vspace::paddr_to_mmio;
+use crate::arch::current::plat as platform;
 
 const PCI_QEMU_VENDOR_ID: u16 = 0x1b36;
 const PCI_SERIAL_DEVICE_ID: u16 = 0x0002;

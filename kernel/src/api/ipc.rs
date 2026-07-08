@@ -44,7 +44,7 @@ use crate::abi::types::MessageInfo;
 use crate::api::cspace::{self, lookup_cap};
 use crate::api::invocation::derive_cap_for_copy;
 use crate::api::thread;
-use crate::arch::current::trap::{UserContext, UserRegister};
+use crate::arch::current::api::{UserContext, UserRegister};
 use crate::object::cap::{Cap, CapTag};
 use crate::object::cnode::Cte;
 use crate::object::endpoint::{self, EpState};
@@ -637,7 +637,7 @@ pub fn send(uc: &mut UserContext, blocking: bool, _reply_rights: bool) {
         Ok(slots) => slots,
         Err(bad_cptr) => {
             if blocking {
-                let _ = crate::arch::current::trap::send_cap_fault_ipc(uc, bad_cptr, false);
+                let _ = crate::arch::current::api::send_cap_fault_ipc(uc, bad_cptr, false);
             }
             return;
         }
@@ -696,7 +696,7 @@ fn recv_with_reply(uc: &mut UserContext, blocking: bool, reply_cptr: u64) {
         }
     };
     if !cap.endpoint_can_receive() {
-        if !crate::arch::current::trap::send_cap_fault_ipc(uc, cptr, true) {
+        if !crate::arch::current::api::send_cap_fault_ipc(uc, cptr, true) {
             write_empty_reply(uc);
         }
         return;
@@ -797,7 +797,7 @@ pub fn call(uc: &mut UserContext) {
     let extra_cap_slots = match snapshot_extra_cap_slots(cur, info, cap.endpoint_can_grant()) {
         Ok(slots) => slots,
         Err(bad_cptr) => {
-            let _ = crate::arch::current::trap::send_cap_fault_ipc(uc, bad_cptr, false);
+            let _ = crate::arch::current::api::send_cap_fault_ipc(uc, bad_cptr, false);
             return;
         }
     };

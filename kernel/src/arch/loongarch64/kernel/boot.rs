@@ -82,9 +82,9 @@ pub unsafe extern "C" fn _start() -> ! {
         init_kernel = sym init_kernel,
         init_secondary_hart = sym init_secondary_hart,
         secondary_boot_ready = sym crate::kernel::smp::SECONDARY_BOOT_READY,
-        csr_euen = const crate::arch::loongarch64::csr::CSR_EUEN,
-        csr_ks0 = const crate::arch::loongarch64::csr::CSR_KS0,
-        euen_fpu_state_clear_mask = const crate::arch::loongarch64::fpu::EUEN_FPU_STATE_CLEAR_MASK,
+        csr_euen = const crate::arch::loongarch64::machine::csr::CSR_EUEN,
+        csr_ks0 = const crate::arch::loongarch64::machine::csr::CSR_KS0,
+        euen_fpu_state_clear_mask = const crate::arch::loongarch64::machine::fpu::EUEN_FPU_STATE_CLEAR_MASK,
         kernel_stack_bytes = const crate::kernel::smp::KERNEL_STACK_BYTES,
         secondary_boot_ready_magic = const crate::kernel::smp::SECONDARY_BOOT_READY_MAGIC,
     );
@@ -136,14 +136,14 @@ pub extern "C" fn init_secondary_hart(
     core_id: usize,
 ) -> ! {
     crate::kernel::smp::init_current_hart(hart_id, core_id);
-    crate::arch::loongarch64::fpu::init_current_core();
+    crate::arch::loongarch64::machine::fpu::init_current_core();
     if let Some(satp) = crate::kernel::smp::kernel_satp() {
-        unsafe { crate::arch::loongarch64::vspace::switch_satp(satp) };
+        unsafe { crate::arch::loongarch64::object::vspace::switch_satp(satp) };
     }
-    crate::arch::loongarch64::trap::install_trap_vector();
-    crate::arch::loongarch64::trap::init_timer();
-    crate::arch::loongarch64::irq::init_current_core();
-    crate::arch::loongarch64::trap::idle_scheduler_loop()
+    crate::arch::loongarch64::kernel::trap::install_trap_vector();
+    crate::arch::loongarch64::kernel::trap::init_timer();
+    crate::arch::loongarch64::machine::irq::init_current_core();
+    crate::arch::loongarch64::kernel::trap::idle_scheduler_loop()
 }
 
 pub fn halt() -> ! {

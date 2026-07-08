@@ -71,13 +71,13 @@ mod object;
     target_arch = "loongarch64",
     target_arch = "x86_64"
 ))]
-pub use arch::current::boot::_start;
+pub use arch::current::kernel::boot::_start;
 #[cfg(any(
     target_arch = "riscv64",
     target_arch = "loongarch64",
     target_arch = "x86_64"
 ))]
-pub use arch::current::boot::init_kernel;
+pub use arch::current::kernel::boot::init_kernel;
 #[cfg(any(
     target_arch = "riscv64",
     target_arch = "loongarch64",
@@ -98,5 +98,5 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         println!("at {}:{}", loc.file(), loc.line());
     }
     println!("{}", info.message());
-    arch::current::boot::halt()
+    arch::current::kernel::boot::halt()
 }

@@ -1,8 +1,8 @@
 use core::ptr;
 
-use crate::arch::loongarch64::csr;
-use crate::arch::loongarch64::platform;
-use crate::arch::loongarch64::vspace::paddr_to_mmio;
+use crate::arch::loongarch64::machine::csr;
+use crate::arch::loongarch64::object::vspace::paddr_to_mmio;
+use crate::arch::loongarch64::plat as platform;
 
 const PCH_PIC_INT_MASK: usize = 0x20;
 const PCH_PIC_HTMSI_VEC: usize = 0x200;

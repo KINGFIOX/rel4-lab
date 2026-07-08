@@ -11,19 +11,20 @@ use crate::abi::constants::{
     KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, MAX_NUM_NODES, ROOT_CNODE_SIZE_BITS,
     SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
 };
-use crate::arch::current::paging::{
+use crate::arch::current::api::{ROOTSERVER_SSTATUS, UserContext, UserRegister};
+use crate::arch::current::kernel::BOOT_PROFILE;
+use crate::arch::current::kernel::trap::{
+    init_timer, install_trap_vector, restore_user_context_with_kernel_lock,
+};
+use crate::arch::current::machine::paging::{
     LEAF_PARENT_COVERAGE_BITS, PAGE_SHIFT, PAGE_SIZE, PageTable, Pte, ROOT_CHILD_COVERAGE_BITS,
     pt_index,
 };
-use crate::arch::current::platform::{DEVICE_UNTYPED_REGIONS, FREE_RAM_REGIONS};
-use crate::arch::current::trap::{
-    UserContext, UserRegister, init_timer, install_trap_vector,
-    restore_user_context_with_kernel_lock,
-};
-use crate::arch::current::vspace::{
+use crate::arch::current::object::vspace::{
     alloc_pt_page, kpptr_to_paddr, make_boot_root_pt, paddr_to_kpptr, satp_for, switch_satp,
     user_flags,
 };
+use crate::arch::current::plat::{DEVICE_UNTYPED_REGIONS, FREE_RAM_REGIONS};
 use crate::kernel::bootmem;
 use crate::object::cap::{Cap, FRAME_RIGHTS_READ_WRITE, FRAME_SIZE_4K};
 use crate::object::cnode::{Cte, cnode_bytes, install_initial_cap, with_cnode_at};
@@ -46,13 +47,6 @@ pub const USER_STACK_TOP: usize = 0x7FFE_F000;
 pub const USER_STACK_PAGES: usize = 16; // 64 KiB
 const ROOTSERVER_ASID: u16 = 1;
 const MAX_BOOT_USER_PAGING_CAPS: usize = 256;
-
-#[cfg(target_arch = "riscv64")]
-const KERNEL_BOOT_PROFILE: &str = "S-mode, Sv39";
-#[cfg(target_arch = "loongarch64")]
-const KERNEL_BOOT_PROFILE: &str = "LoongArch64 PGDL";
-#[cfg(target_arch = "x86_64")]
-const KERNEL_BOOT_PROFILE: &str = "x86_64 long mode";
 
 #[repr(C)]
 pub struct BootArgs {
@@ -141,7 +135,7 @@ impl BootUserPaging {
             vaddr
         );
         *slot = Pte::leaf(paddr as u64, flags);
-        crate::arch::current::csr::sfence_vma_va(vaddr);
+        crate::arch::current::machine::tlb_flush_vaddr(vaddr);
         crate::kernel::smp::remote_sfence_vma_all();
     }
 
@@ -236,7 +230,7 @@ fn pa_to_pspace_va(pa: u64) -> u64 {
 /// Bootstrap the user environment and drop into U-mode.
 pub fn bringup_rootserver(args: &BootArgs) -> ! {
     crate::kernel::smp::init_current_hart(args.hart_id, args.core_id);
-    crate::arch::current::fpu::init_current_core();
+    crate::arch::current::machine::fpu::init_current_core();
     install_trap_vector();
     init_timer();
 
@@ -246,9 +240,9 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     crate::kernel::smp::publish_kernel_satp(satp);
     unsafe { switch_satp(satp) };
     crate::machine::console::init();
-    crate::arch::current::irq::init();
+    crate::arch::current::machine::irq::init();
 
-    info!("microkernel: Rust kernel booted ({})", KERNEL_BOOT_PROFILE);
+    info!("microkernel: Rust kernel booted ({})", BOOT_PROFILE);
     info!(
         "  hart_id={} core_id={} dtb=0x{:x} ({} bytes)",
         args.hart_id, args.core_id, args.dtb_pa, args.dtb_size
@@ -656,7 +650,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         //          SPP=0  (sret enters U-mode).
         t.context.pc = args.user_ventry as u64;
         t.context.restart_pc = args.user_ventry as u64;
-        t.context.sstatus = crate::arch::current::trap::ROOTSERVER_SSTATUS;
+        t.context.sstatus = ROOTSERVER_SSTATUS;
         t.context.regs[UserRegister::A0.index()] = USER_BOOTINFO_VA as u64;
         t.context.regs[UserRegister::A1.index()] = 0;
         t.context.regs[UserRegister::Sp.index()] = USER_STACK_TOP as u64;
@@ -665,7 +659,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         t as *mut Tcb
     });
     tcb::set_current(t);
-    crate::arch::current::fpu::lazy_restore(t);
+    crate::arch::current::machine::fpu::lazy_restore(t);
     // Seed the scheduler's runqueue with the rootserver, so
     // `schedule()` always has a runnable TCB to return.
     unsafe {
@@ -689,7 +683,7 @@ fn log_arch_restore_state(
     stack_top: usize,
 ) {
     use crate::abi::constants::WORD_BYTES;
-    use crate::arch::current::csr;
+    use crate::arch::current::machine::csr;
 
     info!(
         "  loongarch64 restore csr: crmd={:#x} prmd={:#x} eentry={:#x} pgdl={:#x} pgdh={:#x} asid={:#x} pwcl={:#x} pwch={:#x} stlbps={:#x}",

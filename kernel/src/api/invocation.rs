@@ -13,11 +13,12 @@ use crate::abi::types::MessageInfo;
 use crate::api::cspace;
 use crate::api::syscall::SyscallError;
 use crate::api::thread::Thread;
-use crate::arch::current::paging::{PAGE_SIZE, PageTable};
-use crate::arch::current::trap::{
+use crate::arch::current::api::{
     SEL4_TCB_FRAME_REGS, SEL4_TCB_GP_REGS, SEL4_USER_CONTEXT_REGS, SEL4_USER_CONTEXT_WORDS,
     UserContext, UserRegister,
 };
+use crate::arch::current::machine::paging::{PAGE_SIZE, PageTable};
+use crate::arch::current::object::vspace;
 use crate::kernel::smp::{BklCell, debug_assert_kernel_lock_held};
 use crate::object::cap::{
     Cap, CapTag, FRAME_RIGHTS_KERNEL_ONLY, FRAME_RIGHTS_READ_ONLY, FRAME_RIGHTS_READ_WRITE,
@@ -472,21 +473,16 @@ fn reset_untyped_cap_for_retype(
     Ok(())
 }
 
-fn user_map_error(err: crate::arch::current::vspace::UserMapError) -> SyscallError {
+fn user_map_error(err: vspace::UserMapError) -> SyscallError {
     match err {
-        crate::arch::current::vspace::UserMapError::InvalidArgument => {
-            SyscallError::InvalidArgument
-        }
-        crate::arch::current::vspace::UserMapError::FailedLookup(_) => SyscallError::FailedLookup,
-        crate::arch::current::vspace::UserMapError::DeleteFirst => SyscallError::DeleteFirst,
+        vspace::UserMapError::InvalidArgument => SyscallError::InvalidArgument,
+        vspace::UserMapError::FailedLookup(_) => SyscallError::FailedLookup,
+        vspace::UserMapError::DeleteFirst => SyscallError::DeleteFirst,
     }
 }
 
-fn user_map_error_reply(
-    uc: &mut UserContext,
-    err: crate::arch::current::vspace::UserMapError,
-) -> SyscallError {
-    if let crate::arch::current::vspace::UserMapError::FailedLookup(bits_left) = err {
+fn user_map_error_reply(uc: &mut UserContext, err: vspace::UserMapError) -> SyscallError {
+    if let vspace::UserMapError::FailedLookup(bits_left) = err {
         uc.regs[UserRegister::A4.index()] = bits_left as u64;
         crate::api::thread::write_current_ipc_buffer_word(3, bits_left as u64);
     }
@@ -507,8 +503,6 @@ pub fn handle_frame(
     length: u64,
     uc: &mut UserContext,
 ) -> Result<(), SyscallError> {
-    use crate::arch::current::vspace;
-
     let page_map = InvocationLabel::RiscvPageMap.raw();
     let page_unmap = InvocationLabel::RiscvPageUnmap.raw();
     let page_get_address = InvocationLabel::RiscvPageGetAddress.raw();
@@ -664,8 +658,6 @@ pub fn handle_page_table(
     length: u64,
     uc: &mut UserContext,
 ) -> Result<(), SyscallError> {
-    use crate::arch::current::vspace;
-
     let page_table_map = InvocationLabel::RiscvPageTableMap.raw();
     let page_table_unmap = InvocationLabel::RiscvPageTableUnmap.raw();
 
@@ -884,7 +876,7 @@ pub fn handle_asid_pool(
         // Match `performASIDPoolInvocation`: make the vspace cap mapped,
         // initialise global kernel mappings, then publish the ASID pool entry.
         (*vspace_slot).cap.set_page_table_mapping(asid, 0);
-        crate::arch::current::vspace::copy_kernel_mappings_to(root_pt_kva as *mut PageTable);
+        vspace::copy_kernel_mappings_to(root_pt_kva as *mut PageTable);
         if !crate::object::asid::publish_pool_assignment(
             cap.asid_pool_base(),
             cap.asid_pool_ptr(),
@@ -2046,7 +2038,7 @@ fn cnode_preemption_point() -> Result<(), SyscallError> {
     if !should_poll {
         return Ok(());
     }
-    if crate::arch::current::trap::service_due_timer_interrupts() {
+    if crate::arch::current::api::service_due_timer_interrupts() {
         return Err(SyscallError::Preempted);
     }
     Ok(())
@@ -2858,7 +2850,7 @@ fn finalize_cap(
                 let root_pt_kva = crate::object::asid::lookup(asid);
                 if root_pt_kva != 0 {
                     unsafe {
-                        let unmapped = crate::arch::current::vspace::unmap_user_frame(
+                        let unmapped = vspace::unmap_user_frame(
                             root_pt_kva as *mut PageTable,
                             va as usize,
                             cap.frame_size(),
@@ -2881,7 +2873,7 @@ fn finalize_cap(
                     crate::object::asid::delete(asid, pt_kva);
                 } else {
                     unsafe {
-                        let _ = crate::arch::current::vspace::unmap_user_page_table(
+                        let _ = vspace::unmap_user_page_table(
                             root_pt_kva as *mut PageTable,
                             cap.page_table_mapped_addr() as usize,
                             pt_kva as *mut PageTable,

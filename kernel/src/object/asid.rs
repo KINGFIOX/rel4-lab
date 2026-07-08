@@ -13,10 +13,7 @@
 
 use crate::kernel::smp::BklCell;
 
-#[cfg(target_arch = "loongarch64")]
-const ARCH_ASID_BITS: usize = 10;
-#[cfg(not(target_arch = "loongarch64"))]
-const ARCH_ASID_BITS: usize = 16;
+const ARCH_ASID_BITS: usize = crate::arch::current::object::ASID_BITS;
 
 /// Total ASID slots usable by the current hardware backend.
 const ASID_TABLE_LEN: usize = 1 << ARCH_ASID_BITS;
@@ -205,7 +202,7 @@ pub fn delete_pool(base: u16, pool_kva: u64) {
     });
     if deleted {
         crate::kernel::smp::sfence_vma_all_harts();
-        crate::arch::current::vspace::set_current_vspace_root();
+        crate::arch::current::object::vspace::set_current_vspace_root();
     }
 }
 
@@ -227,7 +224,7 @@ pub fn delete(asid: u16, root_pt_kva: u64) {
         true
     });
     if deleted {
-        crate::arch::current::vspace::set_current_vspace_root();
+        crate::arch::current::object::vspace::set_current_vspace_root();
     }
 }
 

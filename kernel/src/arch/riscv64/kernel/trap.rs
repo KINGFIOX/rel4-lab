@@ -14,7 +14,9 @@ use crate::abi::fault::FaultLabel;
 use crate::abi::syscall::SyscallNumber;
 use crate::abi::types::MessageInfo;
 use crate::api::cspace;
-use crate::arch::riscv64::{csr, sbi};
+use crate::arch::riscv64::machine::{csr, irq};
+use crate::arch::riscv64::object::vspace;
+use crate::arch::riscv64::smp::ipi as sbi;
 use crate::object::cap::{Cap, CapTag};
 
 /// RISC-V D-extension FPU state shape used by the current `riscv64gc` build.
@@ -206,7 +208,7 @@ pub const SSTATUS_SUM: u64 = 1 << 18;
 pub const USER_SSTATUS: u64 = SSTATUS_SPIE;
 pub const ROOTSERVER_SSTATUS: u64 = USER_SSTATUS | SSTATUS_SUM;
 
-global_asm!(include_str!("trap.S"));
+global_asm!(include_str!("../trap.S"));
 
 unsafe extern "C" {
     /// Trap vector — must be installed in `stvec`.
@@ -710,7 +712,7 @@ fn handle_timer_interrupt() {
     let now = csr::time() as u64;
     unsafe {
         if should_signal_synthetic_timer_irq(now) {
-            crate::object::irq::signal_irq(super::irq::KERNEL_TIMER_IRQ as u64);
+            crate::object::irq::signal_irq(irq::KERNEL_TIMER_IRQ as u64);
         }
     }
     program_next_timer();
@@ -755,17 +757,17 @@ fn switch_to_kernel_vspace() {
         return;
     };
     if csr::satp() as u64 != kernel_satp {
-        unsafe { crate::arch::riscv64::vspace::switch_satp(kernel_satp) };
+        unsafe { vspace::switch_satp(kernel_satp) };
     }
 }
 
 fn service_pending_external_interrupt() -> bool {
-    let Some(irq) = super::irq::claim_external_irq() else {
+    let Some(irq) = irq::claim_external_irq() else {
         return false;
     };
     let delivered = unsafe { crate::object::irq::signal_irq(irq) };
     if !delivered {
-        super::irq::complete_external_irq(irq);
+        irq::complete_external_irq(irq);
     }
     true
 }
@@ -797,13 +799,13 @@ unsafe fn switch_to_tcb_vspace(tcb: *const crate::object::tcb::Tcb) {
         return;
     }
     let asid = asid as u64;
-    let new_satp = crate::arch::riscv64::vspace::satp_from_kva(root_kva, asid);
+    let new_satp = vspace::satp_from_kva(root_kva, asid);
     if new_satp == 0 {
         return;
     }
     let cur_satp = csr::satp() as u64;
     if cur_satp != new_satp {
-        unsafe { crate::arch::riscv64::vspace::switch_satp(new_satp) };
+        unsafe { vspace::switch_satp(new_satp) };
     }
 }
 
@@ -926,7 +928,7 @@ fn park_current_thread() -> ! {
 
 fn debug_halt(message: &str) -> ! {
     error!("{message}");
-    crate::arch::riscv64::boot::halt()
+    crate::arch::riscv64::kernel::boot::halt()
 }
 
 fn current_ipc_buffer_kva_for_debug() -> u64 {

@@ -4,7 +4,7 @@
 //! kernel ELF's BSS. The pool is 4 KiB-aligned so callers can hand pages
 //! back to user-space via the active architecture's paging objects.
 
-use crate::arch::current::paging::PAGE_SIZE;
+use crate::arch::current::machine::paging::PAGE_SIZE;
 use crate::kernel::smp::BklCell;
 
 const BOOT_POOL_PAGES: usize = 768; // 3 MiB

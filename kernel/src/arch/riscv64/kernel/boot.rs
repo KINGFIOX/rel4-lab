@@ -111,8 +111,8 @@ pub extern "C" fn init_kernel(
     hart_id: usize,
     core_id: usize,
 ) -> ! {
-    crate::arch::riscv64::fpu::clear_supervisor_access();
-    crate::arch::riscv64::fpu::disable_access();
+    crate::arch::riscv64::machine::fpu::clear_supervisor_access();
+    crate::arch::riscv64::machine::fpu::disable_access();
 
     // Touch the linker symbols so they don't get stripped.
     let _ = unsafe {
@@ -149,13 +149,13 @@ pub extern "C" fn init_secondary_hart(
     core_id: usize,
 ) -> ! {
     crate::kernel::smp::init_current_hart(hart_id, core_id);
-    crate::arch::riscv64::fpu::init_current_core();
+    crate::arch::riscv64::machine::fpu::init_current_core();
     if let Some(satp) = crate::kernel::smp::kernel_satp() {
-        unsafe { crate::arch::riscv64::vspace::switch_satp(satp) };
+        unsafe { crate::arch::riscv64::object::vspace::switch_satp(satp) };
     }
-    crate::arch::riscv64::trap::install_trap_vector();
-    crate::arch::riscv64::trap::init_timer();
-    crate::arch::riscv64::trap::idle_scheduler_loop()
+    crate::arch::riscv64::kernel::trap::install_trap_vector();
+    crate::arch::riscv64::kernel::trap::init_timer();
+    crate::arch::riscv64::kernel::trap::idle_scheduler_loop()
 }
 
 /// Halt the calling hart: enter low-power wait-for-interrupt loop forever.

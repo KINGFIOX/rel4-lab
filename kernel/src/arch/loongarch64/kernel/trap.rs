@@ -15,9 +15,9 @@ use crate::abi::fault::FaultLabel;
 use crate::abi::syscall::SyscallNumber;
 use crate::abi::types::MessageInfo;
 use crate::api::cspace;
-use crate::arch::loongarch64::csr;
-use crate::arch::loongarch64::paging::{PAGE_SHIFT, PTE_V, PageTable, Pte, pt_index};
-use crate::arch::loongarch64::vspace::paddr_to_kpptr;
+use crate::arch::loongarch64::machine::csr;
+use crate::arch::loongarch64::machine::paging::{PAGE_SHIFT, PTE_V, PageTable, Pte, pt_index};
+use crate::arch::loongarch64::object::vspace::{self, paddr_to_kpptr};
 use crate::object::cap::{Cap, CapTag};
 
 pub const LOONGARCH_NUM_FP_REGS: usize = 32;
@@ -841,7 +841,7 @@ fn current_ipc_buffer_kva_for_debug() -> u64 {
 
 fn debug_halt(message: &str) -> ! {
     error!("{message}");
-    crate::arch::loongarch64::boot::halt()
+    crate::arch::loongarch64::kernel::boot::halt()
 }
 
 fn kernel_exit(
@@ -931,8 +931,8 @@ fn switch_to_kernel_vspace() {
     let Some(kernel_satp) = crate::kernel::smp::kernel_satp() else {
         return;
     };
-    if crate::arch::loongarch64::vspace::current_satp() != kernel_satp {
-        unsafe { crate::arch::loongarch64::vspace::switch_satp(kernel_satp) };
+    if vspace::current_satp() != kernel_satp {
+        unsafe { vspace::switch_satp(kernel_satp) };
     }
 }
 
@@ -958,12 +958,12 @@ fn switch_to_tcb_vspace(tcb: *const crate::object::tcb::Tcb) {
     if crate::object::asid::lookup(asid) != root_kva {
         return;
     }
-    let new_satp = crate::arch::loongarch64::vspace::satp_from_kva(root_kva, asid as u64);
+    let new_satp = vspace::satp_from_kva(root_kva, asid as u64);
     if new_satp == 0 {
         return;
     }
-    if crate::arch::loongarch64::vspace::current_satp() != new_satp {
-        unsafe { crate::arch::loongarch64::vspace::switch_satp(new_satp) };
+    if vspace::current_satp() != new_satp {
+        unsafe { vspace::switch_satp(new_satp) };
     }
 }
 

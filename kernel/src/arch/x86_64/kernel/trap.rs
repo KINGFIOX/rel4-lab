@@ -147,7 +147,7 @@ pub const USER_SSTATUS: u64 = 0x202;
 pub const ROOTSERVER_SSTATUS: u64 = USER_SSTATUS;
 
 pub unsafe fn restore_user_context(_ctx: *mut UserContext) -> ! {
-    crate::arch::current::boot::halt()
+    crate::arch::x86_64::kernel::boot::halt()
 }
 
 pub unsafe fn restore_user_context_with_kernel_lock(
@@ -167,7 +167,7 @@ pub fn service_due_timer_interrupts() -> bool {
 }
 
 pub fn idle_scheduler_loop() -> ! {
-    crate::arch::current::boot::halt()
+    crate::arch::x86_64::kernel::boot::halt()
 }
 
 pub fn send_cap_fault_ipc(_uc: &mut UserContext, _addr: u64, _in_recv_phase: bool) -> bool {

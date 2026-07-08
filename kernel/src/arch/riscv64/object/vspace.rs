@@ -9,8 +9,8 @@
 use crate::abi::constants::{
     KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE, PPTR_TOP, PT_INDEX_BITS, RISCV_PG_SHIFT,
 };
-use crate::arch::riscv64::csr;
-use crate::arch::riscv64::sv39::{
+use crate::arch::riscv64::machine::csr;
+use crate::arch::riscv64::machine::paging::{
     PTE_A, PTE_D, PTE_G, PTE_R, PTE_U, PTE_V, PTE_W, PTE_X, PageTable, Pte, make_satp, pt_index,
 };
 use crate::kernel::smp::{BklCell, BklObjectGuard};

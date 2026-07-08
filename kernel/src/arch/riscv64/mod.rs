@@ -1,12 +1,14 @@
-pub mod boot;
-pub mod csr;
-pub mod fpu;
-pub mod irq;
-pub mod platform;
-pub mod sbi;
-pub mod sv39;
-pub mod trap;
-pub mod vspace;
+//! RISC-V 64-bit kernel backend.
+//!
+//! The public layout mirrors seL4's architecture split: ABI-facing `api`,
+//! CPU/kernel entry code in `kernel`, hardware operations in `machine`,
+//! kernel objects in `object`, SMP/IPI support in `smp`, and platform data in
+//! `plat`.
 
-pub use sbi as ipi;
-pub use sv39 as paging;
+pub mod api;
+pub mod kernel;
+pub mod machine;
+pub mod model;
+pub mod object;
+pub mod plat;
+pub mod smp;

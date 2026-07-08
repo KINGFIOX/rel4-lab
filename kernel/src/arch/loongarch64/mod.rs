@@ -6,12 +6,10 @@
 //! into the shared seL4-style kernel paths. Upstream seL4/libsel4/elfloader
 //! LoongArch integration is still the external packaging boundary.
 
-pub mod boot;
-pub mod csr;
-pub mod fpu;
-pub mod ipi;
-pub mod irq;
-pub mod paging;
-pub mod platform;
-pub mod trap;
-pub mod vspace;
+pub mod api;
+pub mod kernel;
+pub mod machine;
+pub mod model;
+pub mod object;
+pub mod plat;
+pub mod smp;

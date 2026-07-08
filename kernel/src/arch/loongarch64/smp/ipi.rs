@@ -1,6 +1,6 @@
 //! LoongArch64 IOCSR IPI helpers for the shared SMP call surface.
 
-use crate::arch::loongarch64::csr;
+use crate::arch::loongarch64::machine::csr;
 
 pub const SUPPORTS_REMOTE_IPI: bool = true;
 pub const SUPPORTS_REMOTE_TLB_FLUSH: bool = false;
@@ -88,5 +88,5 @@ pub fn remote_sfence_vma_asid(
 }
 
 pub fn shutdown() -> ! {
-    crate::arch::current::boot::halt()
+    crate::arch::loongarch64::kernel::boot::halt()
 }

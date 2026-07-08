@@ -1,6 +1,6 @@
 use crate::abi::constants::{KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE};
-use crate::arch::x86_64::csr;
-use crate::arch::x86_64::paging::{PTE_USER_RW, PTE_USER_RWX, PTE_USER_RX, PageTable};
+use crate::arch::x86_64::machine::paging::{PTE_USER_RW, PTE_USER_RWX, PTE_USER_RX, PageTable};
+use crate::arch::x86_64::machine::registers as csr;
 
 pub const USER_ROOT_ENTRIES: usize = 256;
 pub const USER_TOP: usize = USER_ROOT_ENTRIES << (12 + 9 * 2);

@@ -12,8 +12,8 @@ use crate::object::cap::{Cap, CapTag};
 use crate::object::cnode::Cte;
 use crate::object::mdb::MdbNode;
 
-pub const KERNEL_TIMER_IRQ: usize = crate::arch::current::irq::KERNEL_TIMER_IRQ;
-pub const MAX_IRQ: usize = crate::arch::current::irq::MAX_IRQ;
+pub const KERNEL_TIMER_IRQ: usize = crate::arch::current::object::interrupt::KERNEL_TIMER_IRQ;
+pub const MAX_IRQ: usize = crate::arch::current::object::interrupt::MAX_IRQ;
 const NUM_IRQS: usize = MAX_IRQ + 1;
 
 #[derive(Copy, Clone)]
@@ -56,7 +56,7 @@ pub unsafe fn try_issue_handler(irq: u64) -> bool {
                 return false;
             }
             e.active = true;
-            crate::arch::current::irq::enable_external_irq(irq);
+            crate::arch::current::object::interrupt::enable_external_irq(irq);
             return true;
         }
         false
@@ -77,7 +77,7 @@ pub unsafe fn deleted_handler(irq: u64) {
     IRQ_TABLE.with_mut(|table| {
         if let Some(e) = entry_mut(table, irq) {
             e.active = false;
-            crate::arch::current::irq::disable_external_irq(irq);
+            crate::arch::current::object::interrupt::disable_external_irq(irq);
         }
     });
 }
@@ -154,8 +154,7 @@ pub unsafe fn signal_irq(irq: u64) -> bool {
         }
     });
     if cap.tag() == Some(CapTag::Notification) && cap.notification_can_send() {
-        #[cfg(target_arch = "loongarch64")]
-        crate::arch::current::irq::complete_external_irq(irq);
+        crate::arch::current::object::interrupt::complete_external_irq(irq);
         let ntfn = cap.notification_ptr() as *mut crate::object::notification::Notification;
         unsafe { crate::object::notification::signal(ntfn, cap.notification_badge()) };
         return true;
@@ -164,5 +163,5 @@ pub unsafe fn signal_irq(irq: u64) -> bool {
 }
 
 pub unsafe fn ack_irq(irq: u64) {
-    crate::arch::current::irq::complete_external_irq(irq);
+    crate::arch::current::object::interrupt::complete_external_irq(irq);
 }

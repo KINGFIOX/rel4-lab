@@ -8,8 +8,8 @@
 use crate::abi::constants::{
     KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE, PPTR_TOP, PT_INDEX_BITS,
 };
-use crate::arch::loongarch64::csr;
-use crate::arch::loongarch64::paging::{
+use crate::arch::loongarch64::machine::csr;
+use crate::arch::loongarch64::machine::paging::{
     PAGE_SHIFT, PAGE_SIZE, PTE_D, PTE_MAT_CC, PTE_MAT_SUC, PTE_NR, PTE_NX, PTE_PLV_USER,
     PTE_PRESENT, PTE_RPLV, PTE_V, PTE_W, PageTable, Pte, pt_index,
 };
@@ -368,7 +368,7 @@ pub unsafe fn unmap_user_page_table(
             unsafe {
                 *slot = Pte::NULL;
             }
-            crate::arch::loongarch64::csr::sfence_vma_all();
+            csr::sfence_vma_all();
             crate::kernel::smp::remote_sfence_vma_all();
             return true;
         }
@@ -431,7 +431,7 @@ pub unsafe fn reclaim_user_page_tables(root: *mut PageTable) {
             (*root).entries[i] = Pte::NULL;
         }
     }
-    crate::arch::loongarch64::csr::sfence_vma_all();
+    csr::sfence_vma_all();
     crate::kernel::smp::remote_sfence_vma_all();
 }
 

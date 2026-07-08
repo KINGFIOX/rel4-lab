@@ -10,7 +10,7 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::abi::constants::MAX_NUM_NODES;
-use crate::arch::riscv64::trap::{SSTATUS_FS_CLEAN, SSTATUS_FS_MASK};
+use crate::arch::riscv64::kernel::trap::{SSTATUS_FS_CLEAN, SSTATUS_FS_MASK};
 use crate::object::tcb::{self, Tcb};
 
 static FPU_OWNER: [AtomicUsize; MAX_NUM_NODES] = [const { AtomicUsize::new(0) }; MAX_NUM_NODES];

@@ -10,7 +10,7 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::abi::constants::MAX_NUM_NODES;
-use crate::arch::loongarch64::csr;
+use crate::arch::loongarch64::machine::csr;
 use crate::object::tcb::{self, Tcb};
 
 const EUEN_FPE: usize = 1 << 0;
