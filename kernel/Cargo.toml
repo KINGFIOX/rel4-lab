@@ -1,0 +1,12 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+
+[dependencies]
+log_crate = { package = "log", version = "0.4", default-features = false }

@@ -1,0 +1,709 @@
+#!/usr/bin/env python3
+"""Audit trap assembly layout constants against Rust layout assertions."""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from target_config import target_from_env
+from tool_common import ROOT_DIR, die, log
+
+
+PREFIX = "audit-trap-layout"
+WORD_BYTES = 8
+
+EQU_RE = re.compile(r"^\s*\.equ\s+([A-Za-z0-9_]+)\s*,\s*(.+?)\s*(?://.*)?$")
+OFFSET_RE = re.compile(
+    r"offset_of!\((?P<ty>[A-Za-z0-9_:]+),\s*(?P<field>[A-Za-z0-9_]+)\)\s*==\s*(?P<expr>.+?)\);"
+)
+RUST_CONST_RE = re.compile(
+    r"(?:pub\s+)?const\s+([A-Z0-9_]+)\s*:\s*[^=]+=\s*(?P<expr>.*?);",
+    re.S,
+)
+
+TRAP_SCRATCH_FIELDS = {
+    "kernel_stack_top": "TRAP_SCRATCH_KERNEL_STACK_TOP",
+    "user_context": "TRAP_SCRATCH_USER_CONTEXT",
+    "saved_user_sp": "TRAP_SCRATCH_SAVED_USER_SP",
+    "saved_user_t1": "TRAP_SCRATCH_SAVED_USER_T1",
+    "saved_user_t2": "TRAP_SCRATCH_SAVED_USER_T2",
+    "core_id": "TRAP_SCRATCH_CORE_ID",
+    "hart_id": "TRAP_SCRATCH_HART_ID",
+}
+
+LOONGARCH_USER_CONTEXT_FIELDS = {
+    "pc": "USER_CONTEXT_PC",
+    "sstatus": "USER_CONTEXT_SSTATUS",
+    "restart_pc": "USER_CONTEXT_RESTART_PC",
+    "fpu": "USER_CONTEXT_FPU",
+    "trap_record": "USER_CONTEXT_TRAP_RECORD",
+}
+
+LOONGARCH_TRAP_RECORD_FIELDS = {
+    "era": "USER_CONTEXT_TRAP_RECORD_ERA",
+    "prmd": "USER_CONTEXT_TRAP_RECORD_PRMD",
+    "estat": "USER_CONTEXT_TRAP_RECORD_ESTAT",
+    "badv": "USER_CONTEXT_TRAP_RECORD_BADV",
+}
+
+
+def eval_expr(expr: str, symbols: dict[str, int] | None = None) -> int:
+    text = expr.split("//", 1)[0].strip()
+    text = text.replace("size_of::<usize>()", str(WORD_BYTES))
+    symbols = symbols or {}
+    for name, value in sorted(symbols.items(), key=lambda item: len(item[0]), reverse=True):
+        text = re.sub(rf"\b{re.escape(name)}\b", str(value), text)
+    text = re.sub(r"\bas\s+(?:u8|u16|u32|u64|usize|i32|i64|isize)\b", "", text)
+    text = text.replace("_", "")
+    if not re.fullmatch(r"[0-9A-Fa-fxXbBoO()+*\-/<>|& \t]+", text):
+        die(PREFIX, f"unsupported constant expression: {expr}")
+    return int(eval(text, {"__builtins__": {}}, {}))
+
+
+def parse_equ(path: Path) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for line in path.read_text().splitlines():
+        match = EQU_RE.match(line)
+        if not match:
+            continue
+        name, expr = match.groups()
+        values[name] = eval_expr(expr, values)
+    return values
+
+
+def parse_rust_offsets(path: Path, types: set[str]) -> dict[tuple[str, str], int]:
+    offsets: dict[tuple[str, str], int] = {}
+    for line in path.read_text().splitlines():
+        match = OFFSET_RE.search(line)
+        if not match:
+            continue
+        if match.group("ty") not in types:
+            continue
+        offsets[(match.group("ty"), match.group("field"))] = eval_expr(match.group("expr"))
+    return offsets
+
+
+def parse_rust_consts(path: Path, names: set[str]) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for match in RUST_CONST_RE.finditer(path.read_text()):
+        name = match.group(1)
+        if name not in names:
+            continue
+        try:
+            values[name] = eval_expr(match.group("expr"), values)
+        except Exception as exc:
+            die(PREFIX, f"could not evaluate {name} in {path}: {exc}")
+    return values
+
+
+def require_equal(errors: list[str], name: str, got: int | None, expected: int | None) -> None:
+    if got is None:
+        errors.append(f"missing assembly constant {name}")
+        return
+    if expected is None:
+        errors.append(f"missing Rust offset assertion for {name}")
+        return
+    if got != expected:
+        errors.append(f"{name}={got:#x}, expected {expected:#x}")
+
+
+def require_present(
+    errors: list[str], context: str, values: dict[str, int], name: str
+) -> int | None:
+    value = values.get(name)
+    if value is None:
+        errors.append(f"missing {context} constant {name}")
+    return value
+
+
+def require_regex(errors: list[str], path: Path, pattern: str, description: str) -> None:
+    if re.search(pattern, path.read_text(), re.S) is None:
+        errors.append(f"{path.relative_to(ROOT_DIR)} is missing {description}")
+
+
+def audit_trap_scratch(
+    errors: list[str], asm_equ: dict[str, int], rust_offsets, target_name: str
+) -> None:
+    fields = TRAP_SCRATCH_FIELDS
+    if target_name != "loongarch64":
+        fields = {k: v for k, v in fields.items() if k not in {"core_id", "hart_id"}}
+    for field, equ_name in fields.items():
+        require_equal(
+            errors,
+            equ_name,
+            asm_equ.get(equ_name),
+            rust_offsets.get(("TrapScratch", field)),
+        )
+
+
+def audit_loongarch_user_context(errors: list[str], asm_equ: dict[str, int], rust_offsets) -> None:
+    trap_record_base = rust_offsets.get(("UserContext", "trap_record"))
+    for field, equ_name in LOONGARCH_USER_CONTEXT_FIELDS.items():
+        require_equal(
+            errors,
+            equ_name,
+            asm_equ.get(equ_name),
+            rust_offsets.get(("UserContext", field)),
+        )
+    for field, equ_name in LOONGARCH_TRAP_RECORD_FIELDS.items():
+        field_offset = rust_offsets.get(("TrapRecord", field))
+        expected = (
+            None
+            if trap_record_base is None or field_offset is None
+            else trap_record_base + field_offset
+        )
+        require_equal(errors, equ_name, asm_equ.get(equ_name), expected)
+
+
+def audit_loongarch_gpr_save_restore(errors: list[str], asm_path: Path) -> int:
+    direct_saves = {
+        "zero": 0,
+        "ra": 1,
+        "tp": 2,
+        "a0": 4,
+        "a1": 5,
+        "a2": 6,
+        "a3": 7,
+        "a4": 8,
+        "a5": 9,
+        "a6": 10,
+        "a7": 11,
+        "t3": 15,
+        "t4": 16,
+        "t5": 17,
+        "t6": 18,
+        "t7": 19,
+        "t8": 20,
+        "r21": 21,
+        "fp": 22,
+        "s0": 23,
+        "s1": 24,
+        "s2": 25,
+        "s3": 26,
+        "s4": 27,
+        "s5": 28,
+        "s6": 29,
+        "s7": 30,
+        "s8": 31,
+    }
+    direct_restores = {
+        "ra": 1,
+        "tp": 2,
+        "sp": 3,
+        "a0": 4,
+        "a1": 5,
+        "a2": 6,
+        "a3": 7,
+        "a4": 8,
+        "a5": 9,
+        "a6": 10,
+        "a7": 11,
+        "t0": 12,
+        "t1": 13,
+        "t2": 14,
+        "t3": 15,
+        "t4": 16,
+        "t5": 17,
+        "t6": 18,
+        "t7": 19,
+        "t8": 20,
+        "r21": 21,
+        "fp": 22,
+        "s0": 23,
+        "s1": 24,
+        "s2": 25,
+        "s3": 26,
+        "s4": 27,
+        "s5": 28,
+        "s6": 29,
+        "s7": 30,
+        "s8": 31,
+    }
+
+    for reg, index in direct_saves.items():
+        require_regex(
+            errors,
+            asm_path,
+            rf"\bst\.d\s+\${reg},\s+\$sp,\s+{index}\*8\b",
+            f"LoongArch save of ${reg} into UserContext.regs[{index}]",
+        )
+    for reg, index in direct_restores.items():
+        require_regex(
+            errors,
+            asm_path,
+            rf"\bld\.d\s+\${reg},\s+\$t0,\s+{index}\*8\b",
+            f"LoongArch restore of ${reg} from UserContext.regs[{index}]",
+        )
+
+    scratch_moves = {
+        "sp": ("TRAP_SCRATCH_SAVED_USER_SP", 3),
+        "t0": ("CSR_KS0", 12),
+        "t1": ("TRAP_SCRATCH_SAVED_USER_T1", 13),
+        "t2": ("TRAP_SCRATCH_SAVED_USER_T2", 14),
+    }
+    for reg, (source, index) in scratch_moves.items():
+        if source == "CSR_KS0":
+            pattern = rf"\bcsrrd\s+\$t1,\s+{source}\s+st\.d\s+\$t1,\s+\$sp,\s+{index}\*8\b"
+        else:
+            pattern = (
+                rf"\bld\.d\s+\$t1,\s+\$t0,\s+{source}\s+"
+                rf"st\.d\s+\$t1,\s+\$sp,\s+{index}\*8\b"
+            )
+        require_regex(
+            errors,
+            asm_path,
+            pattern,
+            f"LoongArch scratch save of ${reg} into UserContext.regs[{index}]",
+        )
+
+    require_regex(
+        errors,
+        asm_path,
+        r"\bld\.d\s+\$t0,\s+\$t0,\s+12\*8\s+ertn\b",
+        "LoongArch restores user $t0 last before ertn",
+    )
+    return len(direct_saves) + len(direct_restores) + len(scratch_moves) + 1
+
+
+def audit_loongarch_trap_control_flow(errors: list[str], asm_path: Path) -> int:
+    require_regex(
+        errors,
+        asm_path,
+        r"\btrap_entry:\s+"
+        r"csrwr\s+\$t0,\s+CSR_KS0\s+"
+        r"beqz\s+\$t0,\s+kernel_trap_panic",
+        "LoongArch trap entry obtains TrapScratch from KS0",
+    )
+    require_regex(
+        errors,
+        asm_path,
+        r"\bcsrrd\s+\$t1,\s+CSR_PRMD\s+"
+        r"andi\s+\$t1,\s+\$t1,\s+PRMD_PPLV_MASK\s+"
+        r"li\.w\s+\$t2,\s+PRMD_PPLV_USER\s+"
+        r"beq\s+\$t1,\s+\$t2,\s+1f\s+"
+        r"csrwr\s+\$t0,\s+CSR_KS0\s+"
+        r"b\s+kernel_trap_panic",
+        "LoongArch trap entry rejects non-user traps before user-context save",
+    )
+    require_regex(
+        errors,
+        asm_path,
+        r"\bld\.d\s+\$sp,\s+\$t0,\s+TRAP_SCRATCH_USER_CONTEXT\s+"
+        r"bnez\s+\$sp,\s+2f\s+"
+        r"csrwr\s+\$t0,\s+CSR_KS0\s+"
+        r"b\s+kernel_trap_panic",
+        "LoongArch trap entry rejects missing user-context pointer",
+    )
+    require_regex(
+        errors,
+        asm_path,
+        r"\bcsrrd\s+\$t1,\s+CSR_ERA\s+"
+        r"st\.d\s+\$t1,\s+\$sp,\s+USER_CONTEXT_PC\s+"
+        r"st\.d\s+\$t1,\s+\$sp,\s+USER_CONTEXT_RESTART_PC\s+"
+        r"csrrd\s+\$t1,\s+CSR_PRMD\s+"
+        r"st\.d\s+\$t1,\s+\$sp,\s+USER_CONTEXT_SSTATUS",
+        "LoongArch trap entry snapshots ERA and PRMD into UserContext",
+    )
+    require_regex(
+        errors,
+        asm_path,
+        r"\brestore_user_context:\s+"
+        r"move\s+\$t0,\s+\$a0\s+"
+        r"csrrd\s+\$t1,\s+CSR_KS0\s+"
+        r"beqz\s+\$t1,\s+kernel_trap_panic\s+"
+        r"st\.d\s+\$t0,\s+\$t1,\s+TRAP_SCRATCH_USER_CONTEXT\s+"
+        r"ld\.d\s+\$t1,\s+\$t0,\s+USER_CONTEXT_PC\s+"
+        r"csrwr\s+\$t1,\s+CSR_ERA\s+"
+        r"ld\.d\s+\$t1,\s+\$t0,\s+USER_CONTEXT_SSTATUS\s+"
+        r"csrwr\s+\$t1,\s+CSR_PRMD",
+        "LoongArch restore programs ERA and PRMD before GPR restore",
+    )
+    return 5
+
+
+def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
+    fault_rs = ROOT_DIR / "kernel" / "src" / "abi" / "fault.rs"
+    csr_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "csr.rs"
+    irq_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "irq.rs"
+    trap_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "trap.rs"
+    sel4_user_arch_rs = (
+        ROOT_DIR / "userspace" / "sel4-user" / "src" / "arch" / "loongarch64.rs"
+    )
+
+    csr_names = {
+        "CSR_PRMD",
+        "CSR_ESTAT",
+        "CSR_ERA",
+        "CSR_BADV",
+        "CSR_KS0",
+    }
+    irq_names = {
+        "MAX_IRQ",
+        "KERNEL_TIMER_IRQ",
+        "ECFG_LIE_EXTIOI0",
+        "ECFG_LIE_IPI",
+    }
+    trap_names = {
+        "PRMD_PPLV_MASK",
+        "PRMD_PPLV_USER",
+        "PRMD_PIE",
+        "USER_SSTATUS",
+        "ROOTSERVER_SSTATUS",
+        "ESTAT_ECODE_SHIFT",
+        "ESTAT_ECODE_MASK",
+        "ESTAT_ESUBCODE_SHIFT",
+        "ESTAT_ESUBCODE_MASK",
+        "ESTAT_IS_EXTIOI0",
+        "ESTAT_IS_TIMER",
+        "ESTAT_IS_IPI",
+        "ECFG_LIE_TIMER",
+        "TCFG_ENABLE",
+        "TCFG_INITVAL_SHIFT",
+        "TICLR_CLR_TIMER",
+        "EXCCODE_INTERRUPT",
+        "EXCCODE_PIL",
+        "EXCCODE_PIS",
+        "EXCCODE_PIF",
+        "EXCCODE_PME",
+        "EXCCODE_PNR",
+        "EXCCODE_PNX",
+        "EXCCODE_PPI",
+        "EXCCODE_ADE",
+        "EXCCODE_SYSCALL",
+        "EXCCODE_INE",
+        "EXSUBCODE_ADEF",
+        "FAULT_MR_REG_COUNT",
+        "VM_FAULT_FSR_INSTRUCTION",
+        "VM_FAULT_FSR_LOAD",
+        "VM_FAULT_FSR_STORE",
+    }
+    csr_consts = parse_rust_consts(csr_rs, csr_names)
+    irq_consts = parse_rust_consts(irq_rs, irq_names)
+    trap_consts = parse_rust_consts(trap_rs, trap_names)
+
+    for name in csr_names:
+        require_equal(errors, name, asm_equ.get(name), csr_consts.get(name))
+    for name in ("PRMD_PPLV_MASK", "PRMD_PPLV_USER"):
+        require_equal(errors, name, asm_equ.get(name), trap_consts.get(name))
+
+    expected_trap_values = {
+        "PRMD_PPLV_MASK": 0b11,
+        "PRMD_PPLV_USER": 0b11,
+        "PRMD_PIE": 1 << 2,
+        "ESTAT_ECODE_SHIFT": 16,
+        "ESTAT_ECODE_MASK": 0x3f,
+        "ESTAT_ESUBCODE_SHIFT": 22,
+        "ESTAT_ESUBCODE_MASK": 0x1ff,
+        "ESTAT_IS_EXTIOI0": 1 << 2,
+        "ESTAT_IS_TIMER": 1 << 11,
+        "ESTAT_IS_IPI": 1 << 12,
+        "ECFG_LIE_TIMER": 1 << 11,
+        "TCFG_ENABLE": 1 << 0,
+        "TCFG_INITVAL_SHIFT": 2,
+        "TICLR_CLR_TIMER": 1 << 0,
+        "EXCCODE_INTERRUPT": 0,
+        "EXCCODE_PIL": 1,
+        "EXCCODE_PIS": 2,
+        "EXCCODE_PIF": 3,
+        "EXCCODE_PME": 4,
+        "EXCCODE_PNR": 5,
+        "EXCCODE_PNX": 6,
+        "EXCCODE_PPI": 7,
+        "EXCCODE_ADE": 8,
+        "EXCCODE_SYSCALL": 11,
+        "EXCCODE_INE": 13,
+        "EXSUBCODE_ADEF": 0,
+        "FAULT_MR_REG_COUNT": 4,
+        "VM_FAULT_FSR_INSTRUCTION": 1,
+        "VM_FAULT_FSR_LOAD": 5,
+        "VM_FAULT_FSR_STORE": 7,
+    }
+    for name, expected in expected_trap_values.items():
+        require_equal(errors, name, trap_consts.get(name), expected)
+
+    require_regex(
+        errors,
+        csr_rs,
+        r"pub\s+fn\s+set_sscratch\(value:\s*usize\)\s*\{\s*"
+        r"set_ks0\(value\);"
+        r"\s*dbar\(\);\s*\}",
+        "LoongArch TrapScratch CSR write barrier",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+clear_timer_interrupt\(\)\s*\{\s*csr::set_ticlr\(TICLR_CLR_TIMER\);"
+        r"\s*csr::dbar\(\);\s*\}",
+        "named LoongArch timer-clear helper with barrier",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"pub\s+fn\s+install_trap_vector\(\)\s*\{\s*"
+        r"let\s+addr\s*=\s*trap_entry\s+as\s+\*const\s+\(\)\s+as\s+usize;"
+        r"\s*let\s+tlbr_addr\s*=\s*tlbr_entry\s+as\s+\*const\s+\(\)\s+as\s+usize;"
+        r"\s*debug_assert!\(addr\s*&\s*0x3f\s*==\s*0,\s*\"eentry must be 64-byte aligned\"\);"
+        r"\s*debug_assert!\(tlbr_addr\s*&\s*0x3f\s*==\s*0,\s*\"tlbrentry must be 64-byte aligned\"\);"
+        r"\s*csr::set_eentry\(addr\);"
+        r"\s*csr::set_tlbrentry\(tlbr_addr\);"
+        r"\s*csr::ibar\(\);\s*\}",
+        "LoongArch trap vector installation programs EENTRY/TLBRENTRY then fences with ibar",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"pub\s+fn\s+init_timer\(\)\s*\{\s*clear_timer_interrupt\(\);.*?program_next_timer\(\);.*?"
+        r"csr::set_ecfg\(csr::ecfg\(\)\s*\|\s*ECFG_LIE_TIMER\);"
+        r"\s*csr::dbar\(\);",
+        "LoongArch clears and programs timer before enabling interrupts with barrier",
+    )
+    require_regex(
+        errors,
+        irq_rs,
+        r"pub\s+fn\s+init_current_core\(\)\s*\{\s*"
+        r"super::ipi::init_ipi\(\);"
+        r"\s*super::csr::set_ecfg\(super::csr::ecfg\(\)\s*\|\s*ECFG_LIE_EXTIOI0\s*\|\s*ECFG_LIE_IPI\);"
+        r"\s*super::csr::dbar\(\);",
+        "LoongArch enables external/IPI interrupt lines with barrier",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+program_next_timer\(\)\s*\{\s*csr::set_tcfg\(0\);"
+        r"\s*clear_timer_interrupt\(\);"
+        r"\s*csr::dbar\(\);\s*\}",
+        "LoongArch user-entry timer disable path with barrier",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+program_idle_timer\(\)\s*\{.*?crate::kernel::smp::set_next_timer_deadline\(deadline\);.*?"
+        r"csr::set_tcfg\(\(initval\s*<<\s*TCFG_INITVAL_SHIFT\)\s*\|\s*TCFG_ENABLE\);"
+        r"\s*csr::dbar\(\);",
+        "LoongArch idle timer reprogramming path with barrier",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"pub\s+unsafe\s+fn\s+restore_user_context_with_kernel_lock\([^)]*\)\s*->\s*!\s*\{.*?program_next_timer\(\);.*?kernel_lock\.defer_unlock_for_user_restore\(\);.*?restore_user_context_locked\(ctx\)",
+        "LoongArch locked restore reprograms timer before user entry",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+finish_kernel_exit\([^)]*\)\s*->\s*\*mut\s+UserContext\s*\{.*?program_next_timer\(\);.*?kernel_lock\.defer_unlock_for_user_restore\(\);.*?ctx",
+        "LoongArch kernel exit reprograms timer before deferred unlock",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"pub\s+fn\s+idle_scheduler_loop\(\)\s*->\s*!\s*\{.*?let\s+_\s*=\s*service_due_timer_interrupts\(\);",
+        "LoongArch idle scheduler services due timers",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"if\s+next\.is_null\(\)\s*\{.*?switch_to_kernel_vspace\(\);.*?program_idle_timer\(\);.*?None",
+        "LoongArch idle scheduler reprograms timer before idle",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"else\s*\{.*?switch_to_tcb_vspace\(next\);.*?program_next_timer\(\);.*?Some\(\(ctx,\s*kernel_lock\)\)",
+        "LoongArch idle scheduler reprograms timer before user entry",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+service_pending_external_interrupt\(\)\s*->\s*bool\s*\{\s*"
+        r"let\s+Some\(irq\)\s*=\s*super::irq::claim_external_irq\(\)\s*else\s*\{\s*"
+        r"return\s+false;\s*\};\s*"
+        r"let\s+delivered\s*=\s*unsafe\s*\{\s*crate::object::irq::signal_irq\(irq\)\s*\};\s*"
+        r"if\s+!delivered\s*\{\s*super::irq::complete_external_irq\(irq\);\s*\}\s*"
+        r"true\s*\}",
+        "LoongArch external IRQ service completes undelivered interrupts",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+should_signal_synthetic_timer_irq\(now:\s*u64\)\s*->\s*bool\s*\{.*?"
+        r"if\s+crate::kernel::smp::current_core_id\(\)\s*!=\s*0\s*\{\s*return\s+false;.*?"
+        r"NEXT_SYNTHETIC_TIMER_IRQ_DEADLINE\.store\(next,\s*Ordering::Release\);\s*"
+        r"true\s*\}",
+        "LoongArch synthetic timer IRQ fires only from core 0 with release deadline update",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+handle_timer_interrupt\(\)\s*\{.*?"
+        r"clear_timer_interrupt\(\);.*?"
+        r"if\s+should_signal_synthetic_timer_irq\(now\)\s*\{\s*"
+        r"crate::object::irq::signal_irq\(super::irq::KERNEL_TIMER_IRQ\s+as\s+u64\);",
+        "LoongArch timer interrupt signals synthetic kernel timer IRQ",
+    )
+    require_regex(
+        errors,
+        sel4_user_arch_rs,
+        r"pub\(crate\)\s+const\s+KERNEL_TIMER_IRQ\s*:\s*u64\s*=\s*256\s*;",
+        "LoongArch sel4-user synthetic kernel timer IRQ ABI",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+fault_message\([^)]*\)\s*->\s*\(u64,\s*u64,\s*\[u64;\s*16\]\)\s*\{.*?"
+        r"mrs\[0\]\s*=\s*uc\.pc;.*?"
+        r"mrs\[1\]\s*=\s*badv;.*?"
+        r"mrs\[2\]\s*=\s*instruction_fault\s+as\s+u64;.*?"
+        r"mrs\[3\]\s*=\s*fsr;.*?"
+        r"FaultLabel::VmFault\.raw\(\),\s*4,\s*mrs",
+        "LoongArch VMFault IPC message shape",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"mrs\[2\]\s*=\s*user_exception_number\(code\);.*?"
+        r"fn\s+user_exception_number\(code:\s*usize\)\s*->\s*u64\s*\{.*?"
+        r"EXCCODE_INE\s*=>\s*2,.*?"
+        r"_\s*=>\s*code\s+as\s+u64",
+        "LoongArch UserException number ABI mapping",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+vm_fault_fsr\(code:\s*usize,\s*subcode:\s*usize\)\s*->\s*Option<\(bool,\s*u64\)>\s*\{.*?"
+        r"EXCCODE_PIF\s*\|\s*EXCCODE_PNX\s*=>\s*Some\(\(true,\s*VM_FAULT_FSR_INSTRUCTION\)\).*?"
+        r"EXCCODE_PIS\s*\|\s*EXCCODE_PME\s*=>\s*Some\(\(false,\s*VM_FAULT_FSR_STORE\)\).*?"
+        r"EXCCODE_PIL\s*\|\s*EXCCODE_PNR\s*=>\s*Some\(\(false,\s*VM_FAULT_FSR_LOAD\)\).*?"
+        r"EXCCODE_ADE\s+if\s+subcode\s*==\s*EXSUBCODE_ADEF\s*=>\s*Some\(\(true,\s*VM_FAULT_FSR_INSTRUCTION\)\)",
+        "LoongArch exception-code to VMFault FSR mapping",
+    )
+    require_regex(
+        errors,
+        fault_rs,
+        r"pub\s+enum\s+FaultLabel\s*\{.*?"
+        r"CapFault,.*?"
+        r"UnknownSyscall,.*?"
+        r"UserException,.*?"
+        r"VmFault,.*?"
+        r"Self::CapFault\s*=>\s*1,.*?"
+        r"Self::UnknownSyscall\s*=>\s*2,.*?"
+        r"Self::UserException\s*=>\s*3,.*?"
+        r"Self::VmFault\s*=>\s*5,",
+        "seL4 fault-label numeric ABI",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"pub\s+fn\s+send_cap_fault_ipc\(uc:\s*&mut\s+UserContext,\s*addr:\s*u64,\s*in_recv_phase:\s*bool\)\s*->\s*bool\s*\{.*?"
+        r"mrs\[0\]\s*=\s*uc\.restart_pc;.*?"
+        r"mrs\[1\]\s*=\s*addr;.*?"
+        r"mrs\[2\]\s*=\s*in_recv_phase\s+as\s+u64;.*?"
+        r"mrs\[3\]\s*=\s*1;.*?"
+        r"mrs\[4\]\s*=\s*0;.*?"
+        r"send_synthetic_fault_ipc\(FaultLabel::CapFault\.raw\(\),\s*5,\s*mrs\)",
+        "LoongArch CapFault IPC message shape",
+    )
+    require_regex(
+        errors,
+        trap_rs,
+        r"fn\s+send_unknown_syscall_fault\(uc:\s*&mut\s+UserContext,\s*sysno:\s*isize\)\s*->\s*bool\s*\{.*?"
+        r"mrs\[0\]\s*=\s*uc\.restart_pc;.*?"
+        r"mrs\[1\]\s*=\s*uc\.regs\[UserRegister::Sp\.index\(\)\];.*?"
+        r"mrs\[2\]\s*=\s*uc\.regs\[UserRegister::Ra\.index\(\)\];.*?"
+        r"mrs\[3\]\s*=\s*uc\.regs\[UserRegister::A0\.index\(\)\];.*?"
+        r"mrs\[4\]\s*=\s*uc\.regs\[UserRegister::A1\.index\(\)\];.*?"
+        r"mrs\[5\]\s*=\s*uc\.regs\[UserRegister::A2\.index\(\)\];.*?"
+        r"mrs\[6\]\s*=\s*uc\.regs\[UserRegister::A3\.index\(\)\];.*?"
+        r"mrs\[7\]\s*=\s*uc\.regs\[UserRegister::A4\.index\(\)\];.*?"
+        r"mrs\[8\]\s*=\s*uc\.regs\[UserRegister::A5\.index\(\)\];.*?"
+        r"mrs\[9\]\s*=\s*uc\.regs\[UserRegister::A6\.index\(\)\];.*?"
+        r"mrs\[10\]\s*=\s*sysno\s+as\s+u64;.*?"
+        r"send_synthetic_fault_ipc\(FaultLabel::UnknownSyscall\.raw\(\),\s*11,\s*mrs\)",
+        "LoongArch UnknownSyscall IPC message shape",
+    )
+
+    user_sstatus = require_present(errors, "trap", trap_consts, "USER_SSTATUS")
+    rootserver_sstatus = require_present(errors, "trap", trap_consts, "ROOTSERVER_SSTATUS")
+    prmd_user = require_present(errors, "trap", trap_consts, "PRMD_PPLV_USER")
+    prmd_pie = require_present(errors, "trap", trap_consts, "PRMD_PIE")
+    if user_sstatus is not None and prmd_user is not None and prmd_pie is not None:
+        require_equal(errors, "USER_SSTATUS", user_sstatus, prmd_user | prmd_pie)
+    if rootserver_sstatus is not None and user_sstatus is not None:
+        require_equal(errors, "ROOTSERVER_SSTATUS", rootserver_sstatus, user_sstatus)
+
+    require_equal(
+        errors,
+        "ECFG_LIE_EXTIOI0",
+        irq_consts.get("ECFG_LIE_EXTIOI0"),
+        trap_consts.get("ESTAT_IS_EXTIOI0"),
+    )
+    require_equal(
+        errors,
+        "ECFG_LIE_IPI",
+        irq_consts.get("ECFG_LIE_IPI"),
+        trap_consts.get("ESTAT_IS_IPI"),
+    )
+    require_equal(
+        errors,
+        "ECFG_LIE_TIMER",
+        trap_consts.get("ECFG_LIE_TIMER"),
+        trap_consts.get("ESTAT_IS_TIMER"),
+    )
+    require_equal(
+        errors,
+        "KERNEL_TIMER_IRQ",
+        irq_consts.get("KERNEL_TIMER_IRQ"),
+        irq_consts.get("MAX_IRQ"),
+    )
+    require_equal(errors, "MAX_IRQ", irq_consts.get("MAX_IRQ"), 256)
+    return len(csr_names) + 2 + len(expected_trap_values) + 14
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        description="Check trap.S layout constants against Rust offset_of assertions."
+    )
+    parser.parse_args(argv)
+
+    target = target_from_env(PREFIX)
+    asm_path = ROOT_DIR / "kernel" / "src" / "arch" / target.name / "trap.S"
+    trap_rs_path = ROOT_DIR / "kernel" / "src" / "arch" / target.name / "trap.rs"
+    smp_rs_path = ROOT_DIR / "kernel" / "src" / "kernel" / "smp.rs"
+    if not asm_path.is_file():
+        die(PREFIX, f"trap assembly not found: {asm_path}")
+    if not trap_rs_path.is_file():
+        die(PREFIX, f"trap Rust source not found: {trap_rs_path}")
+
+    asm_equ = parse_equ(asm_path)
+    rust_offsets = {
+        **parse_rust_offsets(smp_rs_path, {"TrapScratch"}),
+        **parse_rust_offsets(trap_rs_path, {"UserContext", "TrapRecord"}),
+    }
+    errors: list[str] = []
+    audit_trap_scratch(errors, asm_equ, rust_offsets, target.name)
+    extra_checked = 0
+    if target.name == "loongarch64":
+        audit_loongarch_user_context(errors, asm_equ, rust_offsets)
+        extra_checked += audit_loongarch_trap_abi(errors, asm_equ)
+        extra_checked += audit_loongarch_trap_control_flow(errors, asm_path)
+        extra_checked += audit_loongarch_gpr_save_restore(errors, asm_path)
+
+    if errors:
+        for error in errors:
+            log(PREFIX, f"FAIL: {error}")
+        return 1
+
+    checked = len(TRAP_SCRATCH_FIELDS)
+    if target.name == "loongarch64":
+        checked += len(LOONGARCH_USER_CONTEXT_FIELDS) + len(LOONGARCH_TRAP_RECORD_FIELDS)
+    checked += extra_checked
+    print(f"PASS: {target.name} trap layout constants checked={checked}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

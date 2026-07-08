@@ -1,0 +1,34 @@
+[submodule "third_party/xv6-riscv"]
+	path = third_party/xv6-riscv
+	url = https://github.com/mit-pdos/xv6-riscv
+
+[submodule "third_party/sel4test/kernel"]
+	path = third_party/sel4test/kernel
+	url = https://github.com/KINGFIOX/seL4.git
+[submodule "third_party/sel4test/projects/musllibc"]
+	path = third_party/sel4test/projects/musllibc
+	url = https://github.com/KINGFIOX/musllibc.git
+[submodule "third_party/sel4test/projects/seL4_libs"]
+	path = third_party/sel4test/projects/seL4_libs
+	url = https://github.com/KINGFIOX/seL4_libs.git
+[submodule "third_party/sel4test/projects/sel4_projects_libs"]
+	path = third_party/sel4test/projects/sel4_projects_libs
+	url = https://github.com/KINGFIOX/sel4_projects_libs.git
+[submodule "third_party/sel4test/projects/sel4runtime"]
+	path = third_party/sel4test/projects/sel4runtime
+	url = https://github.com/KINGFIOX/sel4runtime.git
+[submodule "third_party/sel4test/projects/sel4test"]
+	path = third_party/sel4test/projects/sel4test
+	url = https://github.com/KINGFIOX/sel4test.git
+[submodule "third_party/sel4test/projects/util_libs"]
+	path = third_party/sel4test/projects/util_libs
+	url = https://github.com/KINGFIOX/util_libs.git
+[submodule "third_party/sel4test/tools/nanopb"]
+	path = third_party/sel4test/tools/nanopb
+	url = https://github.com/nanopb/nanopb
+[submodule "third_party/sel4test/tools/opensbi"]
+	path = third_party/sel4test/tools/opensbi
+	url = https://github.com/riscv/opensbi
+[submodule "third_party/sel4test/tools/seL4"]
+	path = third_party/sel4test/tools/seL4
+	url = https://github.com/KINGFIOX/seL4_tools.git

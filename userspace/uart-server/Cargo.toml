@@ -1,0 +1,13 @@
+[package]
+name = "uart-server"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[[bin]]
+name = "uart-server"
+path = "src/main.rs"
+
+[dependencies]
+sel4-user = { path = "../sel4-user" }
+xv6-abi = { path = "../xv6-abi" }

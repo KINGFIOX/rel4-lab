@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+    "userspace/sel4-user",
+    "userspace/uart-server",
+    "userspace/virtio-disk-server",
+    "userspace/vfs-server",
+    "userspace/xv6-abi",
+    "userspace/xv6fs-server",
+    "userspace/xv6-host",
+]
+default-members = [
+    "kernel",
+    "userspace/sel4-user",
+    "userspace/uart-server",
+    "userspace/virtio-disk-server",
+    "userspace/vfs-server",
+    "userspace/xv6-abi",
+    "userspace/xv6fs-server",
+    "userspace/xv6-host",
+]
+
+[profile.release]
+opt-level = 3
+debug = true
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+overflow-checks = false
+
+[profile.dev]
+opt-level = 1
+debug = true
+panic = "abort"
+overflow-checks = true
