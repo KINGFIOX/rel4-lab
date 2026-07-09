@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kernel_arch_paths import boot_rs
 from target_config import rust_target_from_env, target_from_env
 from tool_common import (
     ELF_TYPE_EXECUTABLE,
@@ -221,7 +222,7 @@ def read_smp_stack_expectation() -> StackExpectation:
 
 
 def validate_boot_stack_source(arch: str) -> list[str]:
-    path = ROOT_DIR / "kernel" / "src" / "arch" / arch / "boot.rs"
+    path = boot_rs(arch)
     text = path.read_text()
     errors: list[str] = []
     if BOOT_STACK_IMMEDIATE_RE.search(text):
@@ -239,7 +240,7 @@ def source_field_list(body: str, pattern: re.Pattern[str]) -> list[str]:
 
 def validate_boot_handoff_source(arch: str) -> list[str]:
     shared_boot = ROOT_DIR / "kernel" / "src" / "kernel" / "boot.rs"
-    arch_boot = ROOT_DIR / "kernel" / "src" / "arch" / arch / "boot.rs"
+    arch_boot = boot_rs(arch)
     shared_text = shared_boot.read_text()
     arch_text = arch_boot.read_text()
     expected = list(EXPECTED_BOOT_HANDOFF_FIELDS)
@@ -307,7 +308,7 @@ def require_source_regex(
 
 
 def validate_arch_boot_source(arch: str) -> list[str]:
-    path = ROOT_DIR / "kernel" / "src" / "arch" / arch / "boot.rs"
+    path = boot_rs(arch)
     text = path.read_text()
     errors: list[str] = []
 
@@ -342,7 +343,7 @@ def validate_arch_boot_source(arch: str) -> list[str]:
             path,
             text,
             r'"csrwr\s+\$zero,\s+\{csr_ks0\}".*?'
-            r"csr_ks0\s*=\s*const\s+crate::arch::loongarch64::csr::CSR_KS0",
+            r"csr_ks0\s*=\s*const\s+crate::arch::loongarch64::machine::csr::CSR_KS0",
             "LoongArch KS0 scratch clear before Rust entry using CSR constant",
         )
         require_source_regex(
@@ -354,9 +355,9 @@ def validate_arch_boot_source(arch: str) -> list[str]:
             r'"and\s+\$t0,\s+\$t0,\s+\$t1".*?'
             r'"csrwr\s+\$t0,\s+\{csr_euen\}".*?'
             r'"dbar\s+0".*?'
-            r"csr_euen\s*=\s*const\s+crate::arch::loongarch64::csr::CSR_EUEN.*?"
+            r"csr_euen\s*=\s*const\s+crate::arch::loongarch64::machine::csr::CSR_EUEN.*?"
             r"euen_fpu_state_clear_mask\s*=\s*const\s+"
-            r"crate::arch::loongarch64::fpu::EUEN_FPU_STATE_CLEAR_MASK",
+            r"crate::arch::loongarch64::machine::fpu::EUEN_FPU_STATE_CLEAR_MASK",
             "LoongArch early FPU/LSX/LASX disable barrier before Rust entry using CSR and mask constants",
         )
         require_source_regex(

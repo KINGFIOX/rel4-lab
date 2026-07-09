@@ -92,33 +92,32 @@ enum InvocationLabel {
     TcbResume = 12,
     TcbBindNotification = 13,
     TcbUnbindNotification = 14,
-    TcbSetAffinity = 15,
-    TcbSetTlsBase = 16,
-    TcbSetFlags = 17,
-    CNodeRevoke = 18,
-    CNodeDelete = 19,
-    CNodeCancelBadgedSends = 20,
-    CNodeCopy = 21,
-    CNodeMint = 22,
-    CNodeMove = 23,
-    CNodeMutate = 24,
-    CNodeRotate = 25,
-    CNodeSaveCaller = 26,
-    IrqIssueIrqHandler = 27,
-    IrqAck = 28,
-    IrqSetHandler = 29,
-    IrqClearHandler = 30,
-    DomainSet = 31,
-    DomainScheduleConfigure = 32,
-    DomainScheduleSetStart = 33,
-    RiscvPageTableMap = 34,
-    RiscvPageTableUnmap = 35,
-    RiscvPageMap = 36,
-    RiscvPageUnmap = 37,
-    RiscvPageGetAddress = 38,
-    RiscvAsidControlMakePool = 39,
-    RiscvAsidPoolAssign = 40,
-    RiscvIrqIssueIrqHandlerTrigger = 41,
+    TcbSetTlsBase = 15,
+    TcbSetFlags = 16,
+    CNodeRevoke = 17,
+    CNodeDelete = 18,
+    CNodeCancelBadgedSends = 19,
+    CNodeCopy = 20,
+    CNodeMint = 21,
+    CNodeMove = 22,
+    CNodeMutate = 23,
+    CNodeRotate = 24,
+    CNodeSaveCaller = 25,
+    IrqIssueIrqHandler = 26,
+    IrqAck = 27,
+    IrqSetHandler = 28,
+    IrqClearHandler = 29,
+    DomainSet = 30,
+    DomainScheduleConfigure = 31,
+    DomainScheduleSetStart = 32,
+    RiscvPageTableMap = 33,
+    RiscvPageTableUnmap = 34,
+    RiscvPageMap = 35,
+    RiscvPageUnmap = 36,
+    RiscvPageGetAddress = 37,
+    RiscvAsidControlMakePool = 38,
+    RiscvAsidPoolAssign = 39,
+    RiscvIrqIssueIrqHandlerTrigger = 40,
 }
 
 impl InvocationLabel {
@@ -1460,18 +1459,6 @@ fn handle_thread_inner(
                 return Err(SyscallError::IllegalOperation);
             }
             unsafe { tcb::unbind_notification(tcb_ptr) };
-            Ok(())
-        }
-
-        id if id == InvocationLabel::TcbSetAffinity.raw() => {
-            if length < 1 {
-                return Err(SyscallError::TruncatedMessage);
-            }
-            let affinity = uc.regs[UserRegister::A2.index()];
-            if affinity >= crate::abi::constants::MAX_NUM_NODES as u64 {
-                return Err(SyscallError::InvalidArgument);
-            }
-            let _ = affinity;
             Ok(())
         }
 

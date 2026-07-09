@@ -1,3 +1,5 @@
+use crate::arch::loongarch64::smp::ipi;
+
 const CRMD_IE: usize = 1 << 2;
 const ECFG_LIE_EXTIOI0: usize = 1 << 2;
 const ECFG_LIE_IPI: usize = 1 << 12;
@@ -11,7 +13,7 @@ pub fn init() {
 }
 
 pub fn init_current_core() {
-    super::ipi::init_ipi();
+    ipi::init_ipi();
     super::csr::set_ecfg(super::csr::ecfg() | ECFG_LIE_EXTIOI0 | ECFG_LIE_IPI);
     super::csr::dbar();
 }

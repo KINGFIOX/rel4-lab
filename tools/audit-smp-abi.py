@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kernel_arch_paths import arch_dir, ipi_rs, irq_rs, smp_mod_rs, trap_rs
 from target_config import target_from_env
 from tool_common import ROOT_DIR, log
 
@@ -65,52 +66,67 @@ def audit_common_smp(errors: list[str]) -> None:
 
 def audit_riscv64(errors: list[str]) -> None:
     smp_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "smp.rs"
-    mod_rs = ROOT_DIR / "kernel" / "src" / "arch" / "riscv64" / "mod.rs"
-    sbi_rs = ROOT_DIR / "kernel" / "src" / "arch" / "riscv64" / "sbi.rs"
-    require_text(errors, mod_rs, "pub use sbi as ipi;", "RISC-V SBI IPI alias")
-    require_text(errors, sbi_rs, "pub const SUPPORTS_REMOTE_IPI: bool = true;", "SBI IPI")
+    mod_rs = arch_dir("riscv64") / "mod.rs"
+    riscv_smp_rs = smp_mod_rs("riscv64")
+    riscv_ipi_rs = ipi_rs("riscv64")
+    require_text(errors, mod_rs, "pub mod smp;", "RISC-V SMP module")
+    require_text(errors, riscv_smp_rs, "pub mod ipi;", "RISC-V IPI module")
+    require_text(errors, riscv_ipi_rs, "pub const SUPPORTS_REMOTE_IPI: bool = true;", "SBI IPI")
     require_text(
         errors,
-        sbi_rs,
+        riscv_ipi_rs,
         "pub const SUPPORTS_REMOTE_TLB_FLUSH: bool = true;",
         "SBI RFENCE",
+    )
+    require_text(
+        errors,
+        riscv_smp_rs,
+        "ipi::remote_sfence_vma(1, hart_id, 0, 0).error",
+        "RISC-V remote full TLB flush facade",
+    )
+    require_text(
+        errors,
+        riscv_smp_rs,
+        "ipi::remote_sfence_vma_asid(1, hart_id, 0, 0, asid).error",
+        "RISC-V remote ASID TLB flush facade",
     )
     require_regex(
         errors,
         smp_rs,
-        r"#\[cfg\(target_arch\s*=\s*\"riscv64\"\)\]\s*"
-        r"fn\s+remote_sfence_vma_core\([^)]*\).*?current::ipi::remote_sfence_vma\(1,\s*hart_id,\s*0,\s*0\)",
+        r"fn\s+remote_sfence_vma_core\([^)]*\).*?"
+        r"crate::arch::current::smp::remote_tlb_flush_all\(hart_id\)",
         "RISC-V remote sfence.vma IPI/RFENCE path",
     )
     require_regex(
         errors,
         smp_rs,
-        r"#\[cfg\(target_arch\s*=\s*\"riscv64\"\)\]\s*"
         r"fn\s+remote_sfence_vma_asid_core\([^)]*\).*?"
-        r"current::ipi::remote_sfence_vma_asid\(1,\s*hart_id,\s*0,\s*0,\s*asid\)",
+        r"crate::arch::current::smp::remote_tlb_flush_asid\(hart_id,\s*asid\)",
         "RISC-V remote sfence.vma.asid IPI/RFENCE path",
     )
 
 
 def audit_loongarch64(errors: list[str]) -> None:
     smp_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "smp.rs"
-    irq_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "irq.rs"
-    mod_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "mod.rs"
-    ipi_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "ipi.rs"
-    trap_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "trap.rs"
-    require_text(errors, mod_rs, "pub mod ipi;", "LoongArch IPI module")
-    require_text(errors, ipi_rs, "pub const SUPPORTS_REMOTE_IPI: bool = true;", "IOCSR IPI")
+    loongarch_irq_rs = irq_rs("loongarch64")
+    mod_rs = arch_dir("loongarch64") / "mod.rs"
+    loongarch_smp_rs = smp_mod_rs("loongarch64")
+    loongarch_ipi_rs = ipi_rs("loongarch64")
+    loongarch_trap_rs = trap_rs("loongarch64")
+    require_text(errors, mod_rs, "pub mod smp;", "LoongArch SMP module")
+    require_text(errors, loongarch_smp_rs, "pub mod ipi;", "LoongArch IPI module")
+    require_text(errors, loongarch_ipi_rs, "pub const SUPPORTS_REMOTE_IPI: bool = true;", "IOCSR IPI")
     require_text(
         errors,
-        ipi_rs,
+        loongarch_ipi_rs,
         "pub const SUPPORTS_REMOTE_TLB_FLUSH: bool = false;",
         "no direct RFENCE backend on LoongArch",
     )
-    require_text(errors, ipi_rs, "IOCSR_IPI_SEND", "IOCSR IPI send register")
-    require_text(errors, ipi_rs, "IPI_SEND_ACTION_RESCHEDULE", "IPI reschedule action")
+    require_text(errors, loongarch_ipi_rs, "IOCSR_IPI_SEND", "IOCSR IPI send register")
+    require_text(errors, loongarch_ipi_rs, "IPI_SEND_ACTION_RESCHEDULE", "IPI reschedule action")
     require_regex(
         errors,
-        ipi_rs,
+        loongarch_ipi_rs,
         r"pub\s+fn\s+init_ipi\(\)\s*\{\s*"
         r"csr::iocsr_write64\(IOCSR_IPI_CLEAR,\s*u64::MAX\);"
         r"\s*csr::iocsr_write64\(IOCSR_IPI_EN,\s*u64::MAX\);"
@@ -119,7 +135,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        ipi_rs,
+        loongarch_ipi_rs,
         r"pub\s+fn\s+ack_ipi\(\)\s*->\s*bool\s*\{.*?"
         r"csr::iocsr_write64\(IOCSR_IPI_CLEAR,\s*pending\);"
         r"\s*csr::dbar\(\);",
@@ -127,7 +143,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        ipi_rs,
+        loongarch_ipi_rs,
         r"pub\s+fn\s+send_ipi\([^)]*\)\s*->\s*IpiRet\s*\{.*?"
         r"csr::iocsr_write64\(\s*IOCSR_IPI_SEND,.*?"
         r"csr::dbar\(\);\s*OK",
@@ -136,27 +152,10 @@ def audit_loongarch64(errors: list[str]) -> None:
     require_regex(
         errors,
         smp_rs,
-        r"#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
-        r"fn\s+remote_sfence_vma_core\([^)]*\)\s*\{\s*"
-        r"remote_core_op\(core,\s*REMOTE_OP_FLUSH_VMA_ALL,\s*0\);",
-        "LoongArch remote full TLB flush through IPI remote op",
-    )
-    require_regex(
-        errors,
-        smp_rs,
-        r"#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
-        r"fn\s+remote_sfence_vma_asid_core\([^)]*\)\s*\{\s*"
-        r"remote_core_op\(core,\s*REMOTE_OP_FLUSH_VMA_ASID,\s*asid\);",
-        "LoongArch remote ASID TLB flush through IPI remote op",
-    )
-    require_regex(
-        errors,
-        smp_rs,
         r"pub\s+fn\s+release_secondary_harts\(\)\s*\{\s*"
         r"SECONDARY_BOOT_READY\.store\(SECONDARY_BOOT_READY_MAGIC,\s*Ordering::Release\);"
-        r"\s*#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
-        r"crate::arch::current::csr::dbar\(\);",
-        "LoongArch secondary-hart release write barrier",
+        r"\s*crate::arch::current::machine::full_memory_barrier\(\);",
+        "architecture secondary-hart release write barrier facade",
     )
     require_regex(
         errors,
@@ -166,45 +165,42 @@ def audit_loongarch64(errors: list[str]) -> None:
         r"\s*REMOTE_STALL_OP\.store\(op,\s*Ordering::Release\);"
         r"\s*REMOTE_STALL_DONE_MASK\.store\(0,\s*Ordering::Release\);"
         r"\s*REMOTE_STALL_PENDING_MASK\.store\(bit,\s*Ordering::Release\);"
-        r"\s*#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
-        r"crate::arch::current::csr::dbar\(\);"
+        r"\s*crate::arch::current::machine::full_memory_barrier\(\);"
         r"\s*wake_core\(core\);",
-        "LoongArch remote op publish barrier before IPI",
+        "architecture remote op publish barrier before IPI",
     )
     require_regex(
         errors,
         smp_rs,
         r"REMOTE_OP_FLUSH_VMA_ALL\s*=>\s*\{\s*"
-        r"crate::arch::current::csr::sfence_vma_all\(\);",
+        r"crate::arch::current::machine::tlb_flush_all\(\);",
         "remote full TLB flush service",
     )
     require_regex(
         errors,
         smp_rs,
         r"REMOTE_OP_FLUSH_VMA_ASID\s*=>\s*\{\s*"
-        r"crate::arch::current::csr::sfence_vma_asid\(target\);",
+        r"crate::arch::current::machine::tlb_flush_asid\(target\);",
         "remote ASID TLB flush service",
     )
     require_text(
         errors,
-        smp_rs,
-        "#[cfg(target_arch = \"loongarch64\")]\n    crate::arch::current::ipi::ack_ipi();",
-        "LoongArch remote op IPI acknowledgement",
+        loongarch_smp_rs,
+        "ipi::ack_ipi();",
+        "LoongArch remote op IPI acknowledgement facade",
     )
     require_regex(
         errors,
         smp_rs,
         r"fn\s+complete_remote_core_op\(bit:\s*usize\)\s*\{\s*"
-        r"#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
-        r"crate::arch::current::ipi::ack_ipi\(\);"
-        r"\s*#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
-        r"crate::arch::current::csr::dbar\(\);"
+        r"crate::arch::current::smp::complete_remote_call\(\);"
+        r"\s*crate::arch::current::machine::full_memory_barrier\(\);"
         r"\s*REMOTE_STALL_DONE_MASK\.fetch_or\(bit,\s*Ordering::AcqRel\);",
-        "LoongArch remote op completion barrier before done bit",
+        "architecture remote op completion barrier before done bit",
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"if\s+ipi_pending\(estat\)\s*\{.*?"
         r"service_pending_remote_core_op\(\).*?"
         r"RemoteCoreOpResult::StalledCurrent",
@@ -212,7 +208,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        irq_rs,
+        loongarch_irq_rs,
         r"pub\s+fn\s+local_irq_save\(\)\s*->\s*bool\s*\{.*?"
         r"super::csr::set_crmd\(crmd\s*&\s*!CRMD_IE\);"
         r"\s*super::csr::dbar\(\);",
@@ -220,7 +216,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        irq_rs,
+        loongarch_irq_rs,
         r"pub\s+fn\s+local_irq_restore\(irq_was_enabled:\s*bool\)\s*\{.*?"
         r"super::csr::set_crmd\(crmd\s*\|\s*CRMD_IE\);.*?"
         r"super::csr::set_crmd\(crmd\s*&\s*!CRMD_IE\);.*?"

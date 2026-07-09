@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kernel_arch_paths import csr_rs, paging_rs, trap_rs, vspace_rs
 from target_config import target_from_env
 from tool_common import ROOT_DIR, log
 
@@ -72,9 +73,38 @@ def eval_expr(expr: str, symbols: dict[str, int]) -> int:
     return visit(tree)
 
 
-def parse_consts(path: Path, initial: dict[str, int] | None = None) -> dict[str, int]:
+TARGET_CFG_RE = re.compile(r'target_arch\s*=\s*"([^"]+)"')
+
+
+def cfg_matches_target(line: str, target_name: str | None) -> bool:
+    if target_name is None:
+        return True
+    match = TARGET_CFG_RE.search(line)
+    return match is None or match.group(1) == target_name
+
+
+def parse_consts(
+    path: Path,
+    initial: dict[str, int] | None = None,
+    target_name: str | None = None,
+) -> dict[str, int]:
     symbols = dict(initial or {})
-    for match in CONST_RE.finditer(path.read_text()):
+    filtered_lines: list[str] = []
+    pending_include = True
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#[cfg("):
+            pending_include = cfg_matches_target(stripped, target_name)
+            continue
+        if not pending_include:
+            if ";" in stripped:
+                pending_include = True
+            continue
+        filtered_lines.append(line)
+        if ";" in stripped:
+            pending_include = True
+
+    for match in CONST_RE.finditer("\n".join(filtered_lines)):
         name = match.group(1)
         expr = match.group("expr").strip()
         if "{" in expr or "::" in expr:
@@ -182,11 +212,14 @@ def audit_common_paging(errors: list[str], consts: dict[str, int], target_name: 
 
 
 def audit_loongarch64(errors: list[str]) -> None:
-    abi_consts = parse_consts(ROOT_DIR / "kernel" / "src" / "abi" / "constants.rs")
-    paging_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "paging.rs"
-    csr_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "csr.rs"
-    vspace_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "vspace.rs"
-    trap_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "trap.rs"
+    abi_consts = parse_consts(
+        ROOT_DIR / "kernel" / "src" / "abi" / "constants.rs",
+        target_name="loongarch64",
+    )
+    loongarch_paging_rs = paging_rs("loongarch64")
+    loongarch_csr_rs = csr_rs("loongarch64")
+    loongarch_vspace_rs = vspace_rs("loongarch64")
+    loongarch_trap_rs = trap_rs("loongarch64")
     asid_rs = ROOT_DIR / "kernel" / "src" / "object" / "asid.rs"
     boot_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "boot.rs"
     invocation_rs = ROOT_DIR / "kernel" / "src" / "api" / "invocation.rs"
@@ -202,9 +235,9 @@ def audit_loongarch64(errors: list[str]) -> None:
         / "sel4_arch"
         / "constants.h"
     )
-    paging = parse_consts(paging_rs, abi_consts)
-    csr = parse_consts(csr_rs)
-    vspace = parse_consts(vspace_rs, {**abi_consts, **paging})
+    paging = parse_consts(loongarch_paging_rs, abi_consts)
+    csr = parse_consts(loongarch_csr_rs)
+    vspace = parse_consts(loongarch_vspace_rs, {**abi_consts, **paging})
     libsel4 = parse_c_defines(libsel4_consts_h)
     all_consts = {**abi_consts, **paging, **csr, **vspace}
 
@@ -252,7 +285,7 @@ def audit_loongarch64(errors: list[str]) -> None:
         expect(errors, f"loongarch64 {name}", paging.get(name), value)
     require_regex(
         errors,
-        paging_rs,
+        loongarch_paging_rs,
         r"pub\s+const\s+fn\s+ppn\(self\)\s*->\s*u64\s*\{\s*"
         r"\(self\.0\s*>>\s*PTE_PFN_SHIFT\)\s*&\s*PTE_PFN_MASK\s*"
         r"\}",
@@ -260,7 +293,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        paging_rs,
+        loongarch_paging_rs,
         r"pub\s+const\s+fn\s+next\(pt_paddr:\s*u64\)\s*->\s*Pte\s*\{\s*"
         r"Pte\(pt_paddr\s*&\s*!\(\(PAGE_SIZE\s+as\s+u64\)\s*-\s*1\)\)\s*"
         r"\}",
@@ -268,7 +301,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        paging_rs,
+        loongarch_paging_rs,
         r"pub\s+const\s+fn\s+is_valid\(self\)\s*->\s*bool\s*\{\s*"
         r"self\.0\s*!=\s*0\s*"
         r"\}",
@@ -296,8 +329,13 @@ def audit_loongarch64(errors: list[str]) -> None:
     require_regex(
         errors,
         asid_rs,
-        r"#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
-        r"const\s+ARCH_ASID_BITS\s*:\s*usize\s*=\s*10\s*;",
+        r"const\s+ARCH_ASID_BITS\s*:\s*usize\s*=\s*crate::arch::current::object::ASID_BITS\s*;",
+        "ASID table width comes from architecture facade",
+    )
+    require_regex(
+        errors,
+        ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "object" / "mod.rs",
+        r"pub\s+const\s+ASID_BITS\s*:\s*usize\s*=\s*10\s*;",
         "LoongArch hardware ASID width",
     )
     require_text(
@@ -341,19 +379,19 @@ def audit_loongarch64(errors: list[str]) -> None:
 
     require_regex(
         errors,
-        csr_rs,
+        loongarch_csr_rs,
         r"pub\s+fn\s+dbar\(\)\s*\{\s*unsafe\s*\{\s*asm!\(\"dbar 0\",\s*options\(nostack\)\)\s*\};\s*\}",
         "LoongArch dbar compiler-visible memory barrier",
     )
     require_regex(
         errors,
-        csr_rs,
+        loongarch_csr_rs,
         r"pub\s+fn\s+ibar\(\)\s*\{\s*unsafe\s*\{\s*asm!\(\"ibar 0\",\s*options\(nostack\)\)\s*\};\s*\}",
         "LoongArch ibar compiler-visible instruction barrier",
     )
     require_regex(
         errors,
-        csr_rs,
+        loongarch_csr_rs,
         r"pub\s+fn\s+sfence_vma_all\(\)\s*\{.*?"
         r"dbar\(\);.*?"
         r"asm!\(\"invtlb \{op\}, \$zero, \$zero\",\s*op\s*=\s*const\s*INVTLB_ALL,.*?"
@@ -362,7 +400,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        csr_rs,
+        loongarch_csr_rs,
         r"pub\s+fn\s+sfence_vma_va\(vaddr:\s*usize\)\s*\{.*?"
         r"let\s+asid\s*=\s*asid\(\)\s*&\s*ASID_MASK;.*?"
         r"dbar\(\);.*?"
@@ -374,7 +412,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        csr_rs,
+        loongarch_csr_rs,
         r"pub\s+fn\s+sfence_vma_asid\(asid:\s*usize\)\s*\{.*?"
         r"dbar\(\);.*?"
         r"op\s*=\s*const\s*INVTLB_ASID,.*?"
@@ -426,19 +464,19 @@ def audit_loongarch64(errors: list[str]) -> None:
 
     require_text(
         errors,
-        vspace_rs,
+        loongarch_vspace_rs,
         "csr::set_pgdl((satp_val & !0xfffu64) as usize)",
         "PGDL root mask",
     )
     require_text(
         errors,
-        vspace_rs,
+        loongarch_vspace_rs,
         "csr::set_asid((satp_val & csr::ASID_MASK as u64) as usize)",
         "ASID mask on switch",
     )
     require_regex(
         errors,
-        vspace_rs,
+        loongarch_vspace_rs,
         r"configure_kernel_direct_map\(\);\s*"
         r"configure_page_walk\(\);\s*"
         r"csr::dbar\(\);\s*"
@@ -447,7 +485,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        vspace_rs,
+        loongarch_vspace_rs,
         r"if\s+current_satp\(\)\s*==\s*satp_val\s*\{\s*"
         r"enable_paging\(\);\s*"
         r"csr::dbar\(\);\s*"
@@ -457,7 +495,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        vspace_rs,
+        loongarch_vspace_rs,
         r"csr::set_pgdl\(\(satp_val\s*&\s*!0xfffu64\)\s*as\s*usize\);\s*"
         r"csr::set_asid\(\(satp_val\s*&\s*csr::ASID_MASK\s*as\s*u64\)\s*as\s*usize\);\s*"
         r"csr::dbar\(\);\s*"
@@ -466,7 +504,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        vspace_rs,
+        loongarch_vspace_rs,
         r"pub\s+fn\s+set_current_vspace_root\(\)\s*\{\s*"
         r"let\s+current\s*=\s*crate::object::tcb::current\(\);"
         r"\s*if\s+!try_switch_to_tcb_root\(current\)\s*\{\s*"
@@ -475,7 +513,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        vspace_rs,
+        loongarch_vspace_rs,
         r"fn\s+try_switch_to_tcb_root\(tcb:\s*\*const\s+crate::object::tcb::Tcb\)\s*->\s*bool\s*\{.*?"
         r"vspace_cap_snapshot\(tcb\);.*?"
         r"vroot\.tag\(\)\s*!=\s*Some\(CapTag::PageTable\).*?"
@@ -489,7 +527,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"if\s+next\s*!=\s*cur\s*\{.*?"
         r"tcb::set_current\(next\);.*?"
         r"let\s+ctx\s*=\s*unsafe\s*\{\s*tcb::prepare_for_user_restore\(next\)\s*\};.*?"
@@ -499,7 +537,7 @@ def audit_loongarch64(errors: list[str]) -> None:
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"fn\s+kernel_exit_after_remote_stall\([^)]*\)\s*->\s*\*mut\s+UserContext\s*\{.*?"
         r"tcb::set_current\(next\);.*?"
         r"let\s+ctx\s*=\s*unsafe\s*\{\s*tcb::prepare_for_user_restore\(next\)\s*\};.*?"
@@ -507,22 +545,22 @@ def audit_loongarch64(errors: list[str]) -> None:
         r"return\s+finish_kernel_exit\(ctx,\s*kernel_lock\);",
         "LoongArch remote-stall exit changes VSpace before user restore",
     )
-    require_text(errors, vspace_rs, "csr::set_stlbps(PAGE_SHIFT)", "STLB page-size setup")
+    require_text(errors, loongarch_vspace_rs, "csr::set_stlbps(PAGE_SHIFT)", "STLB page-size setup")
     require_text(
         errors,
-        vspace_rs,
+        loongarch_vspace_rs,
         "csr::set_pwch(PAGE_WALK_CONTROL_HIGH)",
         "PWCH top-level page-walk setup",
     )
-    require_text(errors, vspace_rs, "csr::set_dmw0(DMW_LOW_DIRECT)", "low direct-map setup")
-    require_text(errors, vspace_rs, "csr::set_dmw1(DMW_MMIO_DIRECT)", "MMIO direct-map setup")
-    require_text(errors, vspace_rs, "csr::set_dmw2(0)", "DMW2 disabled")
-    require_text(errors, vspace_rs, "csr::set_dmw3(0)", "DMW3 disabled")
-    require_text(errors, vspace_rs, "PTE_MAT_SUC", "device frame uncached MAT")
-    require_text(errors, vspace_rs, "PTE_MAT_CC", "normal frame cached MAT")
+    require_text(errors, loongarch_vspace_rs, "csr::set_dmw0(DMW_LOW_DIRECT)", "low direct-map setup")
+    require_text(errors, loongarch_vspace_rs, "csr::set_dmw1(DMW_MMIO_DIRECT)", "MMIO direct-map setup")
+    require_text(errors, loongarch_vspace_rs, "csr::set_dmw2(0)", "DMW2 disabled")
+    require_text(errors, loongarch_vspace_rs, "csr::set_dmw3(0)", "DMW3 disabled")
+    require_text(errors, loongarch_vspace_rs, "PTE_MAT_SUC", "device frame uncached MAT")
+    require_text(errors, loongarch_vspace_rs, "PTE_MAT_CC", "normal frame cached MAT")
     require_regex(
         errors,
-        vspace_rs,
+        loongarch_vspace_rs,
         r"fn\s+copy_kernel_mappings_to\([^)]*\)\s*\{[^}]*LoongArch keeps kernel access",
         "no-op kernel mapping copy rationale",
     )
@@ -533,7 +571,7 @@ def audit_loongarch64(errors: list[str]) -> None:
         r"crate::kernel::smp::publish_kernel_satp\(satp\);.*?"
         r"unsafe\s*\{\s*switch_satp\(satp\)\s*\};.*?"
         r"crate::machine::console::init\(\);.*?"
-        r"crate::arch::current::irq::init\(\);",
+        r"crate::arch::current::machine::irq::init\(\);",
         "LoongArch boot configures DMW/MMIO access before console and IRQ init",
     )
     smp_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "smp.rs"
@@ -542,9 +580,8 @@ def audit_loongarch64(errors: list[str]) -> None:
         smp_rs,
         r"pub\s+fn\s+publish_kernel_satp\(satp:\s*u64\)\s*\{\s*"
         r"KERNEL_SATP\.store\(satp,\s*Ordering::Release\);"
-        r"\s*#\[cfg\(target_arch\s*=\s*\"loongarch64\"\)\]\s*"
-        r"crate::arch::current::csr::dbar\(\);",
-        "LoongArch kernel root publish barrier",
+        r"\s*crate::arch::current::machine::full_memory_barrier\(\);",
+        "architecture kernel root publish barrier facade",
     )
     audit_kva_to_pa_helpers(errors, abi_consts, (boot_rs, invocation_rs), "loongarch64")
 
@@ -555,8 +592,11 @@ def audit_loongarch64(errors: list[str]) -> None:
 
 
 def audit_riscv64(errors: list[str]) -> None:
-    abi_consts = parse_consts(ROOT_DIR / "kernel" / "src" / "abi" / "constants.rs")
-    sv39_rs = ROOT_DIR / "kernel" / "src" / "arch" / "riscv64" / "sv39.rs"
+    abi_consts = parse_consts(
+        ROOT_DIR / "kernel" / "src" / "abi" / "constants.rs",
+        target_name="riscv64",
+    )
+    sv39_rs = paging_rs("riscv64")
     sv39 = parse_consts(sv39_rs, abi_consts)
     audit_common_paging(errors, sv39, "riscv64")
     for name, value in (

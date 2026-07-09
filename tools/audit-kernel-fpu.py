@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kernel_arch_paths import boot_rs, fpu_rs, trap_rs
 from tool_common import (
     LOONGARCH64_EFLAGS_ABI_MASK,
     LOONGARCH64_EFLAGS_ABI_DOUBLE_FLOAT,
@@ -26,8 +27,8 @@ from tool_common import (
 
 PREFIX = "audit-kernel-fpu"
 DEFAULT_RUST_TARGET = "riscv64gc-unknown-none-elf"
-DEFAULT_RISCV_ALLOWED_SOURCE = "kernel/src/arch/riscv64/fpu.rs"
-DEFAULT_LOONGARCH_ALLOWED_SOURCE = "kernel/src/arch/loongarch64/fpu.rs"
+DEFAULT_RISCV_ALLOWED_SOURCE = "kernel/src/arch/riscv64/machine/fpu.rs"
+DEFAULT_LOONGARCH_ALLOWED_SOURCE = "kernel/src/arch/loongarch64/machine/fpu.rs"
 
 INSTRUCTION_RE = re.compile(
     r"^\s*([0-9a-fA-F]+):(?:\s+[0-9a-fA-F]{2,8})+\s+([A-Za-z0-9_.]+)\b(?:\s+(.*))?$"
@@ -244,46 +245,46 @@ def require_source_regex(errors: list[str], path: Path, pattern: str, descriptio
 
 
 def validate_loongarch_fpu_source() -> None:
-    fpu_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "fpu.rs"
-    trap_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "trap.rs"
-    boot_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "boot.rs"
+    loongarch_fpu_rs = fpu_rs("loongarch64")
+    loongarch_trap_rs = trap_rs("loongarch64")
+    loongarch_boot_rs = boot_rs("loongarch64")
     errors: list[str] = []
 
     require_source_regex(
         errors,
-        fpu_rs,
+        loongarch_fpu_rs,
         r"const\s+EUEN_FPE\s*:\s*usize\s*=\s*1\s*<<\s*0\s*;",
         "LoongArch FPU enable bit",
     )
     require_source_regex(
         errors,
-        fpu_rs,
+        loongarch_fpu_rs,
         r"const\s+EUEN_SXE\s*:\s*usize\s*=\s*1\s*<<\s*1\s*;",
         "LoongArch LSX enable bit",
     )
     require_source_regex(
         errors,
-        fpu_rs,
+        loongarch_fpu_rs,
         r"const\s+EUEN_ASXE\s*:\s*usize\s*=\s*1\s*<<\s*2\s*;",
         "LoongArch LASX enable bit",
     )
     require_source_regex(
         errors,
-        fpu_rs,
+        loongarch_fpu_rs,
         r"const\s+EUEN_FPU_STATE_MASK\s*:\s*usize\s*="
         r"\s*EUEN_FPE\s*\|\s*EUEN_SXE\s*\|\s*EUEN_ASXE\s*;",
         "combined FPU/LSX/LASX state mask",
     )
     require_source_regex(
         errors,
-        fpu_rs,
+        loongarch_fpu_rs,
         r"pub\(crate\)\s+const\s+EUEN_FPU_STATE_CLEAR_MASK\s*:\s*i64\s*="
         r"\s*!\(EUEN_FPU_STATE_MASK\s+as\s+i64\)\s*;",
         "derived FPU/LSX/LASX clear mask",
     )
     require_source_regex(
         errors,
-        fpu_rs,
+        loongarch_fpu_rs,
         r"fn\s+clear_fpu_enable\(\)\s*\{.*?"
         r"set_euen\(euen\s*&\s*!EUEN_FPU_STATE_MASK\);.*?"
         r"csr::dbar\(\);.*?\}",
@@ -291,7 +292,7 @@ def validate_loongarch_fpu_source() -> None:
     )
     require_source_regex(
         errors,
-        fpu_rs,
+        loongarch_fpu_rs,
         r"fn\s+set_scalar_fpu_enable\(\)\s*\{.*?"
         r"set_euen\(\(euen\s*\|\s*EUEN_FPE\)\s*&\s*!EUEN_VECTOR_STATE_MASK\);.*?"
         r"csr::dbar\(\);.*?\}",
@@ -299,7 +300,7 @@ def validate_loongarch_fpu_source() -> None:
     )
     require_source_regex(
         errors,
-        fpu_rs,
+        loongarch_fpu_rs,
         r"unsafe\s+fn\s+save_fpu_state\(thread:\s*\*mut Tcb\).*?"
         r"fst\.d\s+\$f0.*?"
         r"fst\.d\s+\$f31.*?"
@@ -309,7 +310,7 @@ def validate_loongarch_fpu_source() -> None:
     )
     require_source_regex(
         errors,
-        fpu_rs,
+        loongarch_fpu_rs,
         r"fn\s+read_fcc\(\)\s*->\s*u64.*?"
         r"movcf2gr\s+\{fcc0\},\s+\$fcc0.*?"
         r"movcf2gr\s+\{fcc7\},\s+\$fcc7",
@@ -317,7 +318,7 @@ def validate_loongarch_fpu_source() -> None:
     )
     require_source_regex(
         errors,
-        fpu_rs,
+        loongarch_fpu_rs,
         r"unsafe\s+fn\s+load_fpu_state\(thread:\s*\*const Tcb\).*?"
         r"fld\.d\s+\$f0.*?"
         r"fld\.d\s+\$f31.*?"
@@ -327,7 +328,7 @@ def validate_loongarch_fpu_source() -> None:
     )
     require_source_regex(
         errors,
-        fpu_rs,
+        loongarch_fpu_rs,
         r"fn\s+write_fcc\(fcc:\s*u64\).*?"
         r"movgr2cf\s+\$fcc0,\s+\{fcc0\}.*?"
         r"movgr2cf\s+\$fcc7,\s+\{fcc7\}",
@@ -335,7 +336,7 @@ def validate_loongarch_fpu_source() -> None:
     )
     require_source_regex(
         errors,
-        fpu_rs,
+        loongarch_fpu_rs,
         r"pub\s+fn\s+lazy_restore\(thread:\s*\*mut Tcb\)\s*\{.*?"
         r"fpu_disabled_snapshot\(thread\).*?"
         r"disable_access\(\);.*?"
@@ -345,7 +346,7 @@ def validate_loongarch_fpu_source() -> None:
     )
     require_source_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"pub\s+struct\s+FpuState\s*\{.*?"
         r"pub\s+regs:\s*\[u64;\s*LOONGARCH_NUM_FP_REGS\].*?"
         r"pub\s+fcsr:\s*u32.*?"
@@ -354,15 +355,15 @@ def validate_loongarch_fpu_source() -> None:
     )
     require_source_regex(
         errors,
-        boot_rs,
+        loongarch_boot_rs,
         r'"csrrd\s+\$t0,\s+\{csr_euen\}".*?'
         r'"li\.d\s+\$t1,\s+\{euen_fpu_state_clear_mask\}".*?'
         r'"and\s+\$t0,\s+\$t0,\s+\$t1".*?'
         r'"csrwr\s+\$t0,\s+\{csr_euen\}".*?'
         r'"dbar\s+0".*?'
-        r"csr_euen\s*=\s*const\s+crate::arch::loongarch64::csr::CSR_EUEN.*?"
+        r"csr_euen\s*=\s*const\s+crate::arch::loongarch64::machine::csr::CSR_EUEN.*?"
         r"euen_fpu_state_clear_mask\s*=\s*const\s+"
-        r"crate::arch::loongarch64::fpu::EUEN_FPU_STATE_CLEAR_MASK",
+        r"crate::arch::loongarch64::machine::fpu::EUEN_FPU_STATE_CLEAR_MASK",
         "early EUEN FPU/LSX/LASX clear barrier before Rust entry using CSR and mask constants",
     )
 

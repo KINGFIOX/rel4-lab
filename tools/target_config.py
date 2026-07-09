@@ -173,17 +173,20 @@ class TargetConfig:
         if status.is_ready:
             return
 
-        port_hint = (
-            "Add a LoongArch seL4/libsel4/elfloader port"
-            if self.name == "loongarch64"
-            else f"Add an {self.name} seL4/libsel4/elfloader port"
-        )
+        if self.name == "loongarch64":
+            port_hint = "Add a LoongArch seL4/libsel4/elfloader port"
+        elif self.name == "x86_64":
+            port_hint = (
+                "The vendored sel4test tree intentionally does not carry x86 elfloader "
+                "sources; set SEL4_TREE_DIR to a complete x86-capable sel4test tree"
+            )
+        else:
+            port_hint = f"Add an {self.name} seL4/libsel4/elfloader port"
         die(
             prefix,
             (
                 f"official sel4test for ARCH={self.name} is not available in {sel4_tree_dir}; "
-                f"missing {', '.join(status.missing_descriptions())}. {port_hint} "
-                "or set SEL4_TREE_DIR to one before packing."
+                f"missing {', '.join(status.missing_descriptions())}. {port_hint}."
             ),
         )
 
@@ -315,7 +318,15 @@ def rust_target_from_env(target: TargetConfig) -> str:
 
 
 def sel4_build_dir_from_env(target: TargetConfig) -> Path:
-    return Path(os.environ.get("SEL4_BUILD_DIR", str(target.default_sel4_build_dir)))
+    explicit_build = os.environ.get("SEL4_BUILD_DIR")
+    if explicit_build:
+        return Path(explicit_build)
+
+    explicit_tree = os.environ.get("SEL4_TREE_DIR") or os.environ.get("SEL4_ROOT")
+    if explicit_tree:
+        return Path(explicit_tree) / f"build-{target.name}"
+
+    return target.default_sel4_build_dir
 
 
 def image_name_from_env(target: TargetConfig) -> str:

@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kernel_arch_paths import trap_rs
 from target_config import target_from_env
 from tool_common import ROOT_DIR, log
 
@@ -280,7 +281,7 @@ def audit_userspace_common(errors: list[str]) -> None:
 def audit_kernel_trap(errors: list[str], target_name: str) -> None:
     if target_name == "x86_64":
         return
-    path = ROOT_DIR / "kernel" / "src" / "arch" / target_name / "trap.rs"
+    path = trap_rs(target_name)
     rel = path.relative_to(ROOT_DIR)
     source = path.read_text()
 

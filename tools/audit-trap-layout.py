@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kernel_arch_paths import csr_rs, irq_rs, trap_asm, trap_rs
 from target_config import target_from_env
 from tool_common import ROOT_DIR, die, log
 
@@ -327,9 +328,9 @@ def audit_loongarch_trap_control_flow(errors: list[str], asm_path: Path) -> int:
 
 def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     fault_rs = ROOT_DIR / "kernel" / "src" / "abi" / "fault.rs"
-    csr_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "csr.rs"
-    irq_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "irq.rs"
-    trap_rs = ROOT_DIR / "kernel" / "src" / "arch" / "loongarch64" / "trap.rs"
+    loongarch_csr_rs = csr_rs("loongarch64")
+    loongarch_irq_rs = irq_rs("loongarch64")
+    loongarch_trap_rs = trap_rs("loongarch64")
     sel4_user_arch_rs = (
         ROOT_DIR / "userspace" / "sel4-user" / "src" / "arch" / "loongarch64.rs"
     )
@@ -381,9 +382,9 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
         "VM_FAULT_FSR_LOAD",
         "VM_FAULT_FSR_STORE",
     }
-    csr_consts = parse_rust_consts(csr_rs, csr_names)
-    irq_consts = parse_rust_consts(irq_rs, irq_names)
-    trap_consts = parse_rust_consts(trap_rs, trap_names)
+    csr_consts = parse_rust_consts(loongarch_csr_rs, csr_names)
+    irq_consts = parse_rust_consts(loongarch_irq_rs, irq_names)
+    trap_consts = parse_rust_consts(loongarch_trap_rs, trap_names)
 
     for name in csr_names:
         require_equal(errors, name, asm_equ.get(name), csr_consts.get(name))
@@ -427,7 +428,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
 
     require_regex(
         errors,
-        csr_rs,
+        loongarch_csr_rs,
         r"pub\s+fn\s+set_sscratch\(value:\s*usize\)\s*\{\s*"
         r"set_ks0\(value\);"
         r"\s*dbar\(\);\s*\}",
@@ -435,14 +436,14 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"fn\s+clear_timer_interrupt\(\)\s*\{\s*csr::set_ticlr\(TICLR_CLR_TIMER\);"
         r"\s*csr::dbar\(\);\s*\}",
         "named LoongArch timer-clear helper with barrier",
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"pub\s+fn\s+install_trap_vector\(\)\s*\{\s*"
         r"let\s+addr\s*=\s*trap_entry\s+as\s+\*const\s+\(\)\s+as\s+usize;"
         r"\s*let\s+tlbr_addr\s*=\s*tlbr_entry\s+as\s+\*const\s+\(\)\s+as\s+usize;"
@@ -455,7 +456,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"pub\s+fn\s+init_timer\(\)\s*\{\s*clear_timer_interrupt\(\);.*?program_next_timer\(\);.*?"
         r"csr::set_ecfg\(csr::ecfg\(\)\s*\|\s*ECFG_LIE_TIMER\);"
         r"\s*csr::dbar\(\);",
@@ -463,16 +464,16 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     )
     require_regex(
         errors,
-        irq_rs,
+        loongarch_irq_rs,
         r"pub\s+fn\s+init_current_core\(\)\s*\{\s*"
-        r"super::ipi::init_ipi\(\);"
+        r"ipi::init_ipi\(\);"
         r"\s*super::csr::set_ecfg\(super::csr::ecfg\(\)\s*\|\s*ECFG_LIE_EXTIOI0\s*\|\s*ECFG_LIE_IPI\);"
         r"\s*super::csr::dbar\(\);",
         "LoongArch enables external/IPI interrupt lines with barrier",
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"fn\s+program_next_timer\(\)\s*\{\s*csr::set_tcfg\(0\);"
         r"\s*clear_timer_interrupt\(\);"
         r"\s*csr::dbar\(\);\s*\}",
@@ -480,7 +481,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"fn\s+program_idle_timer\(\)\s*\{.*?crate::kernel::smp::set_next_timer_deadline\(deadline\);.*?"
         r"csr::set_tcfg\(\(initval\s*<<\s*TCFG_INITVAL_SHIFT\)\s*\|\s*TCFG_ENABLE\);"
         r"\s*csr::dbar\(\);",
@@ -488,48 +489,48 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"pub\s+unsafe\s+fn\s+restore_user_context_with_kernel_lock\([^)]*\)\s*->\s*!\s*\{.*?program_next_timer\(\);.*?kernel_lock\.defer_unlock_for_user_restore\(\);.*?restore_user_context_locked\(ctx\)",
         "LoongArch locked restore reprograms timer before user entry",
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"fn\s+finish_kernel_exit\([^)]*\)\s*->\s*\*mut\s+UserContext\s*\{.*?program_next_timer\(\);.*?kernel_lock\.defer_unlock_for_user_restore\(\);.*?ctx",
         "LoongArch kernel exit reprograms timer before deferred unlock",
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"pub\s+fn\s+idle_scheduler_loop\(\)\s*->\s*!\s*\{.*?let\s+_\s*=\s*service_due_timer_interrupts\(\);",
         "LoongArch idle scheduler services due timers",
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"if\s+next\.is_null\(\)\s*\{.*?switch_to_kernel_vspace\(\);.*?program_idle_timer\(\);.*?None",
         "LoongArch idle scheduler reprograms timer before idle",
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"else\s*\{.*?switch_to_tcb_vspace\(next\);.*?program_next_timer\(\);.*?Some\(\(ctx,\s*kernel_lock\)\)",
         "LoongArch idle scheduler reprograms timer before user entry",
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"fn\s+service_pending_external_interrupt\(\)\s*->\s*bool\s*\{\s*"
-        r"let\s+Some\(irq\)\s*=\s*super::irq::claim_external_irq\(\)\s*else\s*\{\s*"
+        r"let\s+Some\(irq_num\)\s*=\s*irq::claim_external_irq\(\)\s*else\s*\{\s*"
         r"return\s+false;\s*\};\s*"
-        r"let\s+delivered\s*=\s*unsafe\s*\{\s*crate::object::irq::signal_irq\(irq\)\s*\};\s*"
-        r"if\s+!delivered\s*\{\s*super::irq::complete_external_irq\(irq\);\s*\}\s*"
+        r"let\s+delivered\s*=\s*unsafe\s*\{\s*crate::object::irq::signal_irq\(irq_num\)\s*\};\s*"
+        r"if\s+!delivered\s*\{\s*irq::complete_external_irq\(irq_num\);\s*\}\s*"
         r"true\s*\}",
         "LoongArch external IRQ service completes undelivered interrupts",
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"fn\s+should_signal_synthetic_timer_irq\(now:\s*u64\)\s*->\s*bool\s*\{.*?"
         r"if\s+crate::kernel::smp::current_core_id\(\)\s*!=\s*0\s*\{\s*return\s+false;.*?"
         r"NEXT_SYNTHETIC_TIMER_IRQ_DEADLINE\.store\(next,\s*Ordering::Release\);\s*"
@@ -538,11 +539,11 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"fn\s+handle_timer_interrupt\(\)\s*\{.*?"
         r"clear_timer_interrupt\(\);.*?"
         r"if\s+should_signal_synthetic_timer_irq\(now\)\s*\{\s*"
-        r"crate::object::irq::signal_irq\(super::irq::KERNEL_TIMER_IRQ\s+as\s+u64\);",
+        r"crate::object::irq::signal_irq\(irq::KERNEL_TIMER_IRQ\s+as\s+u64\);",
         "LoongArch timer interrupt signals synthetic kernel timer IRQ",
     )
     require_regex(
@@ -553,7 +554,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"fn\s+fault_message\([^)]*\)\s*->\s*\(u64,\s*u64,\s*\[u64;\s*16\]\)\s*\{.*?"
         r"mrs\[0\]\s*=\s*uc\.pc;.*?"
         r"mrs\[1\]\s*=\s*badv;.*?"
@@ -564,7 +565,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"mrs\[2\]\s*=\s*user_exception_number\(code\);.*?"
         r"fn\s+user_exception_number\(code:\s*usize\)\s*->\s*u64\s*\{.*?"
         r"EXCCODE_INE\s*=>\s*2,.*?"
@@ -573,7 +574,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"fn\s+vm_fault_fsr\(code:\s*usize,\s*subcode:\s*usize\)\s*->\s*Option<\(bool,\s*u64\)>\s*\{.*?"
         r"EXCCODE_PIF\s*\|\s*EXCCODE_PNX\s*=>\s*Some\(\(true,\s*VM_FAULT_FSR_INSTRUCTION\)\).*?"
         r"EXCCODE_PIS\s*\|\s*EXCCODE_PME\s*=>\s*Some\(\(false,\s*VM_FAULT_FSR_STORE\)\).*?"
@@ -597,7 +598,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"pub\s+fn\s+send_cap_fault_ipc\(uc:\s*&mut\s+UserContext,\s*addr:\s*u64,\s*in_recv_phase:\s*bool\)\s*->\s*bool\s*\{.*?"
         r"mrs\[0\]\s*=\s*uc\.restart_pc;.*?"
         r"mrs\[1\]\s*=\s*addr;.*?"
@@ -609,7 +610,7 @@ def audit_loongarch_trap_abi(errors: list[str], asm_equ: dict[str, int]) -> int:
     )
     require_regex(
         errors,
-        trap_rs,
+        loongarch_trap_rs,
         r"fn\s+send_unknown_syscall_fault\(uc:\s*&mut\s+UserContext,\s*sysno:\s*isize\)\s*->\s*bool\s*\{.*?"
         r"mrs\[0\]\s*=\s*uc\.restart_pc;.*?"
         r"mrs\[1\]\s*=\s*uc\.regs\[UserRegister::Sp\.index\(\)\];.*?"
@@ -670,8 +671,8 @@ def main(argv: list[str]) -> int:
     parser.parse_args(argv)
 
     target = target_from_env(PREFIX)
-    asm_path = ROOT_DIR / "kernel" / "src" / "arch" / target.name / "trap.S"
-    trap_rs_path = ROOT_DIR / "kernel" / "src" / "arch" / target.name / "trap.rs"
+    asm_path = trap_asm(target.name)
+    trap_rs_path = trap_rs(target.name)
     smp_rs_path = ROOT_DIR / "kernel" / "src" / "kernel" / "smp.rs"
     if not asm_path.is_file():
         if target.name == "x86_64":

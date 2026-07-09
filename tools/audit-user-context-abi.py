@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kernel_arch_paths import trap_rs
 from target_config import target_from_env
 from tool_common import ROOT_DIR, die, log
 
@@ -289,7 +290,7 @@ def audit_boot_rootserver_context(
         boot_rs,
         r"t\.context\.pc\s*=\s*args\.user_ventry\s+as\s+u64;.*?"
         r"t\.context\.restart_pc\s*=\s*args\.user_ventry\s+as\s+u64;.*?"
-        r"t\.context\.sstatus\s*=\s*crate::arch::current::trap::ROOTSERVER_SSTATUS;",
+        r"t\.context\.sstatus\s*=\s*ROOTSERVER_SSTATUS;",
         f"{target_name} rootserver PC/restart/sstatus initialisation",
     )
     require_regex(
@@ -317,17 +318,17 @@ def main(argv: list[str]) -> int:
     parser.parse_args(argv)
 
     target = target_from_env(PREFIX)
-    trap_rs = ROOT_DIR / "kernel" / "src" / "arch" / target.name / "trap.rs"
+    trap_rs_path = trap_rs(target.name)
     userspace_arch = ROOT_DIR / "userspace" / "xv6-host" / "src" / "arch" / f"{target.name}.rs"
-    if not trap_rs.is_file():
-        die(PREFIX, f"kernel trap source not found: {trap_rs}")
+    if not trap_rs_path.is_file():
+        die(PREFIX, f"kernel trap source not found: {trap_rs_path}")
     if not userspace_arch.is_file():
         if target.name == "x86_64":
             print("PASS: x86_64 seL4_UserContext userspace audit skipped for staged backend")
             return 0
         die(PREFIX, f"xv6-host arch source not found: {userspace_arch}")
 
-    kernel_regs = parse_kernel_context_regs(trap_rs, target.name)
+    kernel_regs = parse_kernel_context_regs(trap_rs_path, target.name)
     expected_regs = EXPECTED_CONTEXT_REGS[target.name]
     errors: list[str] = []
     if kernel_regs != expected_regs:

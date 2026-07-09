@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from kernel_arch_paths import arch_plat
 from target_config import target_from_env
 from tool_common import ROOT_DIR, die, log
 
@@ -435,7 +436,7 @@ def main(argv: list[str]) -> int:
 
     target = target_from_env(PREFIX)
     shared_platform_rs = ROOT_DIR / "userspace" / "xv6-abi" / "src" / "platform" / "mod.rs"
-    kernel_platform_rs = ROOT_DIR / "kernel" / "src" / "arch" / target.name / "platform.rs"
+    kernel_platform_rs = arch_plat(target.name)
     userspace_platform_rs = (
         ROOT_DIR / "userspace" / "xv6-abi" / "src" / "platform" / f"{target.name}.rs"
     )

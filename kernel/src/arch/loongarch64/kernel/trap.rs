@@ -15,9 +15,10 @@ use crate::abi::fault::FaultLabel;
 use crate::abi::syscall::SyscallNumber;
 use crate::abi::types::MessageInfo;
 use crate::api::cspace;
-use crate::arch::loongarch64::machine::csr;
 use crate::arch::loongarch64::machine::paging::{PAGE_SHIFT, PTE_V, PageTable, Pte, pt_index};
+use crate::arch::loongarch64::machine::{csr, irq};
 use crate::arch::loongarch64::object::vspace::{self, paddr_to_kpptr};
+use crate::arch::loongarch64::smp::ipi;
 use crate::object::cap::{Cap, CapTag};
 
 pub const LOONGARCH_NUM_FP_REGS: usize = 32;
@@ -285,7 +286,7 @@ const SYNTHETIC_TIMER_IRQ_INTERVAL_TICKS: u64 = 20_000;
 
 static NEXT_SYNTHETIC_TIMER_IRQ_DEADLINE: AtomicU64 = AtomicU64::new(0);
 
-global_asm!(include_str!("trap.S"));
+global_asm!(include_str!("../trap.S"));
 
 unsafe extern "C" {
     pub fn trap_entry();
@@ -1092,7 +1093,7 @@ fn handle_timer_interrupt() {
     let now = csr::time() as u64;
     unsafe {
         if should_signal_synthetic_timer_irq(now) {
-            crate::object::irq::signal_irq(super::irq::KERNEL_TIMER_IRQ as u64);
+            crate::object::irq::signal_irq(irq::KERNEL_TIMER_IRQ as u64);
         }
     }
     program_next_timer();
@@ -1105,7 +1106,7 @@ fn service_pending_interrupt(estat: usize) -> bool {
         serviced = true;
     }
     if ipi_pending(estat) {
-        serviced |= super::ipi::ack_ipi();
+        serviced |= ipi::ack_ipi();
     }
     if external_irq_pending(estat) {
         serviced |= service_pending_external_interrupt();
@@ -1114,12 +1115,12 @@ fn service_pending_interrupt(estat: usize) -> bool {
 }
 
 fn service_pending_external_interrupt() -> bool {
-    let Some(irq) = super::irq::claim_external_irq() else {
+    let Some(irq_num) = irq::claim_external_irq() else {
         return false;
     };
-    let delivered = unsafe { crate::object::irq::signal_irq(irq) };
+    let delivered = unsafe { crate::object::irq::signal_irq(irq_num) };
     if !delivered {
-        super::irq::complete_external_irq(irq);
+        irq::complete_external_irq(irq_num);
     }
     true
 }

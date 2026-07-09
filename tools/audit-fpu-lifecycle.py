@@ -854,7 +854,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="per-core owner state starts zeroed",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"static\s+FPU_OWNER\s*:\s*\[AtomicUsize;\s*MAX_NUM_NODES\]\s*=\s*"
             r"\[const\s*\{\s*AtomicUsize::new\(0\)\s*\};\s*MAX_NUM_NODES\];",
@@ -862,7 +862,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="per-core FPU access shadow starts disabled",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"static\s+FPU_ACCESS_ENABLED\s*:\s*\[AtomicBool;\s*MAX_NUM_NODES\]\s*=\s*"
             r"\[const\s*\{\s*AtomicBool::new\(false\)\s*\};\s*MAX_NUM_NODES\];",
@@ -870,7 +870,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="per-core FPU access shadow mirrors seL4 isFPUEnabled",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"fn\s+set_fs_off\(\)",
             r"csrc sstatus,\s*\{mask\}",
@@ -887,7 +887,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local FPU disable access is shadow-only like upstream disableFpu",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"pub\s+fn\s+disable_access\(\)",
             r"FPU_ACCESS_ENABLED\[core_index\(\)\]\.store\(false,\s*Ordering::Release\)",
@@ -900,7 +900,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local FPU enable access is shadow-only like upstream enableFpu",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"fn\s+enable_access\(\)",
             r"FPU_ACCESS_ENABLED\[core_index\(\)\]\.store\(true,\s*Ordering::Release\)",
@@ -913,7 +913,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local FPU helpers stay within seL4-used FS off/clean states",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"fn\s+set_fs_off\(\)",
             r"fn\s+set_fs_clean\(\)",
@@ -929,7 +929,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local RISC-V D FPU state layout matches upstream",
-        path="kernel/src/arch/riscv64/trap.rs",
+        path="kernel/src/arch/riscv64/kernel/trap.rs",
         patterns=(
             r"pub\s+const\s+RISCV_NUM_FP_REGS:\s*usize\s*=\s*32",
             r"pub\s+const\s+RISCV_FP_REG_BYTES:\s*usize\s*=\s*8",
@@ -949,7 +949,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local initial user sstatus leaves FS for lazy FPU restore",
-        path="kernel/src/arch/riscv64/trap.rs",
+        path="kernel/src/arch/riscv64/kernel/trap.rs",
         patterns=(
             r"pub\s+const\s+SSTATUS_SPIE:\s*u64\s*=\s*1\s*<<\s*5",
             r"pub\s+const\s+SSTATUS_FS_MASK:\s*u64\s*=\s*0b11\s*<<\s*13",
@@ -965,7 +965,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local RISC-V sstatus FS bit encoding matches upstream",
-        path="kernel/src/arch/riscv64/trap.rs",
+        path="kernel/src/arch/riscv64/kernel/trap.rs",
         patterns=(
             r"pub\s+const\s+SSTATUS_FS_MASK:\s*u64\s*=\s*0b11\s*<<\s*13",
             r"pub\s+const\s+SSTATUS_FS_CLEAN:\s*u64\s*=\s*0b10\s*<<\s*13",
@@ -978,7 +978,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local FPU zero constructors clear the saved FP image",
-        path="kernel/src/arch/riscv64/trap.rs",
+        path="kernel/src/arch/riscv64/kernel/trap.rs",
         patterns=(
             r"impl\s+FpuState",
             r"pub\s+const\s+fn\s+zero\(\)\s*->\s*Self",
@@ -993,7 +993,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local RISC-V fcsr CSR helpers match upstream",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"fn\s+read_fcsr\(\)\s*->\s*u32",
             r'asm!\("csrr \{0\}, fcsr"',
@@ -1005,7 +1005,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local RISC-V FPU save stores f0-f31 and fcsr",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"unsafe\s+fn\s+save_fpu_state\(thread:\s*\*mut Tcb\)",
             r"set_fs_clean\(\)",
@@ -1016,7 +1016,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local RISC-V FPU load restores f0-f31 and fcsr",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"unsafe\s+fn\s+load_fpu_state\(thread:\s*\*const Tcb\)",
             r"set_fs_clean\(\)",
@@ -1027,7 +1027,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local FPU save/load asm keeps FPU state memory visible",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"unsafe\s+fn\s+save_fpu_state\(thread:\s*\*mut Tcb\)",
             r"asm!\(",
@@ -1046,7 +1046,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="per-core FPU init matches seL4 reset shape",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"pub\s+fn\s+init_current_core\(\)",
             r"FPU_OWNER\[core\]\.store\(0,\s*Ordering::Release\)",
@@ -1083,7 +1083,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local owner switch spills old owner before loading new one",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"unsafe\s+fn\s+switch_local_owner",
             r"enable_access\(\)",
@@ -1097,7 +1097,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local FPU owner lookup scans per-core owner slots",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"fn\s+owner_core\(thread:\s*\*const Tcb\)\s*->\s*Option<usize>",
             r"if\s+thread\.is_null\(\)",
@@ -1112,7 +1112,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="lazy restore gates disabled TCBs and reuses native owner",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"pub\s+fn\s+lazy_restore",
             r"fpu_disabled_snapshot\(thread\)",
@@ -1140,7 +1140,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="FPU release uses owner lookup and remote owner switch",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"pub\s+fn\s+release",
             r"let\s+Some\(core\)\s*=\s*owner_core\(thread\)\s+else\s*\{\s*return;\s*\}",
@@ -1151,7 +1151,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local FPU release only clears current native owner",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(
             r"pub\s+fn\s+release\(thread:\s*\*mut Tcb\)",
             r"let\s+Some\(core\)\s*=\s*owner_core\(thread\)\s+else\s*\{\s*return;\s*\}",
@@ -1283,7 +1283,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="kernel exit user returns pass through the FPU restore boundary",
-        path="kernel/src/arch/riscv64/trap.rs",
+        path="kernel/src/arch/riscv64/kernel/trap.rs",
         patterns=(
             r"fn\s+kernel_exit\(",
             r"tcb::set_current\(next\)",
@@ -1429,7 +1429,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="no eager local owner release helper remains",
-        path="kernel/src/arch/riscv64/fpu.rs",
+        path="kernel/src/arch/riscv64/machine/fpu.rs",
         patterns=(),
         forbidden_patterns=(r"release_current_core_owner",),
     ),
@@ -1447,7 +1447,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local idle scheduler path clears current TCB without FPU release",
-        path="kernel/src/arch/riscv64/trap.rs",
+        path="kernel/src/arch/riscv64/kernel/trap.rs",
         patterns=(
             r"pub\s+fn\s+idle_scheduler_loop\(\)\s*->\s*!",
             r"let\s+next\s+=\s+crate::object::tcb::schedule\(\)",
@@ -1463,7 +1463,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local idle scheduler resumes runnable TCB through FPU restore boundary",
-        path="kernel/src/arch/riscv64/trap.rs",
+        path="kernel/src/arch/riscv64/kernel/trap.rs",
         patterns=(
             r"pub\s+fn\s+idle_scheduler_loop\(\)\s*->\s*!",
             r"crate::object::tcb::set_current\(next\)",
@@ -1497,7 +1497,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local RISC-V seL4 user-context ABI is centralized",
-        path="kernel/src/arch/riscv64/trap.rs",
+        path="kernel/src/arch/riscv64/kernel/trap.rs",
         patterns=(
             r"pub\s+const\s+SEL4_TCB_FRAME_REGS:\s*\[usize;\s*16\]\s*=\s*\[",
             r"0,\s*UserRegister::Ra\.index\(\),\s*UserRegister::Sp\.index\(\),\s*UserRegister::Gp\.index\(\)",
@@ -1564,7 +1564,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="RISC-V UserException fault message matches seL4 FPU-disabled trap shape",
-        path="kernel/src/arch/riscv64/trap.rs",
+        path="kernel/src/arch/riscv64/kernel/trap.rs",
         patterns=(
             r"IllegalInstruction\s*=\s*2",
             r"2\s*=>\s*Some\(Self::IllegalInstruction\)",
