@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rust Style"
+  short_description: "Follow the Rust Style Guide"
+  default_prompt: "Use $rust-style when editing Rust code so changes follow the Rust Style Guide and repository conventions."

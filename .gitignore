@@ -33,7 +33,6 @@ target
 /third_party/sel4test/build-*/
 
 /.cursor
-/.codex
 /.vscode
 
 .DS_Store

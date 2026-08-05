@@ -1,0 +1,4 @@
+interface:
+  display_name: "Microkernel Tools"
+  short_description: "Choose and run repo helper tools"
+  default_prompt: "Use $microkernel-tools to choose the right README/tools workflow for building, packing, running, and validating this repository."

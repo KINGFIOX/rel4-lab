@@ -1,0 +1,4 @@
+interface:
+  display_name: "Microkernel Rust Logging"
+  short_description: "Use log macros for kernel and userspace Rust logging"
+  default_prompt: "Use $microkernel-rust-logging when adding, changing, or reviewing Rust logging in this microkernel so kernel and userspace code use log macros such as info!, warn!, error!, debug!, or trace!, and do not introduce println!-style runtime logging."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Microkernel seL4 Alignment"
+  short_description: "Keep this microkernel aligned with seL4 behavior"
+  default_prompt: "Use $microkernel-sel4-alignment when changing, reviewing, or planning this Rust microkernel so kernel behavior stays aligned with upstream seL4, does not exceed seL4's implemented semantics, and does not treat formal verification as a current requirement."

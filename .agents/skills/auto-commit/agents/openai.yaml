@@ -1,0 +1,4 @@
+interface:
+  display_name: "Auto Commit"
+  short_description: "Always commit and push safe changes"
+  default_prompt: "Use $auto-commit by default after coding tasks: verify the change, stage only task-scoped files, create one focused commit, and push it safely."
