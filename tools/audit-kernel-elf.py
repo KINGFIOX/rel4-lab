@@ -147,6 +147,7 @@ class LayoutExpectation:
     vaddr_paddr_delta: int
     first_load_paddr: int
     max_load_end_paddr: int | None = None
+    kernel_start: int | None = None
 
 
 @dataclass(frozen=True)
@@ -177,9 +178,10 @@ EXPECTATIONS = {
     ),
     "x86_64": LayoutExpectation(
         machine=62,
-        entry=0xFFFF_FFFF_8020_0000,
-        vaddr_paddr_delta=0xFFFF_FFFF_8000_0000,
-        first_load_paddr=0x0020_0000,
+        entry=0x0010_0010,
+        vaddr_paddr_delta=0,
+        first_load_paddr=0x0010_0000,
+        kernel_start=0xFFFF_FFFF_8020_0000,
     ),
 }
 
@@ -491,7 +493,7 @@ def validate_header(header: ElfHeader, expectation: LayoutExpectation) -> list[s
 
 
 def validate_load_segments(
-    program_headers: list[ProgramHeader], expectation: LayoutExpectation
+    program_headers: list[ProgramHeader], expectation: LayoutExpectation, arch: str
 ) -> list[str]:
     errors: list[str] = []
     loads = [ph for ph in program_headers if ph.is_load]
@@ -503,7 +505,13 @@ def validate_load_segments(
         errors.append(
             f"first PT_LOAD paddr={first.paddr:#x}, expected {expectation.first_load_paddr:#x}"
         )
-    if first.vaddr != expectation.entry:
+    if arch == "x86_64":
+        if not (first.vaddr <= expectation.entry < first.end_vaddr):
+            errors.append(
+                f"x86 entry={expectation.entry:#x} is not covered by first PT_LOAD "
+                f"{first.vaddr:#x}..{first.end_vaddr:#x}"
+            )
+    elif first.vaddr != expectation.entry:
         errors.append(
             f"first PT_LOAD vaddr={first.vaddr:#x}, expected entry {expectation.entry:#x}"
         )
@@ -519,10 +527,15 @@ def validate_load_segments(
             errors.append(f"PT_LOAD[{idx}] has invalid alignment {segment.align:#x}")
         if segment.offset % segment.align != segment.vaddr % segment.align:
             errors.append(f"PT_LOAD[{idx}] file offset is not congruent with vaddr")
-        if segment.vaddr - segment.paddr != expectation.vaddr_paddr_delta:
+        expected_delta = (
+            expectation.kernel_start - 0x0020_0000
+            if arch == "x86_64" and idx > 0 and expectation.kernel_start is not None
+            else expectation.vaddr_paddr_delta
+        )
+        if segment.vaddr - segment.paddr != expected_delta:
             errors.append(
                 f"PT_LOAD[{idx}] vaddr-paddr delta is "
-                f"{segment.vaddr - segment.paddr:#x}, expected {expectation.vaddr_paddr_delta:#x}"
+                f"{segment.vaddr - segment.paddr:#x}, expected {expected_delta:#x}"
             )
         if (
             segment.flags & PF_X
@@ -575,9 +588,10 @@ def validate_symbols(
 
     if sym("_start") != expectation.entry:
         errors.append(f"_start={sym('_start'):#x}, expected {expectation.entry:#x}")
-    if sym("__kernel_start") != expectation.entry:
+    expected_kernel_start = expectation.kernel_start or expectation.entry
+    if sym("__kernel_start") != expected_kernel_start:
         errors.append(
-            f"__kernel_start={sym('__kernel_start'):#x}, expected {expectation.entry:#x}"
+            f"__kernel_start={sym('__kernel_start'):#x}, expected {expected_kernel_start:#x}"
         )
     if sym("__boot_bss_start") > sym("__boot_bss_end"):
         errors.append("__boot_bss_start is after __boot_bss_end")
@@ -664,10 +678,12 @@ def main(argv: list[str]) -> int:
 
     errors = [
         *validate_header(header, expectation),
-        *validate_load_segments(program_headers, expectation),
+        *validate_load_segments(program_headers, expectation, arch),
         *validate_symbols(symbols, program_headers, expectation, stack_expectation),
         *source_errors,
     ]
+    if arch == "x86_64" and data.find(bytes.fromhex("02b0ad1b03000000fb4f52e4")) == -1:
+        errors.append("x86_64 kernel ELF is missing a Multiboot1 header")
     if errors:
         for error in errors:
             log(PREFIX, f"FAIL: {error}")

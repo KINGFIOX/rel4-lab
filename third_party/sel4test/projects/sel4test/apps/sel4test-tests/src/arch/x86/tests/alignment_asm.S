@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 #include <autoconf.h>
-#define STACK_OFFSET_BYTES $(16 - (CONFIG_WORD_SIZE / 8))
-
 #ifdef CONFIG_ARCH_IA32
 #define SP esp
+#define STACK_OFFSET_BYTES $12
 #else
 #define SP rsp
+#define STACK_OFFSET_BYTES $8
 #endif
 
 .global align_test_asm

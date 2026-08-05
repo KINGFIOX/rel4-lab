@@ -22,6 +22,8 @@ from tool_common import (
 )
 from target_config import (
     image_name_from_env,
+    platform_from_env,
+    sel4_arch_from_env,
     sel4_build_dir_from_env,
     sel4_tree_dir_from_env,
     target_from_env,
@@ -68,15 +70,36 @@ def main(argv: list[str]) -> int:
     require_target_executable_elf(PREFIX, target, packed_image, "packed sel4test image")
     target.require_qemu(PREFIX)
 
-    cmd = [
-        *target.qemu_base_cmd(smp, "3072"),
-        "-kernel",
-        str(packed_image),
-        "-chardev",
-        f"file,id=kerneldebug,path={kernel_debug_log_file}",
-        "-device",
-        "pci-serial,chardev=kerneldebug,addr=1",
-    ]
+    if target.name == "x86_64":
+        kernel_image = Path(
+            getenv(
+                "KERNEL_IMAGE",
+                str(ROOT_DIR / "images" / f"kernel-{sel4_arch_from_env(target)}-{platform_from_env(target)}"),
+            )
+        )
+        if not kernel_image.is_file():
+            print(f"x86 kernel image not found at {kernel_image}", file=sys.stderr)
+            print("run tools/pack-image.py first", file=sys.stderr)
+            return 3
+        cmd = [
+            *target.qemu_base_cmd(smp, "512M"),
+            "-serial",
+            "mon:stdio",
+            "-kernel",
+            str(kernel_image),
+            "-initrd",
+            str(packed_image),
+        ]
+    else:
+        cmd = [
+            *target.qemu_base_cmd(smp, "3072"),
+            "-kernel",
+            str(packed_image),
+            "-chardev",
+            f"file,id=kerneldebug,path={kernel_debug_log_file}",
+            "-device",
+            "pci-serial,chardev=kerneldebug,addr=1",
+        ]
 
     kernel_debug_log_file.parent.mkdir(parents=True, exist_ok=True)
     kernel_debug_log_file.unlink(missing_ok=True)

@@ -15,6 +15,7 @@ KERNEL_PADDR_BASE = 0x00200000;
 KERNEL_OFFSET = KERNEL_ELF_BASE - KERNEL_PADDR_BASE;
 
 PHDRS {
+    phys   PT_LOAD FLAGS(0x7);
     boot   PT_LOAD FLAGS(0x7);
     text   PT_LOAD FLAGS(0x5);
     rodata PT_LOAD FLAGS(0x4);
@@ -23,6 +24,33 @@ PHDRS {
 }
 
 SECTIONS {
+    . = 1M;
+    __phys_start = .;
+
+    .mbh . : {
+        KEEP(*(.mbh))
+    } :phys
+
+    . = ALIGN(16);
+    .phys.text . : {
+        KEEP(*(.phys.text))
+        KEEP(*(.phys.text.*))
+    } :phys
+
+    .phys.rodata . : {
+        KEEP(*(.phys.rodata))
+        KEEP(*(.phys.rodata.*))
+    } :phys
+
+    . = ALIGN(4K);
+    .phys.bss . (NOLOAD) : {
+        __phys_bss_start = .;
+        *(.phys.bss)
+        *(.phys.bss.*)
+        . = ALIGN(4K);
+        __phys_bss_end = .;
+    } :phys
+
     . = KERNEL_ELF_BASE;
     __kernel_start = .;
 

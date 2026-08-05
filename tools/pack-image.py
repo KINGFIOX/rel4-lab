@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tool_common import (
     ROOT_DIR,
     bare_metal_tool_env,
+    command_exists,
     die,
     getenv,
     install_file,
@@ -79,6 +80,8 @@ def default_cmake_defs(target) -> dict[str, str]:
         values["KernelLoongArchExtD"] = "ON"
         values["KernelLoongArchExtF"] = "ON"
         values["KernelHaveFPU"] = "ON"
+    elif target.name == "x86_64":
+        values["CROSS_COMPILER_PREFIX"] = os.environ.get("CROSS_COMPILER_PREFIX", "x86_64-elf-")
     return values
 
 
@@ -237,10 +240,21 @@ def cmake_defs(build_dir: Path, cache: dict[str, str], target) -> list[str]:
     return [f"-D{key}={value}" for key, value in values.items()]
 
 
+def x86_kernel_image_name(target) -> str:
+    return f"kernel-{sel4_arch_from_env(target)}-{platform_from_env(target)}"
+
+
+def objcopy_from_strip(strip: str) -> str:
+    return os.environ.get("OBJCOPY", strip.removesuffix("strip") + "objcopy")
+
+
 def rust_kernel_env(build_dir: Path, target) -> dict[str, str]:
     cache = read_cmake_cache(build_dir / "CMakeCache.txt")
     values = effective_cmake_values(build_dir, cache, target)
     env = os.environ.copy()
+    # The image packer injects from the repository target directory below; ignore
+    # sandbox-specific target dirs so the build and injection paths stay paired.
+    env.pop("CARGO_TARGET_DIR", None)
     env["SMP"] = values["SMP"]
     env["NUM_NODES"] = values["NUM_NODES"]
     env["KERNEL_ROOT_CNODE_SIZE_BITS"] = os.environ.get("KERNEL_ROOT_CNODE_SIZE_BITS", "13")
@@ -379,6 +393,34 @@ def main() -> int:
 
         sel4_build_dir.mkdir(parents=True, exist_ok=True)
         ensure_sel4_configured(sel4_build_dir, target)
+
+        if target.name == "x86_64":
+            kernel_image_name = x86_kernel_image_name(target)
+            out_kernel_image = out_dir / kernel_image_name
+            objcopy = objcopy_from_strip(strip)
+            if not command_exists(objcopy):
+                die(PREFIX, f"{objcopy} not on PATH; set OBJCOPY for ARCH=x86_64")
+
+            log(PREFIX, "refreshing upstream x86 rootserver image...")
+            run(["ninja", f"images/{image_name}"], cwd=sel4_build_dir, env=cross_env)
+            require_file(
+                PREFIX,
+                sel4_build_dir / "images" / image_name,
+                "x86 rootserver image missing after upstream refresh",
+            )
+
+            log(PREFIX, "installing Rust kernel as x86 multiboot kernel image...")
+            run([objcopy, "-O", "elf32-i386", str(rust_kernel_elf), str(tmp_stripped)])
+            install_file(tmp_stripped, sel4_build_dir / "images" / kernel_image_name)
+
+            log(PREFIX, "installing x86 rootserver image...")
+            if rootserver_elf is not None:
+                install_file(rootserver_elf, sel4_build_dir / "images" / image_name)
+            install_file(sel4_build_dir / "images" / kernel_image_name, out_kernel_image)
+            install_file(sel4_build_dir / "images" / image_name, out_image)
+            log(PREFIX, f"kernel image ready: {out_kernel_image}")
+            log(PREFIX, f"rootserver image ready: {out_image}")
+            return 0
 
         if rootserver_elf is None:
             remove_files([sel4_build_dir / "elfloader" / "rootserver"])

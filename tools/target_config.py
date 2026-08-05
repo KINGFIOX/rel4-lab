@@ -170,16 +170,26 @@ class TargetConfig:
 
     def require_sel4_arch_source(self, prefix: str, sel4_tree_dir: Path) -> None:
         status = self.sel4_arch_source_status(sel4_tree_dir)
+        if self.name == "x86_64":
+            missing: list[str] = []
+            if not status.has_kernel_arch:
+                missing.append(status._relative_any(status.kernel_arch_dirs))
+            if not status.has_libsel4_arch:
+                missing.append(status._relative(status.libsel4_dir))
+            if not missing:
+                return
+            die(
+                prefix,
+                (
+                    f"official sel4test for ARCH={self.name} is not available in {sel4_tree_dir}; "
+                    f"missing {', '.join(missing)}. Add an x86 seL4/libsel4 port."
+                ),
+            )
         if status.is_ready:
             return
 
         if self.name == "loongarch64":
             port_hint = "Add a LoongArch seL4/libsel4/elfloader port"
-        elif self.name == "x86_64":
-            port_hint = (
-                "The vendored sel4test tree intentionally does not carry x86 elfloader "
-                "sources; set SEL4_TREE_DIR to a complete x86-capable sel4test tree"
-            )
         else:
             port_hint = f"Add an {self.name} seL4/libsel4/elfloader port"
         die(
@@ -264,7 +274,7 @@ TARGETS: dict[str, TargetConfig] = {
         strip="x86_64-elf-strip",
         qemu="qemu-system-x86_64",
         qemu_machine="pc",
-        qemu_cpu=None,
+        qemu_cpu="qemu64,+pdpe1gb,+syscall,+lm,enforce",
         qemu_bios=None,
         xv6_dir_name="xv6-x86_64",
         xv6_toolprefixes=(
