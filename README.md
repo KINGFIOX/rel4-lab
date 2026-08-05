@@ -6,10 +6,16 @@ top of a seL4-like capability ABI.
 
 The current rel4 scope intentionally keeps the scheduler simpler than upstream
 seL4 MCS: there are no `SchedContext`/`SchedControl` objects, dispatch is
-cooperative round-robin, priority values are accepted only as compatibility
+unprioritised round-robin, priority values are accepted only as compatibility
 metadata, and all domain values collapse into one effective scheduling domain.
-Repository user-space should not depend on priority scheduling, multiple
-domains, or timer preemption for correctness.
+
+There is no timeslice, quantum, or budget accounting, and no priority-driven
+preemption. Kernel exit does, however, perform an unconditional round-robin
+rotation for every trap cause, so a timer interrupt can involuntarily switch
+away from a running thread whenever another runnable thread is queued on the
+same core. The scheduler is therefore not cooperative. Repository user-space
+should neither depend on priority scheduling, multiple domains, or preemption
+for correctness, nor assume that a running thread executes uninterleaved.
 
 The repository has two main parts:
 

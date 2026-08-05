@@ -1645,7 +1645,7 @@ pub struct Tcb {
     /// `sret` once a scheduler picks the TCB.
     pub context: UserContext,
 
-    /// Cooperative round-robin scheduling state.
+    /// Unprioritised round-robin scheduling state.
     pub state: u8,
     pub affinity: u8,
     pub _sched_pad: [u8; 6],

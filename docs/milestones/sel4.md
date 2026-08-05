@@ -11,14 +11,29 @@ TCB/VSpace objects, and runs no_std user-space rootservers such as
 The kernel is intentionally no longer an MCS/RTOS-compatible seL4 kernel. The
 `SchedContext` and `SchedControl` object and invocation surface has been
 removed from both kernel and project user-space code. Current scheduling policy
-is a simpler cooperative round-robin model:
+is a simpler unprioritised round-robin model:
 
 - A runnable thread is scheduled by FIFO/round-robin runqueue order.
 - Explicit `Yield` rotates the current runnable TCB to the tail.
-- Scheduler decisions happen after explicit kernel events such as blocking,
-  unblocking, faults, suspend/resume, IPC, IRQ delivery, or yield.
-- Timer interrupts are retained for clock/IRQ delivery, not for quantum expiry
-  or involuntary timeslice preemption.
+- Kernel exit is a rotation point for every trap cause. `kernel_exit` appends
+  the current runnable thread to the tail of its core runqueue and then takes
+  the head, so any trap switches threads whenever another runnable thread is
+  queued on the same core. See `kernel_exit` in
+  `kernel/src/arch/riscv64/kernel/trap.rs` and
+  `kernel/src/arch/loongarch64/kernel/trap.rs`.
+- Timer interrupts therefore do cause involuntary context switches. This is the
+  same append-tail-and-reschedule mechanism as upstream non-MCS `timerTick` in
+  `third_party/sel4test/kernel/src/kernel/thread.c`, with an effective
+  `CONFIG_TIME_SLICE` of one tick. The scheduler must not be described as
+  cooperative or non-preemptive.
+- The rotation also fires for non-blocking syscalls, which upstream seL4 does
+  not do: seL4 resumes the current thread unless the scheduler action asked for
+  a switch. This is a known deviation, tracked in Remaining Kernel Work.
+- What is genuinely absent is accounting, not switching: there is no per-TCB
+  timeslice or quantum counter, and no consumed time is charged to a TCB or
+  scheduling context.
+- There is no priority-driven preemption. A thread never loses the CPU because
+  some other thread has a higher priority.
 - Priority and MCP APIs may be accepted for source compatibility, but priority
   values do not affect dispatch, IPC ordering, donation, inheritance, or
   fairness.
@@ -52,7 +67,7 @@ This project should currently be described as:
 ```text
 seL4-style capability microkernel
 + seL4 user-source portability subset
-+ rel4 cooperative round-robin scheduler
++ rel4 unprioritised round-robin scheduler without timeslice accounting
 ```
 
 It should not be described as:
@@ -60,7 +75,8 @@ It should not be described as:
 ```text
 complete seL4 MCS ABI implementation
 complete upstream sel4test-driver compatible kernel
-priority/domain/preemptive scheduler compatible with seL4
+priority-scheduling, multi-domain, or timeslice-accounting scheduler
+non-preemptive or cooperative-only scheduler
 ```
 
 Compatibility policies for the current rel4 scope:
@@ -73,9 +89,12 @@ Compatibility policies for the current rel4 scope:
 - Priority scheduling: `TCBSetPriority`, `TCBSetMCPriority`, and
   `TCBSetSchedParams` may validate basic shape/range/authority, but their
   values must not change runqueue placement or scheduler decisions.
-- Preemption: user-space must not depend on timer preemption for correctness,
-  progress, ordering, fairness, or timing. If interleaving is needed, use
-  explicit yield, blocking IPC, notifications, sleeps, or protocol state.
+- Preemption: involuntary switches do occur at kernel exit, but user-space must
+  not depend on them for correctness, progress, ordering, fairness, or timing,
+  and must equally not assume it runs uninterleaved. If interleaving is needed,
+  make it explicit with yield, blocking IPC, notifications, sleeps, or protocol
+  state. If exclusion is needed, make that explicit in protocol state too
+  rather than assuming the scheduler will not switch away.
 
 ## Current Validation
 
@@ -130,13 +149,13 @@ rootserver first.
 | Area | Current checkpoint |
 |------|--------------------|
 | Foundation | Boot under the upstream elfloader, rootserver bring-up, cap/object model, Sv39 VSpace support, IRQ/timer delivery, fault IPC, basic scheduler, and standard object finalisation are implemented for the current rel4 ABI subset. |
-| Scheduler policy | Cooperative round-robin scheduling is the intended rel4 policy. Priority, domain, MCS budget/refill, and timer-preemptive scheduler semantics are out of scope unless explicitly reintroduced. |
+| Scheduler policy | Unprioritised round-robin scheduling is the intended rel4 policy. Kernel exit rotates the runqueue for every trap cause, so timer interrupts do preempt. Priority scheduling, multiple domains, MCS budget/refill, and timeslice/quantum accounting stay out of scope unless explicitly reintroduced. |
 | seL4 ABI subset | Core CNode, Untyped, TCB, Endpoint, Notification, Reply, VSpace, ASID, IRQ, fault, and selected debug invocations remain seL4-style. MCS `SchedContext`/`SchedControl` invocations are removed. |
-| User-space portability | Repository user-space should build around explicit synchronization and should not rely on multiple domains, priority ordering, or preemption. Compatibility calls may remain only when they help the same source run on seL4 and rel4. |
+| User-space portability | Repository user-space should build around explicit synchronization, should not rely on multiple domains, priority ordering, or preemption, and should not assume uninterleaved execution either. Compatibility calls may remain only when they help the same source run on seL4 and rel4. |
 | CSpace/object lifecycle | CTE/MDB/CDT operations, final cap handling, Zombie remainders, CNode/TCB finalisation, endpoint/notification cleanup, reply cleanup, VSpace/ASID metadata, and IRQ cap publication use seL4-style ordering for the covered paths. |
 | RISC-V FPU alignment | The RISC-V FPU path remains tracked against upstream seL4 for the single-domain rel4 kernel. See `fpu-sel4-alignment.md` for the detailed requirement matrix and evidence gates. |
 | SMP/BKL | The big kernel lock remains the intentional seL4-style kernel-object mutation boundary. Per-core runqueues, remote TCB stall, remote FPU-owner release, IPI/RFENCE helpers, and all-hart ASID/TLB invalidation scaffolding exist, but broad stress coverage is still pending. |
-| xv6 compatibility | The xv6 user-space stack is the main current runtime smoke path. It should use explicit IPC/yield/blocking behavior rather than seL4 priority/domain/preemptive scheduler assumptions. |
+| xv6 compatibility | The xv6 user-space stack is the main current runtime smoke path. It should use explicit IPC/yield/blocking behavior rather than seL4 priority, domain, or timeslice-accounting scheduler assumptions. |
 
 ## Historical Notes
 
@@ -157,7 +176,8 @@ The remaining kernel work is now about tightening the rel4 subset rather than
 recovering full MCS behavior:
 
 1. Keep removing stale compatibility code whose only purpose is MCS,
-   priority-based dispatch, multi-domain scheduling, or timer preemption.
+   priority-based dispatch, multi-domain scheduling, or timeslice/budget
+   accounting.
 2. Harden CSpace/object lifecycle ordering for Delete/Revoke/finalise,
    especially exposed/remainder continuation cases and cross-object cleanup.
 3. Broaden IPC cap-transfer and endpoint-unwrapping coverage.
@@ -167,4 +187,12 @@ recovering full MCS behavior:
 5. Maintain seL4 alignment for object, IPC, VSpace, IRQ, FPU, and debug ABI
    behavior inside the explicit rel4 subset.
 6. Keep user-space portable by avoiding reliance on domains, priority, or
-   preemption, and by making ordering/progress explicit in protocols.
+   preemption, by not assuming uninterleaved execution, and by making
+   ordering/progress explicit in protocols.
+7. Decide the intended preemption policy and keep code and docs in agreement.
+   `kernel_exit` currently rotates the runqueue for every trap cause, so timer
+   interrupts preempt and non-blocking syscalls rotate too. Either gate the
+   rotation on trap cause and scheduler action so asynchronous interrupts
+   resume the current thread, or keep the rotation deliberately. Either way,
+   re-validate the sel4test cases that were disabled on the assumption that
+   rel4 never preempts (`FPU0001`, `SCHED0021`, `PREEMPT_REVOKE`).

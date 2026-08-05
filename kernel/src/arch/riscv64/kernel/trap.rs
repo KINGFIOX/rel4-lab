@@ -369,9 +369,13 @@ pub fn service_due_timer_interrupts() -> bool {
 ///
 /// Returns the `UserContext*` of the TCB the kernel wants to resume on
 /// the next `sret`. The asm trampoline takes the return value (in a0)
-/// straight into `restore_user_context`. By default we re-resume the
-/// trapping TCB; the scheduler may override this when the next round-robin TCB
-/// is runnable or the current one has blocked / been suspended.
+/// straight into `restore_user_context`.
+///
+/// Every trap cause ends in `kernel_exit`, which rotates the core runqueue, so
+/// the trapping TCB is resumed only when no other runnable thread is queued on
+/// this core, when `TCBResume` asked to continue the caller, or when the
+/// trapping TCB comes back around as the queue head. A timer interrupt is
+/// therefore a preemption point.
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> *mut UserContext {
     let kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
