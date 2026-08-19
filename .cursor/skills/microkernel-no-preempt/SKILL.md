@@ -57,7 +57,7 @@ Keep these behaviors available:
 1. Inspect existing diffs before editing with `git status --short` and task-scoped `git diff`.
 2. Keep preemption policy out of shared scheduler code before modifying architecture trap handlers.
 3. Keep the timer handlers in `kernel/src/arch/riscv64/kernel/trap.rs` focused on interrupt delivery and timer reprogramming, not quantum accounting. Note that the rotation itself lives in the shared `kernel_exit` path rather than in the timer handler, so review `kernel_exit` when changing switch policy.
-4. Keep runqueue operations deterministic: enqueue runnable threads at the tail and dequeue the selected thread. If you change when rescheduling happens, update `README.md` and `docs/milestones/sel4.md` in the same change so the described policy stays true.
+4. Keep runqueue operations deterministic: enqueue runnable threads at the tail and dequeue the selected thread. If you change when rescheduling happens, update `README.md` and `docs/kernel.md` in the same change so the described policy stays true.
 5. Keep RISC-V trap/timer behavior as the reference. The x86_64 backend is staged (no trap yet).
 6. When changing user-space owned by this project, write it so it remains correct on both seL4 and rel4 without relying on timer preemption; add explicit yield/blocking/synchronization where interleaving is required.
 

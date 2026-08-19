@@ -25,10 +25,12 @@ The repository has two main parts:
   that runs xv6 user programs through user-space services rather than an
   in-kernel Unix compatibility layer.
 
-Detailed status and historical notes live in:
+Current-state notes, written from the source tree:
 
-- [docs/milestones/sel4.md](docs/milestones/sel4.md)
-- [docs/milestones/xv6.md](docs/milestones/xv6.md)
+- [docs/kernel.md](docs/kernel.md)
+- [docs/userspace.md](docs/userspace.md)
+- [docs/fpu.md](docs/fpu.md)
+- [docs/tools.md](docs/tools.md)
 
 ## Repository Layout
 
@@ -47,7 +49,7 @@ microkernel/
 |   |-- sel4test/              # upstream seL4/sel4test submodule tree
 |   `-- xv6-riscv/             # upstream xv6 tree for user programs/fs.img
 |-- tools/                     # build, pack, QEMU, and test helpers
-`-- docs/milestones/           # detailed project status
+`-- docs/                      # current-state notes (from source)
 ```
 
 ## Prerequisites

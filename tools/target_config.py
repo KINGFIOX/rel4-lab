@@ -268,8 +268,6 @@ def normalize_arch(value: str) -> str:
     normalized = value.strip().lower().replace("_", "-")
     if normalized in ("", "riscv", "riscv64", "rv64"):
         return "riscv64"
-    if normalized in ("loongarch", "loongarch64", "la64"):
-        die("target", "ARCH=loongarch64 has been removed; supported: riscv64, x86_64")
     if normalized in ("x86-64", "x86_64", "amd64"):
         return "x86_64"
     return normalized

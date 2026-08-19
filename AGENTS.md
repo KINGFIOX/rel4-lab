@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository is a Rust workspace for an RV64 seL4-style microkernel with a staged x86_64 backend and a user-space xv6 compatibility stack. `kernel/` contains the kernel crate, with subsystem modules under `kernel/src/` such as `arch/`, `object/`, `api/`, `machine/`, and `abi/`. Architecture backends live under `kernel/src/arch/{riscv64,x86_64}` using a seL4-style compile-time `sel4_arch` / `machine` / `plat` split. `userspace/` contains no_std user libraries and servers: `sel4-user`, `uart-server`, `virtio-disk-server`, `vfs-server`, `xv6fs-server`, `xv6-host`, and `xv6-abi`. Build, QEMU, packing, and test helpers live in `tools/`. Milestone notes are in `docs/milestones/`. Vendored external code is under `third_party/`; avoid changing it unless the task explicitly concerns upstream xv6 or seL4 lab material.
+This repository is a Rust workspace for an RV64 seL4-style microkernel with a staged x86_64 backend and a user-space xv6 compatibility stack. `kernel/` contains the kernel crate, with subsystem modules under `kernel/src/` such as `arch/`, `object/`, `api/`, `machine/`, and `abi/`. Architecture backends live under `kernel/src/arch/{riscv64,x86_64}` using a seL4-style compile-time `sel4_arch` / `machine` / `plat` split. `userspace/` contains no_std user libraries and servers: `sel4-user`, `uart-server`, `virtio-disk-server`, `vfs-server`, `xv6fs-server`, `xv6-host`, and `xv6-abi`. Build, QEMU, packing, and test helpers live in `tools/`. Current-state notes are in `docs/`. Vendored external code is under `third_party/`; avoid changing it unless the task explicitly concerns upstream xv6 or seL4 lab material.
 
 ## Build, Test, and Development Commands
 
