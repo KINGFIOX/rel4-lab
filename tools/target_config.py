@@ -188,10 +188,7 @@ class TargetConfig:
         if status.is_ready:
             return
 
-        if self.name == "loongarch64":
-            port_hint = "Add a LoongArch seL4/libsel4/elfloader port"
-        else:
-            port_hint = f"Add an {self.name} seL4/libsel4/elfloader port"
+        port_hint = f"Add an {self.name} seL4/libsel4/elfloader port"
         die(
             prefix,
             (
@@ -239,30 +236,6 @@ TARGETS: dict[str, TargetConfig] = {
         xv6_mabi="lp64",
         xv6_disk_transport="virtio-mmio",
     ),
-    "loongarch64": TargetConfig(
-        name="loongarch64",
-        rust_target="loongarch64-unknown-none",
-        sel4_arch="loongarch64",
-        sel4_source_arch="loongarch",
-        platform="qemu-loongarch64-virt",
-        image_name="sel4test-driver-image-loongarch64-qemu-loongarch64-virt",
-        default_sel4_build_dir=DEFAULT_SEL4_TREE_DIR / "build-loongarch64",
-        strip="loongarch64-unknown-linux-gnu-strip",
-        qemu="qemu-system-loongarch64",
-        qemu_machine="virt",
-        qemu_cpu=None,
-        qemu_bios=None,
-        xv6_dir_name="xv6-loongarch64",
-        xv6_toolprefixes=(
-            "loongarch64-none-elf-",
-            "loongarch64-unknown-none-",
-            "loongarch64-unknown-linux-gnu-",
-            "loongarch64-linux-gnu-",
-        ),
-        xv6_march="loongarch64",
-        xv6_mabi="lp64d",
-        xv6_disk_transport="virtio-pci",
-    ),
     "x86_64": TargetConfig(
         name="x86_64",
         rust_target="x86_64-unknown-none",
@@ -296,7 +269,7 @@ def normalize_arch(value: str) -> str:
     if normalized in ("", "riscv", "riscv64", "rv64"):
         return "riscv64"
     if normalized in ("loongarch", "loongarch64", "la64"):
-        return "loongarch64"
+        die("target", "ARCH=loongarch64 has been removed; supported: riscv64, x86_64")
     if normalized in ("x86-64", "x86_64", "amd64"):
         return "x86_64"
     return normalized
@@ -308,8 +281,6 @@ def arch_from_env() -> str:
         return normalize_arch(arch)
 
     rust_target = os.environ.get("RUST_TARGET", "")
-    if rust_target.startswith("loongarch64-"):
-        return "loongarch64"
     if rust_target.startswith("x86_64-"):
         return "x86_64"
     return "riscv64"
@@ -367,12 +338,5 @@ def infer_toolprefix_for(target: TargetConfig, extra_prefixes: Sequence[str] = (
     return None
 
 
-def require_supported_xv6_user_abi(prefix: str, target: TargetConfig, mabi: str) -> None:
-    if target.name == "loongarch64" and mabi != target.xv6_mabi:
-        die(
-            prefix,
-            (
-                f"ARCH=loongarch64 currently requires XV6_USER_MABI={target.xv6_mabi}; "
-                "the LoongArch xv6 compatibility stack is configured for double-float."
-            ),
-        )
+def require_supported_xv6_user_abi(_prefix: str, _target: TargetConfig, _mabi: str) -> None:
+    return

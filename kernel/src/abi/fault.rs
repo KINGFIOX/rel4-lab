@@ -7,7 +7,6 @@ pub enum FaultLabel {
     CapFault,
     UnknownSyscall,
     UserException,
-    #[cfg(not(target_arch = "loongarch64"))]
     Timeout,
     VmFault,
 }
@@ -18,7 +17,6 @@ impl FaultLabel {
             Self::CapFault => 1,
             Self::UnknownSyscall => 2,
             Self::UserException => 3,
-            #[cfg(not(target_arch = "loongarch64"))]
             Self::Timeout => 5,
             Self::VmFault => 5,
         }

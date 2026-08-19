@@ -1,9 +1,8 @@
 //! Compile-time ABI constants.
 //!
 //! RISC-V values are frozen against the upstream `qemu-riscv-virt` build of
-//! the official seL4 kernel. LoongArch values are staging constants for the
-//! in-tree QEMU `virt` bring-up until a matching seL4 LoongArch port is
-//! available locally.
+//! the official seL4 kernel. x86_64 values follow the pc99 / high-half
+//! kernel window used by the staged backend.
 
 #![allow(dead_code)]
 
@@ -98,17 +97,6 @@ pub const KERNEL_ELF_BASE: usize = PPTR_TOP + (PHYS_BASE_RAW & ((1usize << 30) -
 // PA = VA - (PPTR_TOP - PADDR_BASE) when kernel-window-mapped:
 //   PADDR_BASE = 0 ⇒ kernel window maps VA[PPTR_BASE..PPTR_TOP) → PA[0..2^38)
 #[cfg(target_arch = "riscv64")]
-pub const PADDR_BASE: usize = 0;
-
-#[cfg(target_arch = "loongarch64")]
-pub const PHYS_BASE_RAW: usize = 0x0020_0000;
-#[cfg(target_arch = "loongarch64")]
-pub const PPTR_BASE: usize = 0x0;
-#[cfg(target_arch = "loongarch64")]
-pub const PPTR_TOP: usize = 0x0000_0002_0000_0000;
-#[cfg(target_arch = "loongarch64")]
-pub const KERNEL_ELF_BASE: usize = PHYS_BASE_RAW;
-#[cfg(target_arch = "loongarch64")]
 pub const PADDR_BASE: usize = 0;
 
 #[cfg(target_arch = "x86_64")]

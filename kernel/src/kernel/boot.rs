@@ -675,90 +675,12 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     }
 }
 
-#[cfg(target_arch = "loongarch64")]
-fn log_arch_restore_state(
-    root_pt: *mut PageTable,
-    entry: usize,
-    bootinfo: usize,
-    stack_top: usize,
-) {
-    use crate::abi::constants::WORD_BYTES;
-    use crate::arch::current::machine::csr;
-
-    info!(
-        "  loongarch64 restore csr: crmd={:#x} prmd={:#x} eentry={:#x} pgdl={:#x} pgdh={:#x} asid={:#x} pwcl={:#x} pwch={:#x} stlbps={:#x}",
-        csr::crmd(),
-        csr::prmd(),
-        csr::eentry(),
-        csr::pgdl(),
-        csr::pgdh(),
-        csr::asid(),
-        csr::pwcl(),
-        csr::pwch(),
-        csr::stlbps(),
-    );
-    for (label, va) in [
-        ("entry", entry),
-        ("bootinfo", bootinfo),
-        ("stack", stack_top - WORD_BYTES),
-    ] {
-        log_loongarch64_pte_walk(root_pt, label, va);
-    }
-}
-
-#[cfg(not(target_arch = "loongarch64"))]
 fn log_arch_restore_state(
     _root_pt: *mut PageTable,
     _entry: usize,
     _bootinfo: usize,
     _stack_top: usize,
 ) {
-}
-
-#[cfg(target_arch = "loongarch64")]
-fn log_loongarch64_pte_walk(root_pt: *mut PageTable, label: &str, va: usize) {
-    let l2_idx = pt_index(va, 2);
-    let l1_idx = pt_index(va, 1);
-    let l0_idx = pt_index(va, 0);
-    let l2 = unsafe { (*root_pt).entries[l2_idx] };
-    if !l2.is_valid() || l2.is_leaf() {
-        info!(
-            "  loongarch64 pte {} va={:#x}: l2[{}]={:#x}",
-            label,
-            va,
-            l2_idx,
-            l2.raw(),
-        );
-        return;
-    }
-    let l1_pt = paddr_to_kpptr(l2.next_pt_paddr() as usize) as *mut PageTable;
-    let l1 = unsafe { (*l1_pt).entries[l1_idx] };
-    if !l1.is_valid() || l1.is_leaf() {
-        info!(
-            "  loongarch64 pte {} va={:#x}: l2[{}]={:#x} l1[{}]={:#x}",
-            label,
-            va,
-            l2_idx,
-            l2.raw(),
-            l1_idx,
-            l1.raw(),
-        );
-        return;
-    }
-    let l0_pt = paddr_to_kpptr(l1.next_pt_paddr() as usize) as *mut PageTable;
-    let l0 = unsafe { (*l0_pt).entries[l0_idx] };
-    info!(
-        "  loongarch64 pte {} va={:#x}: l2[{}]={:#x} l1[{}]={:#x} l0[{}]={:#x} pa={:#x}",
-        label,
-        va,
-        l2_idx,
-        l2.raw(),
-        l1_idx,
-        l1.raw(),
-        l0_idx,
-        l0.raw(),
-        l0.leaf_pa(),
-    );
 }
 
 /// Map a contiguous VA range of the user image to its PA range. Both VAs

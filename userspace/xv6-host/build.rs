@@ -3,7 +3,6 @@ use std::fs;
 use std::path::PathBuf;
 
 const RISCV_ELF_MACHINE: u16 = 243;
-const LOONGARCH64_ELF_MACHINE: u16 = 258;
 const ELF_TYPE_EXECUTABLE: u16 = 2;
 
 fn main() {
@@ -110,7 +109,6 @@ fn linker_script_for_target(manifest_dir: &PathBuf) -> PathBuf {
     let target = env::var("TARGET").unwrap();
     let filename = match target.as_str() {
         "riscv64gc-unknown-none-elf" => "linker-riscv64.ld",
-        "loongarch64-unknown-none" => "linker-loongarch64.ld",
         _ => panic!("unsupported target for xv6-host: {target}"),
     };
     manifest_dir.join(filename)
@@ -169,7 +167,6 @@ fn expected_machine_for_target() -> u16 {
     let target = env::var("TARGET").unwrap();
     match target.as_str() {
         "riscv64gc-unknown-none-elf" => RISCV_ELF_MACHINE,
-        "loongarch64-unknown-none" => LOONGARCH64_ELF_MACHINE,
         _ => panic!("unsupported target for xv6-host: {target}"),
     }
 }

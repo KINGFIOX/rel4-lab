@@ -20,9 +20,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use sel4_user::{call_checked, msg_info, sel4_yield};
 
 static NEXT_PID: AtomicU64 = AtomicU64::new(2);
-#[cfg(target_arch = "loongarch64")]
-const ARCH_FORK_EXTRA_SLOTS: usize = 1;
-#[cfg(not(target_arch = "loongarch64"))]
 const ARCH_FORK_EXTRA_SLOTS: usize = 0;
 
 pub(crate) fn sys_fork(

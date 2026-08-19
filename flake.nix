@@ -28,7 +28,6 @@
 
         crossToolchains = [
           pkgs.pkgsCross.riscv64-embedded.buildPackages.gcc
-          pkgs.pkgsCross.loongarch64-linux-embedded.buildPackages.gcc
           pkgs.pkgsCross.x86_64-embedded.buildPackages.gcc
         ];
 
@@ -40,7 +39,6 @@
             ];
             targets = [
               "riscv64gc-unknown-none-elf"
-              "loongarch64-unknown-none"
               "x86_64-unknown-none"
             ];
           })
