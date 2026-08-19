@@ -1,5 +1,5 @@
 //! High-level kernel boot path: set up the rootserver VSpace, initial CSpace,
-//! TCB caps, `seL4_BootInfo`, and then `sret` into the root task.
+//! TCB caps, `seL4_BootInfo`, and then return to the root task.
 
 use core::cell::UnsafeCell;
 use core::ptr;
@@ -12,7 +12,6 @@ use crate::abi::constants::{
     SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
 };
 use crate::arch::current::api::UserContext;
-use crate::arch::current::sel4_arch;
 use crate::arch::current::kernel::BOOT_PROFILE;
 use crate::arch::current::kernel::trap::{
     init_timer, install_trap_vector, restore_user_context_with_kernel_lock,
@@ -26,6 +25,7 @@ use crate::arch::current::object::vspace::{
     vspace_root_for,
 };
 use crate::arch::current::plat::{DEVICE_UNTYPED_REGIONS, FREE_RAM_REGIONS};
+use crate::arch::current::sel4_arch;
 use crate::kernel::bootmem;
 use crate::object::cap::{Cap, FRAME_RIGHTS_READ_WRITE, FRAME_SIZE_4K};
 use crate::object::cnode::{Cte, cnode_bytes, install_initial_cap, with_cnode_at};

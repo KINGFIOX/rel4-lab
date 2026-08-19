@@ -3,6 +3,7 @@ pub mod fpu;
 pub mod irq;
 pub mod paging;
 pub mod plic;
+pub mod tlb;
 
 #[inline]
 pub fn current_scratch() -> usize {
@@ -21,15 +22,15 @@ pub fn full_memory_barrier() {
 
 #[inline]
 pub fn tlb_flush_all() {
-    csr::sfence_vma_all();
+    tlb::flush_all();
 }
 
 #[inline]
 pub fn tlb_flush_asid(asid: usize) {
-    csr::sfence_vma_asid(asid);
+    tlb::flush_asid(asid);
 }
 
 #[inline]
 pub fn tlb_flush_vaddr(vaddr: usize) {
-    csr::sfence_vma_va(vaddr);
+    tlb::flush_vaddr(vaddr);
 }

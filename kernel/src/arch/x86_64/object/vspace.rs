@@ -1,10 +1,10 @@
 use crate::abi::constants::{KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE, PPTR_TOP};
 use crate::arch::x86_64::machine::paging::{
-    PTE_G, PTE_KERNEL_RWX, PTE_PRESENT, PTE_PS, PTE_USER_RW, PTE_USER_RWX,
-    PTE_USER_RX, PTE_W, PageTable, Pte, pt_index,
+    PTE_G, PTE_KERNEL_RWX, PTE_PRESENT, PTE_PS, PTE_USER_RW, PTE_USER_RWX, PTE_USER_RX, PTE_W,
+    PageTable, Pte, pt_index,
 };
+use crate::arch::x86_64::machine::registers;
 use crate::kernel::smp::{BklCell, BklObjectGuard};
-use crate::arch::x86_64::machine::registers as csr;
 
 pub const USER_ROOT_ENTRIES: usize = 256;
 pub const USER_TOP: usize = USER_ROOT_ENTRIES << (12 + 9 * 2);
@@ -155,29 +155,18 @@ pub unsafe fn unmap_user_frame(
 
 pub unsafe fn reclaim_user_page_tables(_root: *mut PageTable) {}
 
-pub unsafe fn switch_satp(satp_val: u64) {
-    unsafe {
-        core::arch::asm!(
-            "mov cr3, {}",
-            in(reg) satp_val as usize,
-            options(nostack, preserves_flags)
-        );
-    }
-    csr::sfence_vma_all();
+pub unsafe fn switch_cr3(cr3: u64) {
+    registers::write_cr3(cr3 as usize);
 }
 
-pub fn current_satp() -> u64 {
-    let cr3: usize;
-    unsafe {
-        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
-    }
-    cr3 as u64
+pub fn current_cr3() -> u64 {
+    registers::read_cr3() as u64
 }
 
 pub fn set_current_vspace_root() {
-    if let Some(kernel_satp) = crate::kernel::smp::kernel_satp() {
-        if current_satp() != kernel_satp {
-            unsafe { switch_satp(kernel_satp) };
+    if let Some(kernel_root) = crate::kernel::smp::kernel_vspace_root() {
+        if current_cr3() != kernel_root {
+            unsafe { switch_cr3(kernel_root) };
         }
     }
 }
@@ -240,10 +229,18 @@ pub fn make_boot_root_pt() -> *mut PageTable {
     root
 }
 
-pub fn satp_for(root: *mut PageTable, _asid: u64) -> u64 {
+pub fn cr3_for(root: *mut PageTable, _asid: u64) -> u64 {
     kpptr_to_paddr(root as usize) as u64
 }
 
-pub fn satp_from_kva(root_kva: u64, _asid: u64) -> u64 {
+pub fn cr3_from_kva(root_kva: u64, _asid: u64) -> u64 {
     kva_to_page_table_paddr(root_kva as usize).unwrap_or(0) as u64
+}
+
+pub fn vspace_root_for(root: *mut PageTable, asid: u64) -> u64 {
+    cr3_for(root, asid)
+}
+
+pub unsafe fn switch_vspace(root: u64) {
+    unsafe { switch_cr3(root) }
 }

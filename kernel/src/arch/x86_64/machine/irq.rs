@@ -1,3 +1,5 @@
+//! Staged LAPIC / IOAPIC placeholders. Delivery is not wired yet.
+
 pub const IOAPIC_MAX_IRQ: usize = 255;
 pub const KERNEL_TIMER_IRQ: usize = IOAPIC_MAX_IRQ + 1;
 pub const MAX_IRQ: usize = KERNEL_TIMER_IRQ;

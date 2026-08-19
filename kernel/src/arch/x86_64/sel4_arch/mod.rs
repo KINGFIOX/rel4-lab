@@ -4,8 +4,10 @@
 pub mod invocation;
 pub mod object_type;
 
-pub use invocation::ArchInvocation;
 pub use object_type::ObjectType;
+
+/// Opaque address-space root programmed by `switch_vspace`.
+pub type VspaceRoot = u64;
 
 use crate::object::cap::Cap;
 
@@ -34,9 +36,7 @@ pub const SEL4_USER_CONTEXT_REGS: [usize; 32] = [
 pub const SEL4_TCB_FRAME_REGS: [usize; 16] = [
     FAULT_IP, RSP, FLAGS, RAX, 3, 4, 5, 6, 7, R8, R9, R10, 18, 19, R15, RSI,
 ];
-pub const SEL4_TCB_GP_REGS: [usize; 16] = [
-    FS_BASE, 23, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-];
+pub const SEL4_TCB_GP_REGS: [usize; 16] = [FS_BASE, 23, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -57,8 +57,7 @@ impl FpuState {
 }
 
 /// seL4 x86_64 user context. `regs` is the kernel trap-save array, not the
-/// compact libsel4 `seL4_UserContext` struct. Named field aliases keep the
-/// shared TCB/boot paths from talking about `sstatus`.
+/// compact libsel4 `seL4_UserContext` struct.
 #[repr(C)]
 #[derive(Default)]
 pub struct UserContext {
@@ -165,29 +164,54 @@ impl UserContext {
     }
 }
 
-#[repr(usize)]
+/// seL4 x86_64 syscall-register aliases used by shared TCB/IPC helpers.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum UserRegister {
-    Ra = RAX,
-    Sp = RSP,
-    Gp = RDI,
-    Tp = FS_BASE,
-    T0 = RAX,
-    A0 = RDI,
-    A1 = RSI,
-    A2 = R10,
-    A3 = R8,
-    A4 = R9,
-    A5 = R15,
-    A6 = 5,
-    A7 = RAX,
+    Rip,
+    Rsp,
+    Rflags,
+    Rax,
+    Rdi,
+    Rsi,
+    R10,
+    R8,
+    R9,
+    R15,
+    FsBase,
 }
 
 impl UserRegister {
     pub const fn index(self) -> usize {
-        self as usize
+        match self {
+            Self::Rip => FAULT_IP,
+            Self::Rsp => RSP,
+            Self::Rflags => FLAGS,
+            Self::Rax => RAX,
+            Self::Rdi => RDI,
+            Self::Rsi => RSI,
+            Self::R10 => R10,
+            Self::R8 => R8,
+            Self::R9 => R9,
+            Self::R15 => R15,
+            Self::FsBase => FS_BASE,
+        }
     }
 }
+
+/// Fault-reply register slots. Index 0 is the fault PC sentinel.
+pub const UNKNOWN_SYSCALL_REPLY_REGS: [usize; 10] = [
+    0,
+    UserRegister::Rsp.index(),
+    UserRegister::Rax.index(),
+    UserRegister::Rdi.index(),
+    UserRegister::Rsi.index(),
+    UserRegister::R10.index(),
+    UserRegister::R8.index(),
+    UserRegister::R9.index(),
+    UserRegister::R15.index(),
+    5,
+];
+pub const USER_EXCEPTION_SP_REG: usize = UserRegister::Rsp.index();
 
 pub fn init_user_context(context: &mut UserContext) {
     context.regs[FLAGS] = 0x202;

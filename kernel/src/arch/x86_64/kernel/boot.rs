@@ -180,7 +180,10 @@ struct MultibootInfoPart1 {
 const MULTIBOOT_MAGIC: usize = 0x2bad_b002;
 const MULTIBOOT_INFO_MODS_FLAG: u32 = 1 << 3;
 
-fn parse_multiboot_boot_args(multiboot_magic: usize, multiboot_info: usize) -> crate::kernel::boot::BootArgs {
+fn parse_multiboot_boot_args(
+    multiboot_magic: usize,
+    multiboot_info: usize,
+) -> crate::kernel::boot::BootArgs {
     if multiboot_magic != MULTIBOOT_MAGIC {
         panic!("x86_64 bootloader did not provide Multiboot1 handoff");
     }
@@ -232,7 +235,7 @@ pub extern "C" fn init_kernel(
     user_ventry: usize,
     dtb_pa: usize,
     dtb_size: usize,
-    hart_id: usize,
+    cpu_id: usize,
     core_id: usize,
 ) -> ! {
     let _ = unsafe {
@@ -249,7 +252,7 @@ pub extern "C" fn init_kernel(
         user_ventry,
         dtb_pa,
         dtb_size,
-        cpu_id: hart_id,
+        cpu_id,
         core_id,
     };
     crate::kernel::boot::bringup_rootserver(&args)

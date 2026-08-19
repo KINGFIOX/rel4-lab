@@ -177,6 +177,7 @@ def audit_object_size_bits(errors: list[str]) -> None:
 
 def audit_userspace_arch(errors: list[str], target_name: str) -> None:
     if target_name == "x86_64":
+        # Userspace x86_64 is not present yet; the kernel backend is staged.
         return
     expectation = ARCH_EXPECTATIONS[target_name]
     path = ROOT_DIR / "userspace" / "sel4-user" / "src" / "arch" / f"{target_name}.rs"
@@ -276,6 +277,7 @@ def audit_userspace_common(errors: list[str]) -> None:
 
 def audit_kernel_trap(errors: list[str], target_name: str) -> None:
     if target_name == "x86_64":
+        # Trap decode is not wired; this is a staged backend, not a leftover ISA.
         return
     path = trap_rs(target_name)
     rel = path.relative_to(ROOT_DIR)

@@ -1,3 +1,5 @@
+//! pc99 / QEMU q35 constants for the staged x86_64 backend.
+
 pub const PCI_ECAM_BASE_PA: usize = 0xe000_0000;
 pub const PCI_IO_BASE_PA: usize = 0;
 pub const PCI_DEBUG_UART_PORT: usize = 0x3f8;

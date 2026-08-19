@@ -2,10 +2,6 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering, fence};
 
 use sel4_user::{LABEL_IRQ_ACK, info, msg_info, msg_label, sel4_call, warn};
-use xv6_abi::platform::current::{
-    LOONGARCH64_PCIE_MEM_BASE, XV6_PCIE_ECAM_MAP_SIZE, XV6_PCIE_ECAM_VADDR, XV6_PCIE_IO_MAP_SIZE,
-    XV6_PCIE_IO_VADDR, XV6_PCIE_MEM_MAP_SIZE, XV6_PCIE_MEM_VADDR,
-};
 use xv6_abi::{
     FS_BLOCK_SIZE, VIRTIO_BLK_DEVICE_ID, VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_SECTOR_SIZE,
     VIRTIO_BLK_T_FLUSH, VIRTIO_CONFIG_S_ACKNOWLEDGE, VIRTIO_CONFIG_S_DRIVER,
@@ -67,7 +63,15 @@ const VIRTIO_PCI_QUEUE_DRIVER: u64 = 0x28;
 const VIRTIO_PCI_QUEUE_DEVICE: u64 = 0x30;
 const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 
-const LOONGARCH64_PCIE_IO_PORT_BASE: u64 = 0x4000;
+// Staged pc99 PCI windows. Wired when the x86_64 userspace backend lands.
+const X86_64_PCIE_MEM_BASE: u64 = 0x8000_0000;
+const X86_64_PCIE_IO_PORT_BASE: u64 = 0x1000;
+const XV6_PCIE_ECAM_VADDR: u64 = 0x5001_0000;
+const XV6_PCIE_ECAM_MAP_SIZE: u64 = 0x0010_0000;
+const XV6_PCIE_MEM_VADDR: u64 = 0x5011_0000;
+const XV6_PCIE_MEM_MAP_SIZE: u64 = 0x0001_0000;
+const XV6_PCIE_IO_VADDR: u64 = 0x5012_0000;
+const XV6_PCIE_IO_MAP_SIZE: u64 = 0x0000_c000;
 
 static DMA_PADDR: AtomicU64 = AtomicU64::new(0);
 static USED_IDX: AtomicU16 = AtomicU16::new(0);
@@ -365,8 +369,8 @@ fn discover_virtio_blk() -> Option<VirtioPciDevice> {
 }
 
 fn assign_pci_bars(function: PciFunction) {
-    let mut next_mem = LOONGARCH64_PCIE_MEM_BASE;
-    let mut next_io = LOONGARCH64_PCIE_IO_PORT_BASE + 0x1000;
+    let mut next_mem = X86_64_PCIE_MEM_BASE;
+    let mut next_io = X86_64_PCIE_IO_PORT_BASE + 0x1000;
     let mut bar = 0u8;
     while bar < 6 {
         let reg = PCI_BAR0 + bar as u64 * 4;
@@ -390,7 +394,7 @@ fn assign_pci_bars(function: PciFunction) {
             next_io = align_up(next_io, size);
             if next_io
                 .checked_add(size)
-                .is_none_or(|end| end > LOONGARCH64_PCIE_IO_PORT_BASE + XV6_PCIE_IO_MAP_SIZE)
+                .is_none_or(|end| end > X86_64_PCIE_IO_PORT_BASE + XV6_PCIE_IO_MAP_SIZE)
             {
                 warn!(
                     "virtio-disk-server: no PCI I/O space for BAR{} size={:#x}",
@@ -436,7 +440,7 @@ fn assign_pci_bars(function: PciFunction) {
         next_mem = align_up(next_mem, size);
         if next_mem
             .checked_add(size)
-            .is_none_or(|end| end > LOONGARCH64_PCIE_MEM_BASE + XV6_PCIE_MEM_MAP_SIZE)
+            .is_none_or(|end| end > X86_64_PCIE_MEM_BASE + XV6_PCIE_MEM_MAP_SIZE)
         {
             warn!(
                 "virtio-disk-server: no PCI mem space for BAR{} size={:#x}",
@@ -769,7 +773,7 @@ enum PciBarKind {
 }
 
 fn map_mem_paddr(paddr: u64, length: u64) -> Option<u64> {
-    let offset = paddr.checked_sub(LOONGARCH64_PCIE_MEM_BASE)?;
+    let offset = paddr.checked_sub(X86_64_PCIE_MEM_BASE)?;
     if offset.checked_add(length)? > XV6_PCIE_MEM_MAP_SIZE {
         warn!(
             "virtio-disk-server: PCI mem BAR range outside mapped window paddr={:#x} len={:#x}",
@@ -781,7 +785,7 @@ fn map_mem_paddr(paddr: u64, length: u64) -> Option<u64> {
 }
 
 fn map_io_port(port: u64, length: u64) -> Option<u64> {
-    let offset = port.checked_sub(LOONGARCH64_PCIE_IO_PORT_BASE)?;
+    let offset = port.checked_sub(X86_64_PCIE_IO_PORT_BASE)?;
     if offset.checked_add(length)? > XV6_PCIE_IO_MAP_SIZE {
         warn!(
             "virtio-disk-server: PCI I/O BAR range outside mapped window port={:#x} len={:#x}",

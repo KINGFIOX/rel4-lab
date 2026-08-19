@@ -39,6 +39,10 @@ def trap_rs(target_name: str) -> Path:
     return arch_kernel(target_name, "trap.rs")
 
 
+def trap_scratch_rs(target_name: str) -> Path:
+    return arch_kernel(target_name, "trap_scratch.rs")
+
+
 def boot_rs(target_name: str) -> Path:
     return arch_kernel(target_name, "boot.rs")
 

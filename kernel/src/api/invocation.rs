@@ -1,7 +1,7 @@
 //! Cap-type-specific invocation handlers.
 //!
 //! Each function consumes the cap that was looked up plus the message
-//! arguments (mr0..mr3 in `UserContext.a2..a5`, mr4+ in the IPC buffer)
+//! arguments (mr0..mr3 in message registers, mr4+ in the IPC buffer)
 //! and either mutates kernel state to perform the requested action or
 //! returns a `SyscallError` for the caller to relay.
 
@@ -13,14 +13,14 @@ use crate::abi::types::MessageInfo;
 use crate::api::cspace;
 use crate::api::syscall::SyscallError;
 use crate::api::thread::Thread;
-use crate::arch::current::sel4_arch::ObjectType;
-use crate::arch::current::sel4_arch::invocation as arch_inv;
 use crate::arch::current::api::{
     SEL4_TCB_FRAME_REGS, SEL4_TCB_GP_REGS, SEL4_USER_CONTEXT_REGS, SEL4_USER_CONTEXT_WORDS,
-    UserContext, UserRegister,
+    UserContext,
 };
 use crate::arch::current::machine::paging::{PAGE_SIZE, PageTable};
 use crate::arch::current::object::vspace;
+use crate::arch::current::sel4_arch::ObjectType;
+use crate::arch::current::sel4_arch::invocation as arch_inv;
 use crate::kernel::smp::{BklCell, debug_assert_kernel_lock_held};
 use crate::object::cap::{
     Cap, CapTag, FRAME_RIGHTS_KERNEL_ONLY, FRAME_RIGHTS_READ_ONLY, FRAME_RIGHTS_READ_WRITE,
@@ -805,11 +805,7 @@ pub fn handle_irq_control(
                 return Err(SyscallError::TruncatedMessage);
             }
             require_extra_caps(uc, 1)?;
-            (
-                uc.mr(0),
-                uc.mr(1),
-                uc.mr(2) & 0xff,
-            )
+            (uc.mr(0), uc.mr(1), uc.mr(2) & 0xff)
         }
         id if id == arch_inv::IRQ_ISSUE_IRQ_HANDLER_TRIGGER => {
             if length < 4 {
@@ -1237,8 +1233,11 @@ fn handle_thread_inner(
                 None
             };
             if count >= 2 && length >= 4 {
-                reg_updates[UserRegister::Ra.index()] = uc.mr(3);
-                reg_update_valid[UserRegister::Ra.index()] = true;
+                let frame1 = SEL4_USER_CONTEXT_REGS[1];
+                if frame1 != 0 {
+                    reg_updates[frame1] = uc.mr(3);
+                    reg_update_valid[frame1] = true;
+                }
             }
             let mut regs = [(0usize, 0u64); 32];
             let mut reg_count = 0;

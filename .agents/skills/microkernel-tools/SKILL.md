@@ -1,6 +1,6 @@
 ---
 name: microkernel-tools
-description: Choose and run the repository helper tools for this Rust RV64 seL4/xv6 microkernel workspace. Use when Codex needs a tool mindset for README.md and tools/, including formatting, cargo checks, kernel image packing, sel4test, QEMU simulation, xv6 fs image builds, xv6 user-program runs, xv6 shell runs, logs, timeouts, and environment variables.
+description: Choose and run the repository helper tools for this Rust RV64 seL4/xv6 microkernel workspace with a staged x86_64 kernel backend. Use when Codex needs a tool mindset for README.md and tools/, including formatting, cargo checks, kernel image packing, sel4test, QEMU simulation, xv6 fs image builds, xv6 user-program runs, xv6 shell runs, logs, timeouts, and environment variables.
 ---
 
 # Microkernel Tools

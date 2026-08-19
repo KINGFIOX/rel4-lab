@@ -68,7 +68,7 @@ EXPECTED_BOOT_HANDOFF_FIELDS = (
     "user_ventry",
     "dtb_pa",
     "dtb_size",
-    "hart_id",
+    "cpu_id",
     "core_id",
 )
 
@@ -199,15 +199,15 @@ def read_smp_stack_expectation() -> StackExpectation:
     constants: dict[str, int] = {}
     for match in RUST_USIZE_CONST_RE.finditer(path.read_text()):
         name = match.group("name")
-        if name not in ("MAX_BOOT_HARTS", "KERNEL_STACK_BYTES"):
+        if name not in ("MAX_BOOT_CPUS", "KERNEL_STACK_BYTES"):
             continue
         constants[name] = eval_rust_usize_expr(match.group("expr"), constants)
-    missing = {"MAX_BOOT_HARTS", "KERNEL_STACK_BYTES"} - constants.keys()
+    missing = {"MAX_BOOT_CPUS", "KERNEL_STACK_BYTES"} - constants.keys()
     if missing:
         die(PREFIX, f"missing SMP stack constants in {path}: {', '.join(sorted(missing))}")
     return StackExpectation(
         per_hart_bytes=constants["KERNEL_STACK_BYTES"],
-        max_harts=constants["MAX_BOOT_HARTS"],
+        max_harts=constants["MAX_BOOT_CPUS"],
     )
 
 

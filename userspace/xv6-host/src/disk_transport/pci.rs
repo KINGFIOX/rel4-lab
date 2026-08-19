@@ -1,10 +1,19 @@
 use sel4_user::{call_checked, cap_rights};
-use xv6_abi::platform::current::{
-    LOONGARCH64_PCH_MSI_BASE, LOONGARCH64_PCIE_ECAM_BASE, LOONGARCH64_PCIE_IO_BASE,
-    LOONGARCH64_PCIE_LEGACY_IRQ_BASE, LOONGARCH64_PCIE_MEM_BASE, XV6_PCIE_ECAM_MAP_SIZE,
-    XV6_PCIE_ECAM_VADDR, XV6_PCIE_IO_MAP_SIZE, XV6_PCIE_IO_VADDR, XV6_PCIE_MEM_MAP_SIZE,
-    XV6_PCIE_MEM_VADDR, XV6_PCIE_MSI_MAP_SIZE, XV6_PCIE_MSI_VADDR,
-};
+
+// Staged pc99 PCI windows. Wired when the x86_64 userspace backend lands.
+const X86_64_PCIE_ECAM_BASE: u64 = 0xe000_0000;
+const X86_64_PCIE_IO_BASE: u64 = 0;
+const X86_64_PCIE_MEM_BASE: u64 = 0x8000_0000;
+const X86_64_PCIE_LEGACY_IRQ_BASE: u64 = 16;
+const X86_64_PCH_MSI_BASE: u64 = 0xfee0_0000;
+const XV6_PCIE_ECAM_VADDR: u64 = 0x5001_0000;
+const XV6_PCIE_ECAM_MAP_SIZE: u64 = 0x0010_0000;
+const XV6_PCIE_MEM_VADDR: u64 = 0x5011_0000;
+const XV6_PCIE_MEM_MAP_SIZE: u64 = 0x0001_0000;
+const XV6_PCIE_IO_VADDR: u64 = 0x5012_0000;
+const XV6_PCIE_IO_MAP_SIZE: u64 = 0x0001_0000;
+const XV6_PCIE_MSI_VADDR: u64 = 0x5013_0000;
+const XV6_PCIE_MSI_MAP_SIZE: u64 = 0x1000;
 
 use crate::allocator::Allocator;
 use crate::consts::{
@@ -30,7 +39,7 @@ pub(crate) fn issue_irq_handler(alloc: &mut Allocator, disk_irq_ntfn: u64) -> u6
         LABEL_IRQ_ISSUE_IRQ_HANDLER,
         &[ROOT_CNODE],
         &[
-            LOONGARCH64_PCIE_LEGACY_IRQ_BASE,
+            X86_64_PCIE_LEGACY_IRQ_BASE,
             disk_irq_handler,
             ROOT_CNODE_DEPTH,
         ],
@@ -58,7 +67,7 @@ pub(crate) fn append_device_frame_maps(
         alloc,
         maps,
         len,
-        LOONGARCH64_PCIE_ECAM_BASE,
+        X86_64_PCIE_ECAM_BASE,
         XV6_PCIE_ECAM_VADDR,
         XV6_PCIE_ECAM_MAP_SIZE,
     );
@@ -66,7 +75,7 @@ pub(crate) fn append_device_frame_maps(
         alloc,
         maps,
         len,
-        LOONGARCH64_PCIE_MEM_BASE,
+        X86_64_PCIE_MEM_BASE,
         XV6_PCIE_MEM_VADDR,
         XV6_PCIE_MEM_MAP_SIZE,
     );
@@ -74,7 +83,7 @@ pub(crate) fn append_device_frame_maps(
         alloc,
         maps,
         len,
-        LOONGARCH64_PCIE_IO_BASE,
+        X86_64_PCIE_IO_BASE,
         XV6_PCIE_IO_VADDR,
         XV6_PCIE_IO_MAP_SIZE,
     );
@@ -82,7 +91,7 @@ pub(crate) fn append_device_frame_maps(
         alloc,
         maps,
         len,
-        LOONGARCH64_PCH_MSI_BASE,
+        X86_64_PCH_MSI_BASE,
         XV6_PCIE_MSI_VADDR,
         XV6_PCIE_MSI_MAP_SIZE,
     );

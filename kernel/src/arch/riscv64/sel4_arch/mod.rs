@@ -12,6 +12,9 @@ pub use crate::arch::riscv64::kernel::trap::{
 };
 pub use object_type::ObjectType;
 
+/// Opaque address-space root programmed by `switch_vspace`.
+pub type VspaceRoot = u64;
+
 use crate::arch::riscv64::kernel::trap::UserRegister as Reg;
 
 impl UserContext {
@@ -101,6 +104,21 @@ impl UserContext {
         self.set_mr(3, 0);
     }
 }
+
+/// Fault-reply register slots. Index 0 is the fault PC sentinel.
+pub const UNKNOWN_SYSCALL_REPLY_REGS: [usize; 10] = [
+    0,
+    UserRegister::Sp.index(),
+    UserRegister::Ra.index(),
+    UserRegister::A0.index(),
+    UserRegister::A1.index(),
+    UserRegister::A2.index(),
+    UserRegister::A3.index(),
+    UserRegister::A4.index(),
+    UserRegister::A5.index(),
+    UserRegister::A6.index(),
+];
+pub const USER_EXCEPTION_SP_REG: usize = UserRegister::Sp.index();
 
 pub fn init_user_context(context: &mut UserContext) {
     context.sstatus = USER_SSTATUS;

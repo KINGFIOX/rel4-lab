@@ -210,18 +210,8 @@ def audit_boot_rootserver_context(
     require_regex(
         errors,
         boot_rs,
-        r"t\.context\.pc\s*=\s*args\.user_ventry\s+as\s+u64;.*?"
-        r"t\.context\.restart_pc\s*=\s*args\.user_ventry\s+as\s+u64;.*?"
-        r"t\.context\.sstatus\s*=\s*ROOTSERVER_SSTATUS;",
-        f"{target_name} rootserver PC/restart/sstatus initialisation",
-    )
-    require_regex(
-        errors,
-        boot_rs,
-        rf"t\.context\.regs\[UserRegister::A0\.index\(\)\]\s*=\s*USER_BOOTINFO_VA\s+as\s+u64;.*?"
-        rf"t\.context\.regs\[UserRegister::A1\.index\(\)\]\s*=\s*0;.*?"
-        rf"t\.context\.regs\[UserRegister::Sp\.index\(\)\]\s*=\s*USER_STACK_TOP\s+as\s+u64;",
-        f"{target_name} rootserver a0/a1/sp initialisation",
+        r"sel4_arch::init_rootserver_context\(",
+        f"{target_name} rootserver context initialisation",
     )
     expected = {
         "A0": a0,

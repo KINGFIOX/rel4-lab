@@ -44,7 +44,8 @@ use crate::abi::types::MessageInfo;
 use crate::api::cspace::{self, lookup_cap};
 use crate::api::invocation::derive_cap_for_copy;
 use crate::api::thread;
-use crate::arch::current::api::{UserContext, UserRegister};
+use crate::arch::current::api::UserContext;
+use crate::arch::current::sel4_arch::{UNKNOWN_SYSCALL_REPLY_REGS, USER_EXCEPTION_SP_REG};
 use crate::object::cap::{Cap, CapTag};
 use crate::object::cnode::Cte;
 use crate::object::endpoint::{self, EpState};
@@ -532,12 +533,12 @@ unsafe fn consume_bound_notification_if_active(cur: *mut tcb::Tcb, uc: &mut User
 
 unsafe fn write_bound_notification_reply(cur: *mut tcb::Tcb, uc: &mut UserContext, badge: u64) {
     unsafe {
-        uc.regs[UserRegister::A0.index()] = badge;
-        uc.regs[UserRegister::A1.index()] = 0;
-        uc.regs[UserRegister::A2.index()] = 0;
-        uc.regs[UserRegister::A3.index()] = 0;
-        uc.regs[UserRegister::A4.index()] = 0;
-        uc.regs[UserRegister::A5.index()] = 0;
+        uc.set_cap_reg(badge);
+        uc.set_msg_info(0);
+        uc.set_mr(0, 0);
+        uc.set_mr(1, 0);
+        uc.set_mr(2, 0);
+        uc.set_mr(3, 0);
         tcb::zero_ipc_buffer_words(cur, 1, MR_REG_COUNT as usize);
     }
 }
@@ -618,8 +619,8 @@ unsafe fn complete_receive_from_sender(
 /// (true → `seL4_Send`) or drop (false → `seL4_NBSend`) when no
 /// receiver is waiting.
 pub fn send(uc: &mut UserContext, blocking: bool, _reply_rights: bool) {
-    let cptr = uc.regs[UserRegister::A0.index()];
-    let info = MessageInfo(uc.regs[UserRegister::A1.index()]);
+    let cptr = uc.cap_reg();
+    let info = MessageInfo(uc.msg_info());
 
     let (cap, ep, badge) = match lookup_endpoint(cptr) {
         Some(v) => v,
@@ -686,7 +687,7 @@ pub fn recv_mcs(uc: &mut UserContext, blocking: bool, reply_cptr: u64) {
 }
 
 fn recv_with_reply(uc: &mut UserContext, blocking: bool, reply_cptr: u64) {
-    let cptr = uc.regs[UserRegister::A0.index()];
+    let cptr = uc.cap_reg();
 
     let (cap, ep, _) = match lookup_endpoint(cptr) {
         Some(v) => v,
@@ -779,8 +780,8 @@ fn recv_with_reply(uc: &mut UserContext, blocking: bool, reply_cptr: u64) {
 /// reply object to the caller, and parks the caller on `BlockedOnReply`. No
 /// receiver waiting -> queue as a Call sender.
 pub fn call(uc: &mut UserContext) {
-    let cptr = uc.regs[UserRegister::A0.index()];
-    let info = MessageInfo(uc.regs[UserRegister::A1.index()]);
+    let cptr = uc.cap_reg();
+    let info = MessageInfo(uc.msg_info());
 
     let (cap, ep, badge) = match lookup_endpoint(cptr) {
         Some(v) => v,
@@ -900,7 +901,7 @@ pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb) {
     if cur.is_null() {
         return;
     }
-    let info = MessageInfo(uc.regs[UserRegister::A1.index()]);
+    let info = MessageInfo(uc.msg_info());
     unsafe {
         let mut wake_caller = true;
         let (was_fault, fault_label) = tcb::sender_fault_snapshot(caller);
@@ -956,7 +957,7 @@ unsafe fn apply_user_exception_reply(
             pc = Some(reply_mr(sender, uc, 0));
         }
         if n >= 2 {
-            regs[reg_count] = (UserRegister::Sp.index(), reply_mr(sender, uc, 1));
+            regs[reg_count] = (USER_EXCEPTION_SP_REG, reply_mr(sender, uc, 1));
             reg_count += 1;
         }
         tcb::write_user_context(caller, pc, &regs[..reg_count]);
@@ -965,10 +966,10 @@ unsafe fn apply_user_exception_reply(
 
 unsafe fn reply_mr(sender: *mut tcb::Tcb, uc: &UserContext, i: usize) -> u64 {
     match i {
-        0 => uc.regs[UserRegister::A2.index()],
-        1 => uc.regs[UserRegister::A3.index()],
-        2 => uc.regs[UserRegister::A4.index()],
-        3 => uc.regs[UserRegister::A5.index()],
+        0 => uc.mr(0),
+        1 => uc.mr(1),
+        2 => uc.mr(2),
+        3 => uc.mr(3),
         _ => unsafe {
             let buf = tcb::ipc_buffer_kva_snapshot(sender);
             if buf == 0 {
@@ -986,18 +987,7 @@ unsafe fn apply_unknown_syscall_reply(
     caller: *mut tcb::Tcb,
     length: u64,
 ) {
-    const SYSCALL_REPLY_REGS: [usize; 10] = [
-        0,
-        UserRegister::Sp.index(),
-        UserRegister::Ra.index(),
-        UserRegister::A0.index(),
-        UserRegister::A1.index(),
-        UserRegister::A2.index(),
-        UserRegister::A3.index(),
-        UserRegister::A4.index(),
-        UserRegister::A5.index(),
-        UserRegister::A6.index(),
-    ];
+    const SYSCALL_REPLY_REGS: [usize; 10] = UNKNOWN_SYSCALL_REPLY_REGS;
 
     let n = (length as usize).min(SYSCALL_REPLY_REGS.len());
     let mut pc = None;
@@ -1020,7 +1010,7 @@ unsafe fn apply_unknown_syscall_reply(
 /// `seL4_ReplyRecv`: send on the explicit Reply cap selected by the syscall
 /// wrapper, then immediately Recv on the supplied EP cap.
 pub fn reply_recv(uc: &mut UserContext) {
-    let reply_cptr = uc.regs[UserRegister::A6.index()];
+    let reply_cptr = uc.reply_reg();
     if reply_cptr != 0 {
         crate::api::syscall::do_reply_recv_mcs(uc);
     } else {
@@ -1035,12 +1025,12 @@ pub fn reply_recv(uc: &mut UserContext) {
 /// Clears the returned badge/info/MR registers so userspace never observes
 /// stale trap-entry state for an empty receive.
 fn write_empty_reply(uc: &mut UserContext) {
-    uc.regs[UserRegister::A0.index()] = 0;
-    uc.regs[UserRegister::A1.index()] = 0;
-    uc.regs[UserRegister::A2.index()] = 0;
-    uc.regs[UserRegister::A3.index()] = 0;
-    uc.regs[UserRegister::A4.index()] = 0;
-    uc.regs[UserRegister::A5.index()] = 0;
+    uc.set_cap_reg(0);
+    uc.set_msg_info(0);
+    uc.set_mr(0, 0);
+    uc.set_mr(1, 0);
+    uc.set_mr(2, 0);
+    uc.set_mr(3, 0);
     // Clear MR[0..3] in the IPC buffer too so seL4_GetMR sees zeros.
     thread::zero_current_ipc_buffer_words(1, MR_REG_COUNT as usize);
 }

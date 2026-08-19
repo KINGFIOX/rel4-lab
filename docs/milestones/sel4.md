@@ -111,6 +111,8 @@ cargo check
   passed
 cargo build --release --target riscv64gc-unknown-none-elf -p kernel
   passed
+cargo build --release --target x86_64-unknown-none -p kernel
+  passed
 
 SEL4TEST_REGEX='Test that there are tests' ARCH=riscv64 ./tools/pack-image.py
   image ready
@@ -133,6 +135,7 @@ The current preferred validation ladder is:
 cargo fmt --all --check
 cargo check
 cargo build --release --target riscv64gc-unknown-none-elf -p kernel
+cargo build --release --target x86_64-unknown-none -p kernel
 TIMEOUT=90 ARCH=riscv64 ./tools/run-xv6-user.py echo hello
 ```
 
@@ -194,3 +197,7 @@ recovering full MCS behavior:
    resume the current thread, or keep the rotation deliberately. Either way,
    re-validate the sel4test cases that were disabled on the assumption that
    rel4 never preempts (`FPU0001`, `SCHED0021`, `PREEMPT_REVOKE`).
+8. Wire the staged x86_64 backend: IDT/syscall, LAPIC timer, IOAPIC, and
+   pc99 boot. The architecture contract (`sel4_arch`, PML4/PDPT/PD/PT object
+   types, CR3/invlpg hooks) is in place so that work can stay out of shared
+   MI code.

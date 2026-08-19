@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from kernel_arch_paths import trap_asm, trap_rs
+from kernel_arch_paths import trap_asm, trap_rs, trap_scratch_rs
 from target_config import target_from_env
 from tool_common import ROOT_DIR, die, log
 
@@ -96,7 +96,7 @@ def main(argv: list[str]) -> int:
     target = target_from_env(PREFIX)
     asm_path = trap_asm(target.name)
     trap_rs_path = trap_rs(target.name)
-    smp_rs_path = ROOT_DIR / "kernel" / "src" / "kernel" / "smp.rs"
+    trap_scratch_path = trap_scratch_rs(target.name)
     if not asm_path.is_file():
         if target.name == "x86_64":
             print("PASS: x86_64 trap layout audit skipped; backend is staged (no trap yet)")
@@ -104,10 +104,12 @@ def main(argv: list[str]) -> int:
         die(PREFIX, f"trap assembly not found: {asm_path}")
     if not trap_rs_path.is_file():
         die(PREFIX, f"trap Rust source not found: {trap_rs_path}")
+    if not trap_scratch_path.is_file():
+        die(PREFIX, f"trap scratch Rust source not found: {trap_scratch_path}")
 
     asm_equ = parse_equ(asm_path)
     rust_offsets = {
-        **parse_rust_offsets(smp_rs_path, {"TrapScratch"}),
+        **parse_rust_offsets(trap_scratch_path, {"TrapScratch"}),
         **parse_rust_offsets(trap_rs_path, {"UserContext", "TrapRecord"}),
     }
     errors: list[str] = []

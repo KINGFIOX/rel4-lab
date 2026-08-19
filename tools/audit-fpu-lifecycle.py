@@ -1061,7 +1061,7 @@ CHECKS: tuple[Check, ...] = (
         path="kernel/src/kernel/boot.rs",
         patterns=(
             r"pub\s+fn\s+bringup_rootserver",
-            r"init_current_hart\(args\.hart_id,\s*args\.core_id\)",
+            r"init_current_cpu\(args\.cpu_id,\s*args\.core_id\)",
             r"fpu::init_current_core\(\)",
             r"install_trap_vector\(\)",
         ),
@@ -1127,14 +1127,14 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="local TCB FS-state helper clears then conditionally enables FS",
-        path="kernel/src/object/tcb.rs",
+        path="kernel/src/arch/riscv64/sel4_arch/mod.rs",
         patterns=(
-            r"pub\(crate\)\s+unsafe\s+fn\s+set_fpu_context_enabled\(tcb:\s*\*mut Tcb,\s*enabled:\s*bool\)",
-            r"let\s+sstatus\s*=\s*\(\*tcb\)\.context\.sstatus\s*&\s*!SSTATUS_FS_MASK",
-            r"\(\*tcb\)\.context\.sstatus\s*=\s*if\s+enabled",
-            r"sstatus\s*\|\s*SSTATUS_FS_CLEAN",
+            r"pub\s+fn\s+set_fpu_context_enabled\(context:\s*&mut UserContext,\s*enabled:\s*bool\)",
+            r"let\s+status\s*=\s*context\.sstatus\s*&\s*!SSTATUS_FS_MASK",
+            r"context\.sstatus\s*=\s*if\s+enabled",
+            r"status\s*\|\s*SSTATUS_FS_CLEAN",
             r"else",
-            r"sstatus",
+            r"status",
         ),
         ordered=True,
     ),
@@ -1191,7 +1191,7 @@ CHECKS: tuple[Check, ...] = (
             r"pub\s+unsafe\s+fn\s+init\(tcb_kva:\s*u64\)",
             r"\(\*t\)\.state\s*=\s*ThreadState::Inactive as u8",
             r"\(\*t\)\.time_slice_ticks\s*=\s*DEFAULT_TIME_SLICE_TICKS",
-            r"\(\*t\)\.context\.sstatus\s*=\s*crate::arch::current::trap::USER_SSTATUS",
+            r"sel4_arch::init_user_context\(&mut\s*\(\*t\)\.context\)",
         ),
         ordered=True,
         forbidden_patterns=(

@@ -108,7 +108,7 @@ pub extern "C" fn init_kernel(
     user_ventry: usize,
     dtb_pa: usize,
     dtb_size: usize,
-    hart_id: usize,
+    cpu_id: usize,
     core_id: usize,
 ) -> ! {
     crate::arch::riscv64::machine::fpu::clear_supervisor_access();
@@ -130,7 +130,7 @@ pub extern "C" fn init_kernel(
         user_ventry,
         dtb_pa,
         dtb_size,
-        cpu_id: hart_id,
+        cpu_id,
         core_id,
     };
     crate::kernel::boot::bringup_rootserver(&args);
@@ -145,10 +145,10 @@ pub extern "C" fn init_secondary_hart(
     _user_ventry: usize,
     _dtb_pa: usize,
     _dtb_size: usize,
-    hart_id: usize,
+    cpu_id: usize,
     core_id: usize,
 ) -> ! {
-    crate::kernel::smp::init_current_cpu(hart_id, core_id);
+    crate::kernel::smp::init_current_cpu(cpu_id, core_id);
     crate::arch::riscv64::machine::fpu::init_current_core();
     if let Some(root) = crate::kernel::smp::kernel_vspace_root() {
         unsafe { crate::arch::riscv64::object::vspace::switch_satp(root) };
