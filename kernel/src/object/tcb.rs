@@ -19,20 +19,19 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::abi::constants::MAX_NUM_NODES;
-use crate::arch::current::api::{
-    SSTATUS_FS_CLEAN, SSTATUS_FS_MASK, USER_SSTATUS, UserContext, UserRegister,
-};
+use crate::arch::current::api::UserContext;
+use crate::arch::current::sel4_arch;
 use crate::kernel::smp::{BklCell, BklObjectGuard};
 use crate::object::cap::Cap;
 use crate::object::cnode::Cte;
 
-/// Pointer to the currently-scheduled TCB for the local hart.
+/// Pointer to the currently-scheduled TCB for the local core.
 #[inline]
 pub fn current() -> *mut Tcb {
     crate::kernel::smp::current_tcb()
 }
 
-/// Replace the local hart's current TCB. Returns the previous pointer. Also
+/// Replace the local core's current TCB. Returns the previous pointer. Also
 /// refreshes the legacy `api::thread` syscall view so cap lookups and IPC
 /// accesses in the syscall slow path follow whichever TCB the scheduler last
 /// picked.
@@ -67,7 +66,7 @@ pub(crate) fn take_continue_current_once(tcb: *mut Tcb) -> bool {
 // (stored as raw u64 ptrs because `Tcb` lives in user-controlled memory and we
 // want the field offsets to stay byte-identical across the C ↔ Rust boundary).
 //
-// User execution can now happen on more than one hart. Queue links, bitmaps,
+// User execution can now happen on more than one core. Queue links, bitmaps,
 // and surrounding TCB/SC state transitions are serialized by the seL4-style
 // big kernel lock.
 
@@ -689,8 +688,8 @@ pub(crate) unsafe fn set_running_with_reply_regs(tcb: *mut Tcb, badge: u64, info
     }
     unsafe {
         let _guard = lock_state(tcb);
-        (*tcb).context.regs[UserRegister::A0.index()] = badge;
-        (*tcb).context.regs[UserRegister::A1.index()] = info_word;
+        (*tcb).context.set_cap_reg(badge);
+        (*tcb).context.set_msg_info(info_word);
         (*tcb).state = ThreadState::Running as u8;
     }
 }
@@ -736,12 +735,12 @@ pub(crate) unsafe fn complete_bound_endpoint_notification_wait(tcb: *mut Tcb, ba
 
 unsafe fn write_notification_badge_regs_locked(tcb: *mut Tcb, badge: u64) {
     unsafe {
-        (*tcb).context.regs[UserRegister::A0.index()] = badge;
-        (*tcb).context.regs[UserRegister::A1.index()] = 0;
-        (*tcb).context.regs[UserRegister::A2.index()] = 0;
-        (*tcb).context.regs[UserRegister::A3.index()] = 0;
-        (*tcb).context.regs[UserRegister::A4.index()] = 0;
-        (*tcb).context.regs[UserRegister::A5.index()] = 0;
+        (*tcb).context.set_cap_reg(badge);
+        (*tcb).context.set_msg_info(0);
+        (*tcb).context.set_mr(0, 0);
+        (*tcb).context.set_mr(1, 0);
+        (*tcb).context.set_mr(2, 0);
+        (*tcb).context.set_mr(3, 0);
     }
 }
 
@@ -843,13 +842,13 @@ pub(crate) unsafe fn cancel_endpoint_waiter(
         }
 
         if let Some(info_word) = call_error_info {
-            (*tcb).context.regs[UserRegister::A0.index()] = 0;
+            (*tcb).context.set_cap_reg(0);
             if was_call {
-                (*tcb).context.regs[UserRegister::A1.index()] = info_word;
-                (*tcb).context.regs[UserRegister::A2.index()] = 0;
-                (*tcb).context.regs[UserRegister::A3.index()] = 0;
-                (*tcb).context.regs[UserRegister::A4.index()] = 0;
-                (*tcb).context.regs[UserRegister::A5.index()] = 0;
+                (*tcb).context.set_msg_info(info_word);
+                (*tcb).context.set_mr(0, 0);
+                (*tcb).context.set_mr(1, 0);
+                (*tcb).context.set_mr(2, 0);
+                (*tcb).context.set_mr(3, 0);
             }
         }
 
@@ -892,7 +891,7 @@ pub(crate) fn ipc_message_regs_snapshot(tcb: *const Tcb, length: u64) -> [u64; 4
         let _guard = lock_state(tcb);
         let mr_reg_n = length.min(4) as usize;
         for i in 0..mr_reg_n {
-            mr_regs[i] = (*tcb).context.regs[UserRegister::A2.index() + i];
+            mr_regs[i] = (*tcb).context.mr(i);
         }
         mr_regs
     }
@@ -909,10 +908,10 @@ pub(crate) unsafe fn write_ipc_message_regs(
     }
     unsafe {
         let _guard = lock_state(tcb);
-        (*tcb).context.regs[UserRegister::A0.index()] = badge;
+        (*tcb).context.set_cap_reg(badge);
         let mr_reg_n = length.min(4) as usize;
         for i in 0..mr_reg_n {
-            (*tcb).context.regs[UserRegister::A2.index() + i] = mr_regs[i];
+            (*tcb).context.set_mr(i, mr_regs[i]);
         }
     }
 }
@@ -929,11 +928,11 @@ pub(crate) unsafe fn write_fault_ipc_message_regs(
     }
     unsafe {
         let _guard = lock_state(tcb);
-        (*tcb).context.regs[UserRegister::A0.index()] = badge;
-        (*tcb).context.regs[UserRegister::A1.index()] = info_word;
+        (*tcb).context.set_cap_reg(badge);
+        (*tcb).context.set_msg_info(info_word);
         let mr_reg_n = length.min(4).min(mrs.len() as u64) as usize;
         for i in 0..mr_reg_n {
-            (*tcb).context.regs[UserRegister::A2.index() + i] = mrs[i];
+            (*tcb).context.set_mr(i, mrs[i]);
         }
     }
 }
@@ -1060,7 +1059,7 @@ pub(crate) unsafe fn write_message_info(tcb: *mut Tcb, info_word: u64) {
     }
     unsafe {
         let _guard = lock_state(tcb);
-        (*tcb).context.regs[UserRegister::A1.index()] = info_word;
+        (*tcb).context.set_msg_info(info_word);
     }
 }
 
@@ -1095,7 +1094,7 @@ pub(crate) fn user_context_word_snapshot(
         let _guard = lock_state(tcb);
         match context_index {
             0 => (*tcb).context.restart_pc,
-            1 => (*tcb).context.regs[UserRegister::Ra.index()],
+            1 => (*tcb).context.return_reg(),
             _ if reg_index != 0 && reg_index < (*tcb).context.regs.len() => {
                 (*tcb).context.regs[reg_index]
             }
@@ -1135,7 +1134,7 @@ pub(crate) fn queued_sender_snapshot(tcb: *const Tcb) -> QueuedSenderSnapshot {
         let _guard = lock_state(tcb);
         let is_fault = (*tcb).sender_is_fault != 0;
         QueuedSenderSnapshot {
-            info_word: (*tcb).context.regs[UserRegister::A1.index()],
+            info_word: (*tcb).context.msg_info(),
             badge: (*tcb).sender_badge,
             is_call: (*tcb).sender_is_call != 0,
             can_grant: (*tcb).sender_can_grant != 0,
@@ -1601,8 +1600,8 @@ unsafe fn sched_snapshot(tcb: *const Tcb) -> (u8, u8) {
     }
 }
 
-/// If the local hart trapped while running a TCB whose affinity was moved to
-/// another core, publish it on that target core's runqueue before this hart
+/// If the local core trapped while running a TCB whose affinity was moved to
+/// another core, publish it on that target core's runqueue before this core
 /// schedules something else.
 pub unsafe fn enqueue_if_migrated_from_current_core(tcb: *mut Tcb) {
     if tcb.is_null() {
@@ -1772,17 +1771,15 @@ pub fn from_cap(cap: Cap) -> *mut Tcb {
 /// Initialise a freshly-retyped 2 KiB TCB slab.
 ///
 /// `Untyped_Retype` already zeroed the memory; we only stamp the bits
-/// where 0 isn't the right resting value (currently just sstatus so a
-/// future `restore_user_context` returns to U-mode with interrupts enabled).
+/// where 0 isn't the right resting value so a future user restore returns
+/// to user mode with interrupts enabled.
 pub unsafe fn init(tcb_kva: u64) {
     let t = tcb_kva as *mut Tcb;
-    // sstatus.SPIE = 1 -> sret re-enables interrupts in U-mode.
-    // sstatus.SPP  = 0 -> sret enters U-mode (already 0).
     unsafe {
         let _guard = lock_state(t);
         (*t).state = ThreadState::Inactive as u8;
         (*t).affinity = crate::kernel::smp::current_core_id() as u8;
-        (*t).context.sstatus = USER_SSTATUS;
+        sel4_arch::init_user_context(&mut (*t).context);
     }
 }
 
@@ -1915,7 +1912,7 @@ pub unsafe fn set_tls_base(tcb: *mut Tcb, tls_base: u64) {
     }
     unsafe {
         let _guard = lock_state(tcb);
-        (*tcb).context.regs[UserRegister::Tp.index()] = tls_base;
+        (*tcb).context.set_tls_reg(tls_base);
     }
 }
 
@@ -1934,12 +1931,7 @@ pub(crate) unsafe fn set_fpu_context_enabled(tcb: *mut Tcb, enabled: bool) {
         return;
     }
     unsafe {
-        let sstatus = (*tcb).context.sstatus & !SSTATUS_FS_MASK;
-        (*tcb).context.sstatus = if enabled {
-            sstatus | SSTATUS_FS_CLEAN
-        } else {
-            sstatus
-        };
+        sel4_arch::set_fpu_context_enabled(&mut (*tcb).context, enabled);
     }
 }
 

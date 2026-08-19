@@ -2,6 +2,7 @@ pub mod csr;
 pub mod fpu;
 pub mod irq;
 pub mod paging;
+pub mod plic;
 
 #[inline]
 pub fn current_scratch() -> usize {

@@ -5,7 +5,7 @@ pub const MAX_IRQ: usize = KERNEL_TIMER_IRQ;
 const SSTATUS_SIE: usize = 1 << 1;
 
 pub fn init() {
-    crate::machine::plic::init();
+    super::plic::init();
 }
 
 #[inline]
@@ -36,26 +36,26 @@ pub fn is_external_irq(irq: u64) -> bool {
 #[inline]
 pub fn enable_external_irq(irq: u64) {
     if is_external_irq(irq) {
-        crate::machine::plic::enable_irq(irq as usize);
+        super::plic::enable_irq(irq as usize);
     }
 }
 
 #[inline]
 pub fn disable_external_irq(irq: u64) {
     if is_external_irq(irq) {
-        crate::machine::plic::disable_irq(irq as usize);
+        super::plic::disable_irq(irq as usize);
     }
 }
 
 #[inline]
 pub fn claim_external_irq() -> Option<u64> {
-    let irq = crate::machine::plic::claim();
+    let irq = super::plic::claim();
     if irq == 0 { None } else { Some(irq as u64) }
 }
 
 #[inline]
 pub fn complete_external_irq(irq: u64) {
     if is_external_irq(irq) {
-        crate::machine::plic::complete(irq as u32);
+        super::plic::complete(irq as u32);
     }
 }

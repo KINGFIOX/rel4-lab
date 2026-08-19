@@ -13,6 +13,8 @@ use crate::abi::types::MessageInfo;
 use crate::api::cspace;
 use crate::api::syscall::SyscallError;
 use crate::api::thread::Thread;
+use crate::arch::current::sel4_arch::ObjectType;
+use crate::arch::current::sel4_arch::invocation as arch_inv;
 use crate::arch::current::api::{
     SEL4_TCB_FRAME_REGS, SEL4_TCB_GP_REGS, SEL4_USER_CONTEXT_REGS, SEL4_USER_CONTEXT_WORDS,
     UserContext, UserRegister,
@@ -22,7 +24,6 @@ use crate::arch::current::object::vspace;
 use crate::kernel::smp::{BklCell, debug_assert_kernel_lock_held};
 use crate::object::cap::{
     Cap, CapTag, FRAME_RIGHTS_KERNEL_ONLY, FRAME_RIGHTS_READ_ONLY, FRAME_RIGHTS_READ_WRITE,
-    FRAME_SIZE_4K, FRAME_SIZE_GIGAPAGE, FRAME_SIZE_MEGAPAGE,
 };
 use crate::object::cnode::{CspaceLockGuard, Cte, with_cnode_at};
 use crate::object::mdb::MdbNode;
@@ -33,43 +34,6 @@ const TCB_COPY_RESUME_TARGET: u64 = 1 << 1;
 const TCB_COPY_TRANSFER_FRAME: u64 = 1 << 2;
 const TCB_COPY_TRANSFER_INTEGER: u64 = 1 << 3;
 const SEL4_IPC_BUFFER_SIZE_BITS: u64 = 10;
-
-/// Object type IDs as defined by `seL4_ObjectType` (`api_object` +
-/// `_mode_object` + `_object`) for the non-MCS 64-bit VSpace ABI.
-/// Reply objects are a local compatibility extension for userspace that keeps
-/// ordinary non-MCS scheduling semantics.
-#[repr(u64)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum ObjectType {
-    Untyped = 0,
-    Tcb = 1,
-    Endpoint = 2,
-    Notification = 3,
-    CapTable = 4,
-    GigaPage = 5,
-    FourKPage = 6,
-    MegaPage = 7,
-    PageTable = 8,
-    Reply = 9,
-}
-
-impl ObjectType {
-    const fn from_raw(value: u64) -> Option<Self> {
-        match value {
-            0 => Some(Self::Untyped),
-            1 => Some(Self::Tcb),
-            2 => Some(Self::Endpoint),
-            3 => Some(Self::Notification),
-            4 => Some(Self::CapTable),
-            5 => Some(Self::GigaPage),
-            6 => Some(Self::FourKPage),
-            7 => Some(Self::MegaPage),
-            8 => Some(Self::PageTable),
-            9 => Some(Self::Reply),
-            _ => None,
-        }
-    }
-}
 
 /// Invocation labels — must agree with `enum invocation_label` from
 /// `libsel4/include/sel4/invocation.h`. The exact numbering is generated
@@ -110,14 +74,6 @@ enum InvocationLabel {
     DomainSet = 30,
     DomainScheduleConfigure = 31,
     DomainScheduleSetStart = 32,
-    RiscvPageTableMap = 33,
-    RiscvPageTableUnmap = 34,
-    RiscvPageMap = 35,
-    RiscvPageUnmap = 36,
-    RiscvPageGetAddress = 37,
-    RiscvAsidControlMakePool = 38,
-    RiscvAsidPoolAssign = 39,
-    RiscvIrqIssueIrqHandlerTrigger = 40,
 }
 
 impl InvocationLabel {
@@ -134,13 +90,13 @@ fn invocation_label_matches(label_id: u64, label: InvocationLabel) -> bool {
 pub fn success_reply_length(tag: Option<CapTag>, label_id: u64) -> u64 {
     match tag {
         Some(CapTag::Thread) if label_id == InvocationLabel::TcbSetFlags.raw() => 1,
-        Some(CapTag::Frame) if label_id == InvocationLabel::RiscvPageGetAddress.raw() => 1,
+        Some(CapTag::Frame) if label_id == arch_inv::PAGE_GET_ADDRESS => 1,
         _ => 0,
     }
 }
 
 fn write_reply_mr0(uc: &mut UserContext, value: u64) {
-    uc.regs[UserRegister::A2.index()] = value;
+    uc.set_mr(0, value);
     crate::api::thread::write_current_ipc_buffer_word(1, value);
 }
 
@@ -148,20 +104,7 @@ fn write_reply_mr0(uc: &mut UserContext, value: u64) {
 /// type and user-supplied size (used for CNode / Untyped where the user
 /// picks a radix).
 fn object_size_bits(ty: ObjectType, user_size: u64) -> u64 {
-    use crate::abi::constants::{
-        SEL4_ENDPOINT_BITS, SEL4_NOTIFICATION_BITS, SEL4_SLOT_BITS, SEL4_TCB_BITS,
-    };
-    match ty {
-        ObjectType::Untyped => user_size,
-        ObjectType::Tcb => SEL4_TCB_BITS as u64,
-        ObjectType::Endpoint => SEL4_ENDPOINT_BITS as u64,
-        ObjectType::Notification => SEL4_NOTIFICATION_BITS as u64,
-        ObjectType::CapTable => user_size + SEL4_SLOT_BITS as u64,
-        ObjectType::Reply => crate::abi::constants::SEL4_REPLY_BITS as u64,
-        ObjectType::FourKPage | ObjectType::PageTable => 12,
-        ObjectType::MegaPage => 21,
-        ObjectType::GigaPage => 30,
-    }
+    ty.size_bits(user_size)
 }
 
 fn validate_retype_object_size(
@@ -174,8 +117,8 @@ fn validate_retype_object_size(
     let object_type = ObjectType::from_raw(ty).ok_or(SyscallError::InvalidArgument)?;
     let obj_bits = object_size_bits(object_type, user_size);
     if user_size >= WORD_BITS as u64 || obj_bits > SEL4_MAX_UNTYPED_BITS as u64 {
-        uc.regs[UserRegister::A2.index()] = 0;
-        uc.regs[UserRegister::A3.index()] = SEL4_MAX_UNTYPED_BITS as u64;
+        uc.set_mr(0, 0);
+        uc.set_mr(1, SEL4_MAX_UNTYPED_BITS as u64);
         return Err(SyscallError::RangeError);
     }
 
@@ -189,47 +132,11 @@ fn validate_retype_object_size(
 }
 
 fn device_untyped_retype_allowed(ty: ObjectType) -> bool {
-    matches!(
-        ty,
-        ObjectType::Untyped | ObjectType::FourKPage | ObjectType::MegaPage | ObjectType::GigaPage
-    )
+    ty.device_retype_allowed()
 }
 
-/// Construct the cap_t for a freshly allocated object.
 fn create_object_cap(ty: ObjectType, region_base: u64, user_size: u64, is_device: bool) -> Cap {
-    match ty {
-        ObjectType::Untyped => Cap::new_untyped(region_base, user_size, 0, is_device),
-        ObjectType::CapTable => {
-            // Fresh CNode caps have no guard: callers are expected to
-            // set one with `seL4_CNode_Mint`/`Mutate` when they put the
-            // cap into a CSpace. Matches `createCNodeObject` in
-            // `kernel/src/object/objecttype.c`.
-            Cap::new_cnode(region_base, user_size, 0, 0)
-        }
-        ObjectType::FourKPage => Cap::new_frame(
-            region_base,
-            FRAME_SIZE_4K,
-            FRAME_RIGHTS_READ_WRITE,
-            is_device,
-        ),
-        ObjectType::MegaPage => Cap::new_frame(
-            region_base,
-            FRAME_SIZE_MEGAPAGE,
-            FRAME_RIGHTS_READ_WRITE,
-            is_device,
-        ),
-        ObjectType::GigaPage => Cap::new_frame(
-            region_base,
-            FRAME_SIZE_GIGAPAGE,
-            FRAME_RIGHTS_READ_WRITE,
-            is_device,
-        ),
-        ObjectType::PageTable => Cap::new_page_table(region_base),
-        ObjectType::Endpoint => Cap::new_endpoint(region_base),
-        ObjectType::Notification => Cap::new_notification(region_base),
-        ObjectType::Tcb => Cap::new_thread(region_base),
-        ObjectType::Reply => Cap::new_reply_object(region_base, true),
-    }
+    ty.create_cap(region_base, user_size, is_device)
 }
 
 /// `Untyped_Retype` slow path. See `kernel/src/object/untyped.c` in the C
@@ -259,10 +166,10 @@ pub fn handle_untyped(
     }
     require_extra_caps(uc, 1)?;
 
-    let new_type = uc.regs[UserRegister::A2.index()];
-    let user_size = uc.regs[UserRegister::A3.index()];
-    let node_index = uc.regs[UserRegister::A4.index()];
-    let node_depth = uc.regs[UserRegister::A5.index()];
+    let new_type = uc.mr(0);
+    let user_size = uc.mr(1);
+    let node_index = uc.mr(2);
+    let node_depth = uc.mr(3);
     let (node_offset, node_window) = read_mrs_4_5(thread);
 
     // The dest-CNode CPtr was placed in `caps_or_badges[0]` by the libsel4
@@ -287,18 +194,18 @@ pub fn handle_untyped(
     }
     let dest_radix = dest_cnode_cap.cnode_radix();
     if node_offset >= (1u64 << dest_radix) {
-        uc.regs[UserRegister::A2.index()] = 0;
-        uc.regs[UserRegister::A3.index()] = (1u64 << dest_radix) - 1;
+        uc.set_mr(0, 0);
+        uc.set_mr(1, (1u64 << dest_radix) - 1);
         return Err(SyscallError::RangeError);
     }
     if node_window < 1 || node_window > crate::abi::constants::RETYPE_FAN_OUT_LIMIT as u64 {
-        uc.regs[UserRegister::A2.index()] = 1;
-        uc.regs[UserRegister::A3.index()] = crate::abi::constants::RETYPE_FAN_OUT_LIMIT as u64;
+        uc.set_mr(0, 1);
+        uc.set_mr(1, crate::abi::constants::RETYPE_FAN_OUT_LIMIT as u64);
         return Err(SyscallError::RangeError);
     }
     if node_window > (1u64 << dest_radix) - node_offset {
-        uc.regs[UserRegister::A2.index()] = 1;
-        uc.regs[UserRegister::A3.index()] = (1u64 << dest_radix) - node_offset;
+        uc.set_mr(0, 1);
+        uc.set_mr(1, (1u64 << dest_radix) - node_offset);
         return Err(SyscallError::RangeError);
     }
     let dest_base_kva = dest_cnode_cap.cnode_ptr();
@@ -482,18 +389,15 @@ fn user_map_error(err: vspace::UserMapError) -> SyscallError {
 
 fn user_map_error_reply(uc: &mut UserContext, err: vspace::UserMapError) -> SyscallError {
     if let vspace::UserMapError::FailedLookup(bits_left) = err {
-        uc.regs[UserRegister::A4.index()] = bits_left as u64;
+        uc.set_mr(2, bits_left as u64);
         crate::api::thread::write_current_ipc_buffer_word(3, bits_left as u64);
     }
     user_map_error(err)
 }
 
-/// RISC-V Page_Map / Page_Unmap / Page_GetAddress.
+/// Page_Map / Page_Unmap / Page_GetAddress.
 ///
-/// The labels live in `arch_invocation_label`:
-///   39 RISCVPageTableMap     40 RISCVPageTableUnmap
-///   41 RISCVPageMap          42 RISCVPageUnmap
-///   43 RISCVPageGetAddress
+/// Architecture invocation labels come from `arch::current::sel4_arch`.
 pub fn handle_frame(
     thread: &Thread,
     slot: *mut Cte,
@@ -502,9 +406,9 @@ pub fn handle_frame(
     length: u64,
     uc: &mut UserContext,
 ) -> Result<(), SyscallError> {
-    let page_map = InvocationLabel::RiscvPageMap.raw();
-    let page_unmap = InvocationLabel::RiscvPageUnmap.raw();
-    let page_get_address = InvocationLabel::RiscvPageGetAddress.raw();
+    let page_map = arch_inv::PAGE_MAP;
+    let page_unmap = arch_inv::PAGE_UNMAP;
+    let page_get_address = arch_inv::PAGE_GET_ADDRESS;
 
     let is_page_map = label_id == page_map;
     let is_page_unmap = label_id == page_unmap;
@@ -516,14 +420,14 @@ pub fn handle_frame(
                 return Err(SyscallError::TruncatedMessage);
             }
             require_extra_caps(uc, 1)?;
-            let vaddr = uc.regs[UserRegister::A2.index()];
+            let vaddr = uc.mr(0);
             // libsel4 packs `seL4_CapRights_t` (from `shared_types.pbf`):
             //   bit 0 capAllowWrite, bit 1 capAllowRead,
             //   bit 2 capAllowGrant, bit 3 capAllowGrantReply.
             // VM attributes bit 0 = execute never. Bit 1 is a userspace
             // cacheability hint so device DMA mappings can be uncached.
-            let rights_packed = uc.regs[UserRegister::A3.index()];
-            let attrs = uc.regs[UserRegister::A4.index()];
+            let rights_packed = uc.mr(1);
+            let attrs = uc.mr(2);
             let vm_rights = mask_frame_vm_rights(cap.frame_vm_rights(), rights_packed);
             let can_write = frame_vm_rights_allow_write(vm_rights);
             let can_read = frame_vm_rights_allow_read(vm_rights);
@@ -656,8 +560,8 @@ pub fn handle_page_table(
     length: u64,
     uc: &mut UserContext,
 ) -> Result<(), SyscallError> {
-    let page_table_map = InvocationLabel::RiscvPageTableMap.raw();
-    let page_table_unmap = InvocationLabel::RiscvPageTableUnmap.raw();
+    let page_table_map = arch_inv::PAGE_TABLE_MAP;
+    let page_table_unmap = arch_inv::PAGE_TABLE_UNMAP;
 
     let is_map = label_id == page_table_map;
     let is_unmap = label_id == page_table_unmap;
@@ -672,7 +576,7 @@ pub fn handle_page_table(
                 return Err(SyscallError::InvalidCapability);
             }
 
-            let vaddr = uc.regs[UserRegister::A2.index()];
+            let vaddr = uc.mr(0);
             let vspace_cptr = read_extra_cap(thread, 0);
             let (vspace_cap, _) = cspace::lookup_cap(thread, vspace_cptr)
                 .map_err(|_| SyscallError::InvalidCapability)?;
@@ -757,7 +661,7 @@ pub fn handle_asid_control(
     length: u64,
     uc: &UserContext,
 ) -> Result<(), SyscallError> {
-    if !invocation_label_matches(label_id, InvocationLabel::RiscvAsidControlMakePool) {
+    if label_id != arch_inv::ASID_CONTROL_MAKE_POOL {
         return Err(SyscallError::IllegalOperation);
     }
     if length < 2 {
@@ -784,8 +688,8 @@ pub fn handle_asid_control(
     {
         return Err(SyscallError::InvalidCapability);
     }
-    let dest_index = uc.regs[UserRegister::A2.index()];
-    let dest_depth = uc.regs[UserRegister::A3.index()] as u32 & 0xff;
+    let dest_index = uc.mr(0);
+    let dest_depth = uc.mr(1) as u32 & 0xff;
     unsafe {
         let cspace_guard = crate::object::cnode::lock_cspace();
         if crate::object::cnode::mdb_has_children_locked(&cspace_guard, untyped_slot) {
@@ -828,7 +732,7 @@ pub fn handle_asid_pool(
     _length: u64,
     uc: &UserContext,
 ) -> Result<(), SyscallError> {
-    if !invocation_label_matches(label_id, InvocationLabel::RiscvAsidPoolAssign) {
+    if label_id != arch_inv::ASID_POOL_ASSIGN {
         return Err(SyscallError::IllegalOperation);
     }
     require_extra_caps(uc, 1)?;
@@ -902,12 +806,12 @@ pub fn handle_irq_control(
             }
             require_extra_caps(uc, 1)?;
             (
-                uc.regs[UserRegister::A2.index()],
-                uc.regs[UserRegister::A3.index()],
-                uc.regs[UserRegister::A4.index()] & 0xff,
+                uc.mr(0),
+                uc.mr(1),
+                uc.mr(2) & 0xff,
             )
         }
-        id if invocation_label_matches(id, InvocationLabel::RiscvIrqIssueIrqHandlerTrigger) => {
+        id if id == arch_inv::IRQ_ISSUE_IRQ_HANDLER_TRIGGER => {
             if length < 4 {
                 return Err(SyscallError::TruncatedMessage);
             }
@@ -922,8 +826,8 @@ pub fn handle_irq_control(
     };
 
     if !crate::object::irq::valid_irq(irq) {
-        uc.regs[UserRegister::A2.index()] = 1;
-        uc.regs[UserRegister::A3.index()] = crate::object::irq::MAX_IRQ as u64;
+        uc.set_mr(0, 1);
+        uc.set_mr(1, crate::object::irq::MAX_IRQ as u64);
         return Err(SyscallError::RangeError);
     }
     if unsafe { crate::object::irq::is_active(irq) } {
@@ -1013,7 +917,7 @@ pub fn handle_domain(
     }
     require_extra_caps(uc, 1)?;
 
-    let domain = uc.regs[UserRegister::A2.index()];
+    let domain = uc.mr(0);
     if domain >= crate::abi::constants::NUM_DOMAINS as u64 {
         return Err(SyscallError::InvalidArgument);
     }
@@ -1102,10 +1006,10 @@ fn handle_thread_inner(
                     return Err(SyscallError::TruncatedMessage);
                 }
                 require_extra_caps(uc, 3)?;
-                let fault_ep = uc.regs[UserRegister::A2.index()];
-                let cspace_data = uc.regs[UserRegister::A3.index()];
-                let vspace_data = uc.regs[UserRegister::A4.index()];
-                let buffer_uva = uc.regs[UserRegister::A5.index()];
+                let fault_ep = uc.mr(0);
+                let cspace_data = uc.mr(1);
+                let vspace_data = uc.mr(2);
+                let buffer_uva = uc.mr(3);
 
                 let (mut cspace_cap, cspace_slot) = lookup_tcb_space_cap_slot(thread, 0)?;
                 let (mut vspace_cap, vspace_slot) = lookup_tcb_space_cap_slot(thread, 1)?;
@@ -1154,9 +1058,9 @@ fn handle_thread_inner(
                     return Err(SyscallError::TruncatedMessage);
                 }
                 require_extra_caps(uc, 2)?;
-                let fault_ep = uc.regs[UserRegister::A2.index()];
-                let cspace_data = uc.regs[UserRegister::A3.index()];
-                let vspace_data = uc.regs[UserRegister::A4.index()];
+                let fault_ep = uc.mr(0);
+                let cspace_data = uc.mr(1);
+                let vspace_data = uc.mr(2);
 
                 let (mut cspace_cap, cspace_slot) = lookup_tcb_space_cap_slot(thread, 0)?;
                 let (mut vspace_cap, vspace_slot) = lookup_tcb_space_cap_slot(thread, 1)?;
@@ -1200,7 +1104,7 @@ fn handle_thread_inner(
                 return Err(SyscallError::TruncatedMessage);
             }
             require_extra_caps(uc, 1)?;
-            let buffer_uva = uc.regs[UserRegister::A2.index()];
+            let buffer_uva = uc.mr(0);
             let (buffer_cap, buffer_slot) = lookup_ipc_buffer_cap_slot(thread, 0, buffer_uva)?;
             install_tcb_buffer_cap(slot, tcb_ptr, buffer_uva, buffer_cap, buffer_slot)?;
             Ok(())
@@ -1213,7 +1117,7 @@ fn handle_thread_inner(
                 return Err(SyscallError::TruncatedMessage);
             }
             require_extra_caps(uc, 1)?;
-            let prio = uc.regs[UserRegister::A2.index()];
+            let prio = uc.mr(0);
             let auth_cap = lookup_extra_cap(thread, 0)?;
             require_tag(auth_cap, CapTag::Thread)?;
             let auth_tcb = tcb::from_cap(auth_cap);
@@ -1232,7 +1136,7 @@ fn handle_thread_inner(
                 return Err(SyscallError::TruncatedMessage);
             }
             require_extra_caps(uc, 1)?;
-            let mcp = uc.regs[UserRegister::A2.index()];
+            let mcp = uc.mr(0);
             let auth_cap = lookup_extra_cap(thread, 0)?;
             require_tag(auth_cap, CapTag::Thread)?;
             let auth_tcb = tcb::from_cap(auth_cap);
@@ -1251,8 +1155,8 @@ fn handle_thread_inner(
                 return Err(SyscallError::TruncatedMessage);
             }
             require_extra_caps(uc, 1)?;
-            let mcp = uc.regs[UserRegister::A2.index()];
-            let prio = uc.regs[UserRegister::A3.index()];
+            let mcp = uc.mr(0);
+            let prio = uc.mr(1);
             let auth_cap = lookup_extra_cap(thread, 0)?;
             require_tag(auth_cap, CapTag::Thread)?;
             let auth_tcb = tcb::from_cap(auth_cap);
@@ -1291,8 +1195,8 @@ fn handle_thread_inner(
             if length < 2 {
                 return Err(SyscallError::TruncatedMessage);
             }
-            let flag_word = uc.regs[UserRegister::A2.index()];
-            let count = uc.regs[UserRegister::A3.index()];
+            let flag_word = uc.mr(0);
+            let count = uc.mr(1);
             if length - 2 < count {
                 return Err(SyscallError::TruncatedMessage);
             }
@@ -1328,12 +1232,12 @@ fn handle_thread_inner(
                 }
             }
             let pc = if count >= 1 && length >= 3 {
-                Some(uc.regs[UserRegister::A4.index()])
+                Some(uc.mr(2))
             } else {
                 None
             };
             if count >= 2 && length >= 4 {
-                reg_updates[UserRegister::Ra.index()] = uc.regs[UserRegister::A5.index()];
+                reg_updates[UserRegister::Ra.index()] = uc.mr(3);
                 reg_update_valid[UserRegister::Ra.index()] = true;
             }
             let mut regs = [(0usize, 0u64); 32];
@@ -1370,8 +1274,8 @@ fn handle_thread_inner(
             if length < 2 {
                 return Err(SyscallError::TruncatedMessage);
             }
-            let flag_word = uc.regs[UserRegister::A2.index()];
-            let count = uc.regs[UserRegister::A3.index()] as usize;
+            let flag_word = uc.mr(0);
+            let count = uc.mr(1) as usize;
             if count == 0 || count > SEL4_USER_CONTEXT_WORDS {
                 return Err(SyscallError::RangeError);
             }
@@ -1393,16 +1297,16 @@ fn handle_thread_inner(
             let n = count.min(32);
             // First 4 MRs go through registers a2..a5.
             if n >= 1 {
-                uc.regs[UserRegister::A2.index()] = read_reg(0);
+                uc.set_mr(0, read_reg(0));
             }
             if n >= 2 {
-                uc.regs[UserRegister::A3.index()] = read_reg(1);
+                uc.set_mr(1, read_reg(1));
             }
             if n >= 3 {
-                uc.regs[UserRegister::A4.index()] = read_reg(2);
+                uc.set_mr(2, read_reg(2));
             }
             if n >= 4 {
-                uc.regs[UserRegister::A5.index()] = read_reg(3);
+                uc.set_mr(3, read_reg(3));
             }
 
             // MRs 4..n live in the IPC buffer at words[1+i].
@@ -1465,7 +1369,7 @@ fn handle_thread_inner(
             if length < 1 {
                 return Err(SyscallError::TruncatedMessage);
             }
-            unsafe { tcb::set_tls_base(tcb_ptr, uc.regs[UserRegister::A2.index()]) };
+            unsafe { tcb::set_tls_base(tcb_ptr, uc.mr(0)) };
             Ok(())
         }
 
@@ -1473,8 +1377,8 @@ fn handle_thread_inner(
             if length < 2 {
                 return Err(SyscallError::TruncatedMessage);
             }
-            let clear = uc.regs[UserRegister::A2.index()];
-            let set = uc.regs[UserRegister::A3.index()];
+            let clear = uc.mr(0);
+            let set = uc.mr(1);
             let flags = unsafe { tcb::set_flags(tcb_ptr, clear, set) };
             if reply {
                 write_reply_mr0(uc, flags);
@@ -1497,7 +1401,7 @@ fn invoke_tcb_copy_registers(
     }
     require_extra_caps(uc, 1)?;
 
-    let flags = uc.regs[UserRegister::A2.index()];
+    let flags = uc.mr(0);
     let src_cap = lookup_extra_cap(thread, 0)?;
     require_tag(src_cap, CapTag::Thread)?;
     let src = tcb::from_cap(src_cap);
@@ -1830,8 +1734,8 @@ fn cnode_op_save_caller(
     if length < 2 {
         return Err(SyscallError::TruncatedMessage);
     }
-    let index = uc.regs[UserRegister::A2.index()];
-    let depth = uc.regs[UserRegister::A3.index()] as u32 & 0xff;
+    let index = uc.mr(0);
+    let depth = uc.mr(1) as u32 & 0xff;
     let dest = resolve_slot(dest_root_cap, index, depth)?;
 
     unsafe {
@@ -1863,8 +1767,8 @@ fn cnode_op_cancel_badged_sends(
     if length < 2 {
         return Err(SyscallError::TruncatedMessage);
     }
-    let index = uc.regs[UserRegister::A2.index()];
-    let depth = uc.regs[UserRegister::A3.index()] as u32 & 0xff;
+    let index = uc.mr(0);
+    let depth = uc.mr(1) as u32 & 0xff;
     let slot = resolve_slot(dest_root_cap, index, depth)?;
     let cap = crate::object::cnode::cap_snapshot(slot);
     // Mirror C kernel `hasCancelSendRights`: only Endpoint caps with all
@@ -1903,16 +1807,16 @@ fn cnode_op_rotate(
     if length < 2 {
         return Err(SyscallError::TruncatedMessage);
     }
-    let dest_index = uc.regs[UserRegister::A2.index()];
-    let dest_depth = uc.regs[UserRegister::A3.index()] as u32 & 0xff;
+    let dest_index = uc.mr(0);
+    let dest_depth = uc.mr(1) as u32 & 0xff;
     let dest = resolve_slot(dest_root_cap, dest_index, dest_depth)?;
 
     if length < 8 {
         return Err(SyscallError::TruncatedMessage);
     }
     require_extra_caps(uc, 2)?;
-    let pivot_new_data = uc.regs[UserRegister::A4.index()]; // libsel4 calls this `dest_badge`
-    let pivot_index = uc.regs[UserRegister::A5.index()];
+    let pivot_new_data = uc.mr(2); // libsel4 calls this `dest_badge`
+    let pivot_index = uc.mr(3);
     let pivot_depth = read_mr(thread, uc, 4) as u32 & 0xff;
     let src_new_data = read_mr(thread, uc, 5); // libsel4 calls this `pivot_badge`
     let src_index = read_mr(thread, uc, 6);
@@ -1994,10 +1898,10 @@ unsafe fn cnode_move_slot(src: *mut Cte, dst: *mut Cte, new_cap: Cap) {
 /// live in `uc.regs[a2..a5]`). Returns 0 if the IPC buffer isn't mapped.
 fn read_mr(_thread: &Thread, uc: &UserContext, i: usize) -> u64 {
     match i {
-        0 => uc.regs[UserRegister::A2.index()],
-        1 => uc.regs[UserRegister::A3.index()],
-        2 => uc.regs[UserRegister::A4.index()],
-        3 => uc.regs[UserRegister::A5.index()],
+        0 => uc.mr(0),
+        1 => uc.mr(1),
+        2 => uc.mr(2),
+        3 => uc.mr(3),
         _ => crate::api::thread::current_ipc_buffer_word(1 + i),
     }
 }
@@ -2047,8 +1951,8 @@ fn cnode_op_revoke(dest_root_cap: Cap, length: u64, uc: &UserContext) -> Result<
     if length < 2 {
         return Err(SyscallError::TruncatedMessage);
     }
-    let index = uc.regs[UserRegister::A2.index()];
-    let depth = uc.regs[UserRegister::A3.index()] as u32 & 0xff;
+    let index = uc.mr(0);
+    let depth = uc.mr(1) as u32 & 0xff;
     let slot = resolve_slot(dest_root_cap, index, depth)?;
     cte_revoke(slot)
 }
@@ -2057,8 +1961,8 @@ fn cnode_op_delete(dest_root_cap: Cap, length: u64, uc: &UserContext) -> Result<
     if length < 2 {
         return Err(SyscallError::TruncatedMessage);
     }
-    let index = uc.regs[UserRegister::A2.index()];
-    let depth = uc.regs[UserRegister::A3.index()] as u32 & 0xff;
+    let index = uc.mr(0);
+    let depth = uc.mr(1) as u32 & 0xff;
     let slot = resolve_slot(dest_root_cap, index, depth)?;
     delete_slot_preemptible(slot)?;
     Ok(())
@@ -2074,16 +1978,16 @@ fn cnode_op_copy_or_mint(
     if length < 2 {
         return Err(SyscallError::TruncatedMessage);
     }
-    let dest_index = uc.regs[UserRegister::A2.index()];
-    let dest_depth = uc.regs[UserRegister::A3.index()] as u32 & 0xff;
+    let dest_index = uc.mr(0);
+    let dest_depth = uc.mr(1) as u32 & 0xff;
     let dest = resolve_slot(dest_root_cap, dest_index, dest_depth)?;
 
     if length < 4 {
         return Err(SyscallError::TruncatedMessage);
     }
     require_extra_caps(uc, 1)?;
-    let src_index = uc.regs[UserRegister::A4.index()];
-    let src_depth = uc.regs[UserRegister::A5.index()] as u32 & 0xff;
+    let src_index = uc.mr(2);
+    let src_depth = uc.mr(3) as u32 & 0xff;
 
     let src_root_cptr = read_extra_cap(thread, 0);
     let (src_root_cap, _) =
@@ -2248,16 +2152,16 @@ fn cnode_op_move_or_mutate(
     if length < 2 {
         return Err(SyscallError::TruncatedMessage);
     }
-    let dest_index = uc.regs[UserRegister::A2.index()];
-    let dest_depth = uc.regs[UserRegister::A3.index()] as u32 & 0xff;
+    let dest_index = uc.mr(0);
+    let dest_depth = uc.mr(1) as u32 & 0xff;
     let dest = resolve_slot(dest_root_cap, dest_index, dest_depth)?;
 
     if length < 4 {
         return Err(SyscallError::TruncatedMessage);
     }
     require_extra_caps(uc, 1)?;
-    let src_index = uc.regs[UserRegister::A4.index()];
-    let src_depth = uc.regs[UserRegister::A5.index()] as u32 & 0xff;
+    let src_index = uc.mr(2);
+    let src_depth = uc.mr(3) as u32 & 0xff;
 
     let src_root_cptr = read_extra_cap(thread, 0);
     let (src_root_cap, _) =
@@ -2310,7 +2214,7 @@ fn resolve_slot(root_cap: Cap, index: u64, depth: u32) -> Result<*mut Cte, Sysca
 }
 
 fn require_extra_caps(uc: &UserContext, required: u64) -> Result<(), SyscallError> {
-    let info = MessageInfo(uc.regs[UserRegister::A1.index()]);
+    let info = MessageInfo(uc.msg_info());
     if info.extra_caps() < required
         || (required != 0 && !crate::api::thread::current_has_ipc_buffer())
     {

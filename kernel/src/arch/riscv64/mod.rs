@@ -11,4 +11,5 @@ pub mod machine;
 pub mod model;
 pub mod object;
 pub mod plat;
+pub mod sel4_arch;
 pub mod smp;

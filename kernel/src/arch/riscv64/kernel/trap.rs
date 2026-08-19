@@ -757,7 +757,7 @@ pub fn idle_scheduler_loop() -> ! {
 }
 
 fn switch_to_kernel_vspace() {
-    let Some(kernel_satp) = crate::kernel::smp::kernel_satp() else {
+    let Some(kernel_satp) = crate::kernel::smp::kernel_vspace_root() else {
         return;
     };
     if csr::satp() as u64 != kernel_satp {

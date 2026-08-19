@@ -130,7 +130,7 @@ pub extern "C" fn init_kernel(
         user_ventry,
         dtb_pa,
         dtb_size,
-        hart_id,
+        cpu_id: hart_id,
         core_id,
     };
     crate::kernel::boot::bringup_rootserver(&args);
@@ -148,10 +148,10 @@ pub extern "C" fn init_secondary_hart(
     hart_id: usize,
     core_id: usize,
 ) -> ! {
-    crate::kernel::smp::init_current_hart(hart_id, core_id);
+    crate::kernel::smp::init_current_cpu(hart_id, core_id);
     crate::arch::riscv64::machine::fpu::init_current_core();
-    if let Some(satp) = crate::kernel::smp::kernel_satp() {
-        unsafe { crate::arch::riscv64::object::vspace::switch_satp(satp) };
+    if let Some(root) = crate::kernel::smp::kernel_vspace_root() {
+        unsafe { crate::arch::riscv64::object::vspace::switch_satp(root) };
     }
     crate::arch::riscv64::kernel::trap::install_trap_vector();
     crate::arch::riscv64::kernel::trap::init_timer();

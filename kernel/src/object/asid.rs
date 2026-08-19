@@ -29,7 +29,7 @@ const _: () = {
 
 #[derive(Copy, Clone)]
 struct AsidEntry {
-    /// Kernel VA of the Sv39 root PT. 0 means "free".
+    /// Kernel VA of the VSpace root page table. 0 means "free".
     root_pt_kva: u64,
 }
 
@@ -201,7 +201,7 @@ pub fn delete_pool(base: u16, pool_kva: u64) {
         true
     });
     if deleted {
-        crate::kernel::smp::sfence_vma_all_harts();
+        crate::kernel::smp::tlb_flush_all_cpus();
         crate::arch::current::object::vspace::set_current_vspace_root();
     }
 }
@@ -216,7 +216,7 @@ pub fn delete(asid: u16, root_pt_kva: u64) {
         if *slot != root_pt_kva {
             return false;
         }
-        crate::kernel::smp::sfence_vma_asid_all_harts(asid as usize);
+        crate::kernel::smp::tlb_flush_asid_all_cpus(asid as usize);
         *slot = 0;
         if pool < ASID_POOL_COUNT && state.pool_active[pool] {
             unsafe { set_pool_entry(state.pool_ptr[pool], pool_index(asid), 0) };

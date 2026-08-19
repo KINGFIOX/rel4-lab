@@ -1,6 +1,6 @@
 //! SMP substrate shared by boot, trap handling, and scheduling.
 //!
-//! User threads may run on multiple harts. This module keeps the per-hart
+//! User threads may run on multiple cores. This module keeps the per-core
 //! state that the trap path and scheduler need while a temporary big kernel
 //! lock still serialises most shared kernel data-structure mutation.
 
@@ -8,73 +8,19 @@
 
 use core::cell::UnsafeCell;
 use core::hint;
-use core::mem::size_of;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::abi::constants::MAX_NUM_NODES;
 use crate::api::thread::Thread;
+use crate::arch::current::kernel::{TrapScratch, TrapScratchCell, init_trap_scratch};
 use crate::object::tcb::Tcb;
 
-pub const MAX_BOOT_HARTS: usize = 8;
+pub const MAX_BOOT_CPUS: usize = 8;
 pub const KERNEL_STACK_BYTES: usize = 64 * 1024;
 
 unsafe extern "C" {
     static __stack_top: u8;
-}
-
-/// Per-hart trap scratch record addressed through `sscratch`.
-///
-/// `trap.S` relies on this exact layout. Keep the field order in sync with the
-/// `TRAP_SCRATCH_*` offsets in that file.
-#[repr(C)]
-pub struct TrapScratch {
-    kernel_stack_top: usize,
-    user_context: usize,
-    saved_user_sp: usize,
-    saved_user_t1: usize,
-    saved_user_t2: usize,
-    core_id: usize,
-    hart_id: usize,
-}
-
-const _: () = {
-    assert!(size_of::<TrapScratch>() == 7 * size_of::<usize>());
-    assert!(core::mem::offset_of!(TrapScratch, kernel_stack_top) == 0);
-    assert!(core::mem::offset_of!(TrapScratch, user_context) == 1 * size_of::<usize>());
-    assert!(core::mem::offset_of!(TrapScratch, saved_user_sp) == 2 * size_of::<usize>());
-    assert!(core::mem::offset_of!(TrapScratch, saved_user_t1) == 3 * size_of::<usize>());
-    assert!(core::mem::offset_of!(TrapScratch, saved_user_t2) == 4 * size_of::<usize>());
-    assert!(core::mem::offset_of!(TrapScratch, core_id) == 5 * size_of::<usize>());
-    assert!(core::mem::offset_of!(TrapScratch, hart_id) == 6 * size_of::<usize>());
-};
-
-impl TrapScratch {
-    const fn new() -> Self {
-        Self {
-            kernel_stack_top: 0,
-            user_context: 0,
-            saved_user_sp: 0,
-            saved_user_t1: 0,
-            saved_user_t2: 0,
-            core_id: usize::MAX,
-            hart_id: usize::MAX,
-        }
-    }
-}
-
-struct TrapScratchCell(UnsafeCell<TrapScratch>);
-
-unsafe impl Sync for TrapScratchCell {}
-
-impl TrapScratchCell {
-    const fn new() -> Self {
-        Self(UnsafeCell::new(TrapScratch::new()))
-    }
-
-    fn get(&self) -> *mut TrapScratch {
-        self.0.get()
-    }
 }
 
 struct ThreadCell(UnsafeCell<Thread>);
@@ -93,8 +39,8 @@ impl ThreadCell {
     }
 }
 
-struct HartState {
-    hart_id: AtomicUsize,
+struct CpuState {
+    cpu_id: AtomicUsize,
     core_id: AtomicUsize,
     online: AtomicBool,
     trap_scratch: TrapScratchCell,
@@ -103,10 +49,10 @@ struct HartState {
     next_timer_deadline: AtomicU64,
 }
 
-impl HartState {
+impl CpuState {
     const fn new() -> Self {
         Self {
-            hart_id: AtomicUsize::new(usize::MAX),
+            cpu_id: AtomicUsize::new(usize::MAX),
             core_id: AtomicUsize::new(usize::MAX),
             online: AtomicBool::new(false),
             trap_scratch: TrapScratchCell::new(),
@@ -117,10 +63,10 @@ impl HartState {
     }
 }
 
-static HARTS: [HartState; MAX_BOOT_HARTS] = [const { HartState::new() }; MAX_BOOT_HARTS];
+static CPUS: [CpuState; MAX_BOOT_CPUS] = [const { CpuState::new() }; MAX_BOOT_CPUS];
 static KERNEL_LOCK: SpinLock = SpinLock::new();
 static KERNEL_LOCK_OWNER: AtomicUsize = AtomicUsize::new(NO_KERNEL_LOCK_OWNER);
-static KERNEL_SATP: AtomicU64 = AtomicU64::new(0);
+static KERNEL_VSPACE_ROOT: AtomicU64 = AtomicU64::new(0);
 static REMOTE_STALL_PENDING_MASK: AtomicUsize = AtomicUsize::new(0);
 static REMOTE_STALL_DONE_MASK: AtomicUsize = AtomicUsize::new(0);
 static REMOTE_STALL_TARGET_VALUE: AtomicUsize = AtomicUsize::new(0);
@@ -295,47 +241,44 @@ pub fn current_core_id() -> usize {
 }
 
 #[inline]
-fn current_hart() -> &'static HartState {
-    &HARTS[current_core_id()]
+fn current_cpu() -> &'static CpuState {
+    &CPUS[current_core_id()]
 }
 
-pub fn init_current_hart(hart_id: usize, core_id: usize) {
-    assert!(core_id < MAX_BOOT_HARTS, "core_id exceeds hart-state table");
+pub fn init_current_cpu(cpu_id: usize, core_id: usize) {
+    assert!(core_id < MAX_BOOT_CPUS, "core_id exceeds cpu-state table");
     assert!(core_id < MAX_NUM_NODES, "core_id exceeds configured nodes");
 
-    let hart = &HARTS[core_id];
-    hart.hart_id.store(hart_id, Ordering::Release);
-    hart.core_id.store(core_id, Ordering::Release);
+    let cpu = &CPUS[core_id];
+    cpu.cpu_id.store(cpu_id, Ordering::Release);
+    cpu.core_id.store(core_id, Ordering::Release);
 
     unsafe {
-        let scratch = &mut *hart.trap_scratch.get();
-        scratch.kernel_stack_top = kernel_stack_top_for_core(core_id);
-        scratch.user_context = 0;
-        scratch.saved_user_sp = 0;
-        scratch.saved_user_t1 = 0;
-        scratch.saved_user_t2 = 0;
-        scratch.core_id = core_id;
-        scratch.hart_id = hart_id;
-        crate::arch::current::machine::set_current_scratch(scratch as *mut TrapScratch as usize);
+        init_trap_scratch(
+            cpu.trap_scratch.get(),
+            kernel_stack_top_for_core(core_id),
+            core_id,
+            cpu_id,
+        );
     }
 
-    hart.online.store(true, Ordering::Release);
+    cpu.online.store(true, Ordering::Release);
 }
 
-pub fn release_secondary_harts() {
+pub fn release_secondary_cpus() {
     SECONDARY_BOOT_READY.store(SECONDARY_BOOT_READY_MAGIC, Ordering::Release);
     crate::arch::current::machine::full_memory_barrier();
 }
 
-pub fn publish_kernel_satp(satp: u64) {
-    KERNEL_SATP.store(satp, Ordering::Release);
+pub fn publish_kernel_vspace(root: u64) {
+    KERNEL_VSPACE_ROOT.store(root, Ordering::Release);
     crate::arch::current::machine::full_memory_barrier();
 }
 
-pub fn kernel_satp() -> Option<u64> {
-    match KERNEL_SATP.load(Ordering::Acquire) {
+pub fn kernel_vspace_root() -> Option<u64> {
+    match KERNEL_VSPACE_ROOT.load(Ordering::Acquire) {
         0 => None,
-        satp => Some(satp),
+        root => Some(root),
     }
 }
 
@@ -343,14 +286,14 @@ pub fn wake_core(core_id: usize) {
     if core_id >= MAX_NUM_NODES || core_id == current_core_id() {
         return;
     }
-    let Some(hart_id) = remote_online_hart_id(core_id) else {
+    let Some(cpu_id) = remote_online_cpu_id(core_id) else {
         return;
     };
     assert_remote_ipi_supported("wake_core");
-    let error = crate::arch::current::smp::send_ipi(hart_id);
+    let error = crate::arch::current::smp::send_ipi(cpu_id);
     assert!(
         error == 0,
-        "remote IPI send failed for core {core_id} hart {hart_id}: error={}",
+        "remote IPI send failed for core {core_id} cpu {cpu_id}: error={}",
         error
     );
 }
@@ -361,9 +304,9 @@ pub fn current_core_of_tcb(tcb: *const Tcb) -> Option<usize> {
     }
     let target = tcb as usize;
     let mut core = 0;
-    while core < MAX_NUM_NODES && core < MAX_BOOT_HARTS {
-        let hart = &HARTS[core];
-        if hart.online.load(Ordering::Acquire) && hart.current_tcb.load(Ordering::Acquire) == target
+    while core < MAX_NUM_NODES && core < MAX_BOOT_CPUS {
+        let cpu = &CPUS[core];
+        if cpu.online.load(Ordering::Acquire) && cpu.current_tcb.load(Ordering::Acquire) == target
         {
             return Some(core);
         }
@@ -401,7 +344,7 @@ fn remote_core_op(core: usize, op: usize, target_value: usize) {
     let Some(bit) = core_bit(core) else {
         return;
     };
-    if remote_online_hart_id(core).is_none() {
+    if remote_online_cpu_id(core).is_none() {
         return;
     }
     assert_remote_ipi_supported("remote_core_op");
@@ -432,16 +375,16 @@ fn core_bit(core: usize) -> Option<usize> {
 }
 
 #[inline]
-fn remote_online_hart_id(core: usize) -> Option<usize> {
-    if core >= MAX_NUM_NODES || core >= MAX_BOOT_HARTS || core == current_core_id() {
+fn remote_online_cpu_id(core: usize) -> Option<usize> {
+    if core >= MAX_NUM_NODES || core >= MAX_BOOT_CPUS || core == current_core_id() {
         return None;
     }
-    let hart = &HARTS[core];
-    if !hart.online.load(Ordering::Acquire) {
+    let cpu = &CPUS[core];
+    if !cpu.online.load(Ordering::Acquire) {
         return None;
     }
-    let hart_id = hart.hart_id.load(Ordering::Acquire);
-    (hart_id != usize::MAX).then_some(hart_id)
+    let cpu_id = cpu.cpu_id.load(Ordering::Acquire);
+    (cpu_id != usize::MAX).then_some(cpu_id)
 }
 
 fn assert_remote_ipi_supported(context: &str) {
@@ -460,7 +403,7 @@ fn assert_remote_tlb_flush_supported(context: &str) {
 
 /// Service a pending remote operation for the current core.
 ///
-/// This is used both while spinning for the BKL and after a LoongArch IPI trap
+/// This is used both while spinning for the BKL and after a remote IPI trap
 /// has acquired it; in the latter case a remote TCB stall must avoid resuming
 /// the just-interrupted user context.
 pub(crate) fn service_pending_remote_core_op() -> RemoteCoreOpResult {
@@ -499,13 +442,13 @@ pub(crate) fn service_pending_remote_core_op() -> RemoteCoreOpResult {
         }
         _ => {}
     }
-    let hart = current_hart();
-    let stalled_current = target != 0 && hart.current_tcb.load(Ordering::Acquire) == target;
+    let cpu = current_cpu();
+    let stalled_current = target != 0 && cpu.current_tcb.load(Ordering::Acquire) == target;
     if stalled_current {
-        hart.current_tcb
+        cpu.current_tcb
             .store(null_mut::<Tcb>() as usize, Ordering::Release);
         unsafe {
-            (*hart.trap_scratch.get()).user_context = 0;
+            (*cpu.trap_scratch.get()).user_context = 0;
         }
     }
     complete_remote_core_op(bit);
@@ -522,93 +465,93 @@ fn complete_remote_core_op(bit: usize) {
     REMOTE_STALL_DONE_MASK.fetch_or(bit, Ordering::AcqRel);
 }
 
-pub fn remote_sfence_vma_all() {
+pub fn remote_tlb_flush_all() {
     let mut core = 0;
     while core < MAX_NUM_NODES {
-        if let Some(hart_id) = remote_online_hart_id(core) {
-            remote_sfence_vma_core(core, hart_id);
+        if let Some(cpu_id) = remote_online_cpu_id(core) {
+            remote_tlb_flush_core(core, cpu_id);
         }
         core += 1;
     }
 }
 
-pub fn remote_sfence_vma_asid_all(asid: usize) {
+pub fn remote_tlb_flush_asid_all(asid: usize) {
     let mut core = 0;
     while core < MAX_NUM_NODES {
-        if let Some(hart_id) = remote_online_hart_id(core) {
-            remote_sfence_vma_asid_core(core, hart_id, asid);
+        if let Some(cpu_id) = remote_online_cpu_id(core) {
+            remote_tlb_flush_asid_core(core, cpu_id, asid);
         }
         core += 1;
     }
 }
 
-fn remote_sfence_vma_core(core: usize, hart_id: usize) {
-    assert_remote_tlb_flush_supported("remote_sfence_vma_all");
-    let error = crate::arch::current::smp::remote_tlb_flush_all(hart_id);
+fn remote_tlb_flush_core(core: usize, cpu_id: usize) {
+    assert_remote_tlb_flush_supported("remote_tlb_flush_all");
+    let error = crate::arch::current::smp::remote_tlb_flush_all(cpu_id);
     assert!(
         error == 0,
-        "remote_sfence_vma failed for core {core} hart {hart_id}: error={}",
+        "remote tlb flush failed for core {core} cpu {cpu_id}: error={}",
         error
     );
 }
 
-fn remote_sfence_vma_asid_core(core: usize, hart_id: usize, asid: usize) {
-    assert_remote_tlb_flush_supported("remote_sfence_vma_asid_all");
-    let error = crate::arch::current::smp::remote_tlb_flush_asid(hart_id, asid);
+fn remote_tlb_flush_asid_core(core: usize, cpu_id: usize, asid: usize) {
+    assert_remote_tlb_flush_supported("remote_tlb_flush_asid_all");
+    let error = crate::arch::current::smp::remote_tlb_flush_asid(cpu_id, asid);
     assert!(
         error == 0,
-        "remote_sfence_vma_asid failed for core {core} hart {hart_id}: error={}",
+        "remote asid tlb flush failed for core {core} cpu {cpu_id}: error={}",
         error
     );
 }
 
-pub fn sfence_vma_all_harts() {
+pub fn tlb_flush_all_cpus() {
     crate::arch::current::machine::tlb_flush_all();
-    remote_sfence_vma_all();
+    remote_tlb_flush_all();
 }
 
-pub fn sfence_vma_asid_all_harts(asid: usize) {
+pub fn tlb_flush_asid_all_cpus(asid: usize) {
     crate::arch::current::machine::tlb_flush_asid(asid);
-    remote_sfence_vma_asid_all(asid);
+    remote_tlb_flush_asid_all(asid);
 }
 
 #[inline]
 pub fn current_tcb() -> *mut Tcb {
-    current_hart().current_tcb.load(Ordering::Acquire) as *mut Tcb
+    current_cpu().current_tcb.load(Ordering::Acquire) as *mut Tcb
 }
 
 #[inline]
 pub fn set_current_tcb(tcb: *mut Tcb) -> *mut Tcb {
     debug_assert_kernel_lock_held();
-    current_hart()
+    current_cpu()
         .current_tcb
         .swap(tcb as usize, Ordering::AcqRel) as *mut Tcb
 }
 
 pub unsafe fn set_current_thread(thread: Thread) {
-    current_hart().thread.with_mut(|current| *current = thread);
+    current_cpu().thread.with_mut(|current| *current = thread);
 }
 
 pub unsafe fn with_current_thread<R>(op: impl FnOnce(&mut Thread) -> R) -> R {
-    current_hart().thread.with_mut(op)
+    current_cpu().thread.with_mut(op)
 }
 
 #[inline]
 pub fn next_timer_deadline() -> u64 {
-    current_hart().next_timer_deadline.load(Ordering::Acquire)
+    current_cpu().next_timer_deadline.load(Ordering::Acquire)
 }
 
 #[inline]
 pub fn set_next_timer_deadline(deadline: u64) {
-    current_hart()
+    current_cpu()
         .next_timer_deadline
         .store(deadline, Ordering::Release);
 }
 
 pub fn clear_current_state() {
     debug_assert_kernel_lock_held();
-    let hart = current_hart();
-    hart.current_tcb
+    let cpu = current_cpu();
+    cpu.current_tcb
         .store(null_mut::<Tcb>() as usize, Ordering::Release);
-    hart.thread.with_mut(|thread| *thread = Thread::null());
+    cpu.thread.with_mut(|thread| *thread = Thread::null());
 }

@@ -7,11 +7,12 @@
 //! caps, and `PageTable_Map` installs those caps into the VSpace.
 
 use crate::abi::constants::{
-    KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE, PPTR_TOP, PT_INDEX_BITS, RISCV_PG_SHIFT,
+    KERNEL_ELF_BASE, PADDR_BASE, PHYS_BASE_RAW, PPTR_BASE, PPTR_TOP, PT_INDEX_BITS,
 };
 use crate::arch::riscv64::machine::csr;
 use crate::arch::riscv64::machine::paging::{
-    PTE_A, PTE_D, PTE_G, PTE_R, PTE_U, PTE_V, PTE_W, PTE_X, PageTable, Pte, make_satp, pt_index,
+    PTE_A, PTE_D, PTE_G, PTE_R, PTE_U, PTE_V, PTE_W, PTE_X, PageTable, Pte, RISCV_PG_SHIFT,
+    make_satp, pt_index,
 };
 use crate::kernel::smp::{BklCell, BklObjectGuard};
 
@@ -195,7 +196,7 @@ fn flush_vaddr_for_root(root: *const PageTable, vaddr: usize) {
             csr::sfence_vma_all();
         }
     }
-    crate::kernel::smp::remote_sfence_vma_all();
+    crate::kernel::smp::remote_tlb_flush_all();
 }
 
 #[inline]
@@ -419,7 +420,7 @@ pub unsafe fn reclaim_user_page_tables(root: *mut PageTable) {
         }
     }
     csr::sfence_vma_all();
-    crate::kernel::smp::remote_sfence_vma_all();
+    crate::kernel::smp::remote_tlb_flush_all();
 }
 
 unsafe fn reclaim_page_table_locked(pt: *mut PageTable, level: usize) {
@@ -449,7 +450,7 @@ pub unsafe fn switch_satp(satp_val: u64) {
 }
 
 fn switch_to_kernel_root() {
-    let Some(kernel_satp) = crate::kernel::smp::kernel_satp() else {
+    let Some(kernel_satp) = crate::kernel::smp::kernel_vspace_root() else {
         return;
     };
     if csr::satp() as u64 != kernel_satp {
@@ -613,4 +614,12 @@ pub fn satp_from_kva(root_kva: u64, asid: u64) -> u64 {
         return 0;
     };
     make_satp(asid, pa as u64)
+}
+
+pub fn vspace_root_for(root: *mut PageTable, asid: u64) -> u64 {
+    satp_for(root, asid)
+}
+
+pub unsafe fn switch_vspace(root: u64) {
+    unsafe { switch_satp(root) }
 }

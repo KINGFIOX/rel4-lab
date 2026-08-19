@@ -11,7 +11,8 @@ use crate::abi::constants::{
     KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, MAX_NUM_NODES, ROOT_CNODE_SIZE_BITS,
     SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
 };
-use crate::arch::current::api::{ROOTSERVER_SSTATUS, UserContext, UserRegister};
+use crate::arch::current::api::UserContext;
+use crate::arch::current::sel4_arch;
 use crate::arch::current::kernel::BOOT_PROFILE;
 use crate::arch::current::kernel::trap::{
     init_timer, install_trap_vector, restore_user_context_with_kernel_lock,
@@ -21,8 +22,8 @@ use crate::arch::current::machine::paging::{
     pt_index,
 };
 use crate::arch::current::object::vspace::{
-    alloc_pt_page, kpptr_to_paddr, make_boot_root_pt, paddr_to_kpptr, satp_for, switch_satp,
-    user_flags,
+    alloc_pt_page, kpptr_to_paddr, make_boot_root_pt, paddr_to_kpptr, switch_vspace, user_flags,
+    vspace_root_for,
 };
 use crate::arch::current::plat::{DEVICE_UNTYPED_REGIONS, FREE_RAM_REGIONS};
 use crate::kernel::bootmem;
@@ -56,7 +57,7 @@ pub struct BootArgs {
     pub user_ventry: usize,
     pub dtb_pa: usize,
     pub dtb_size: usize,
-    pub hart_id: usize,
+    pub cpu_id: usize,
     pub core_id: usize,
 }
 
@@ -136,7 +137,7 @@ impl BootUserPaging {
         );
         *slot = Pte::leaf(paddr as u64, flags);
         crate::arch::current::machine::tlb_flush_vaddr(vaddr);
-        crate::kernel::smp::remote_sfence_vma_all();
+        crate::kernel::smp::remote_tlb_flush_all();
     }
 
     fn ensure_table(
@@ -229,23 +230,23 @@ fn pa_to_pspace_va(pa: u64) -> u64 {
 
 /// Bootstrap the user environment and drop into U-mode.
 pub fn bringup_rootserver(args: &BootArgs) -> ! {
-    crate::kernel::smp::init_current_hart(args.hart_id, args.core_id);
+    crate::kernel::smp::init_current_cpu(args.cpu_id, args.core_id);
     crate::arch::current::machine::fpu::init_current_core();
     install_trap_vector();
     init_timer();
 
     // --- VSpace -----------------------------------------------------------
     let root_pt = make_boot_root_pt();
-    let satp = satp_for(root_pt, ROOTSERVER_ASID as u64);
-    crate::kernel::smp::publish_kernel_satp(satp);
-    unsafe { switch_satp(satp) };
+    let vspace_root = vspace_root_for(root_pt, ROOTSERVER_ASID as u64);
+    crate::kernel::smp::publish_kernel_vspace(vspace_root);
+    unsafe { switch_vspace(vspace_root) };
     crate::machine::console::init();
     crate::arch::current::machine::irq::init();
 
     info!("microkernel: Rust kernel booted ({})", BOOT_PROFILE);
     info!(
-        "  hart_id={} core_id={} dtb=0x{:x} ({} bytes)",
-        args.hart_id, args.core_id, args.dtb_pa, args.dtb_size
+        "  cpu_id={} core_id={} dtb=0x{:x} ({} bytes)",
+        args.cpu_id, args.core_id, args.dtb_pa, args.dtb_size
     );
     info!("microkernel: bringing up rootserver");
     info!(
@@ -257,7 +258,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         root_pt as usize,
         kpptr_to_paddr(root_pt as usize),
     );
-    info!("  satp <- {:#x}", satp);
+    info!("  vspace root <- {:#x}", vspace_root);
 
     // Map the rootserver image: PA = VA + pv_offset (elfloader convention).
     let mut boot_user_paging = BootUserPaging::new(root_pt);
@@ -645,15 +646,12 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
 
     // --- Switch to user mode ---------------------------------------------
     let t = ROOTSERVER_TCB.with_mut(|t| {
-        // sstatus: SPIE=1 (sret re-enables interrupts),
-        //          SUM=1  (kernel can touch user memory),
-        //          SPP=0  (sret enters U-mode).
-        t.context.pc = args.user_ventry as u64;
-        t.context.restart_pc = args.user_ventry as u64;
-        t.context.sstatus = ROOTSERVER_SSTATUS;
-        t.context.regs[UserRegister::A0.index()] = USER_BOOTINFO_VA as u64;
-        t.context.regs[UserRegister::A1.index()] = 0;
-        t.context.regs[UserRegister::Sp.index()] = USER_STACK_TOP as u64;
+        sel4_arch::init_rootserver_context(
+            &mut t.context,
+            args.user_ventry as u64,
+            USER_STACK_TOP as u64,
+            USER_BOOTINFO_VA as u64,
+        );
         t.affinity = crate::kernel::smp::current_core_id() as u8;
         t.state = crate::object::tcb::ThreadState::Running as u8;
         t as *mut Tcb
@@ -669,7 +667,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     info!("  entering user mode at {:#x}", args.user_ventry);
     info!("  --- transferring control to rootserver ---");
     let kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
-    crate::kernel::smp::release_secondary_harts();
+    crate::kernel::smp::release_secondary_cpus();
     unsafe {
         restore_user_context_with_kernel_lock(ROOTSERVER_TCB.context_ptr(), kernel_lock);
     }

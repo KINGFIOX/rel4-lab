@@ -1,6 +1,6 @@
 //! "Current thread" view used by the syscall slow path.
 //!
-//! This is a per-hart cache refreshed from `tcb::current()` on every
+//! This is a per-core cache refreshed from `tcb::current()` on every
 //! context switch (see `refresh_from_tcb` below). Cap lookups and
 //! IPC-buffer access through this struct therefore follow whichever TCB
 //! the local scheduler picked.
@@ -28,7 +28,7 @@ pub struct Thread {
     pub ipc_buffer_kva: *mut u64,
     /// User-mode VA of the IPC buffer (for `SetIPCBuffer` / banner).
     pub ipc_buffer_uva: u64,
-    /// Kernel-window VA of the thread's Sv39 root page table (= satp PPN).
+    /// Kernel-window VA of the thread's VSpace root page table.
     pub vspace_root_kva: u64,
 }
 
@@ -49,7 +49,7 @@ impl Thread {
 /// Replace the current-thread state.
 ///
 /// # Safety
-/// Caller must be running on the target hart with interrupts masked or while
+/// Caller must be running on the target core with interrupts masked or while
 /// holding the kernel lock.
 pub unsafe fn set_current(t: Thread) {
     unsafe { crate::kernel::smp::set_current_thread(t) };
@@ -60,7 +60,7 @@ pub unsafe fn with_current<R>(op: impl FnOnce(&mut Thread) -> R) -> R {
     unsafe { crate::kernel::smp::with_current_thread(op) }
 }
 
-/// Snapshot the per-hart cached IPC buffer KVA for early/degenerate paths
+/// Snapshot the per-core cached IPC buffer KVA for early/degenerate paths
 /// where no current TCB has been published.
 fn cached_ipc_buffer_kva_snapshot() -> *mut u64 {
     unsafe { with_current(|thread| thread.ipc_buffer_kva) }

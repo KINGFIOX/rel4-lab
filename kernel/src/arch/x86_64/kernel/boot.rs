@@ -133,7 +133,7 @@ pub extern "C" fn x86_64_high_entry(multiboot_magic: usize, multiboot_info: usiz
         args.user_ventry,
         args.dtb_pa,
         args.dtb_size,
-        args.hart_id,
+        args.cpu_id,
         args.core_id,
     )
 }
@@ -205,7 +205,7 @@ fn parse_multiboot_boot_args(multiboot_magic: usize, multiboot_info: usize) -> c
         user_ventry,
         dtb_pa: 0,
         dtb_size: 0,
-        hart_id: 0,
+        cpu_id: 0,
         core_id: 0,
     }
 }
@@ -249,7 +249,7 @@ pub extern "C" fn init_kernel(
         user_ventry,
         dtb_pa,
         dtb_size,
-        hart_id,
+        cpu_id: hart_id,
         core_id,
     };
     crate::kernel::boot::bringup_rootserver(&args)

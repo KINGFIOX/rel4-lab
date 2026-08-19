@@ -12,7 +12,7 @@ use crate::abi::types::MessageInfo;
 use crate::api::cspace::lookup_cap;
 use crate::api::invocation;
 use crate::api::thread;
-use crate::arch::current::api::{UserContext, UserRegister};
+use crate::arch::current::api::UserContext;
 use crate::object::cap::CapTag;
 
 #[derive(Copy, Clone, Debug)]
@@ -74,8 +74,8 @@ impl SyscallError {
 
 /// Handle `seL4_Call`: cap lookup + invocation dispatch.
 pub fn do_call(uc: &mut UserContext) {
-    let cptr = uc.regs[UserRegister::A0.index()];
-    let raw_info = uc.regs[UserRegister::A1.index()];
+    let cptr = uc.cap_reg();
+    let raw_info = uc.msg_info();
     let info = MessageInfo(raw_info);
 
     let mut endpoint_call = false;
@@ -158,8 +158,8 @@ fn restart_current_invocation_after_preemption(uc: &mut UserContext) {
 }
 
 fn write_ok_reply(uc: &mut UserContext, label: u64, length: u64) {
-    uc.regs[UserRegister::A0.index()] = 0; // badge
-    uc.regs[UserRegister::A1.index()] = MessageInfo::new(label, 0, 0, length).0;
+    uc.set_cap_reg(0); // badge
+    uc.set_msg_info(MessageInfo::new(label, 0, 0, length).0);
     // Don't touch a2..a5: leaving them as the user wrote matches the C
     // kernel's contract for "no extra reply mrs".
 }
@@ -169,8 +169,8 @@ fn write_error_reply(uc: &mut UserContext, e: SyscallError) {
     // requested label (e.g. SYSCALL0005 `seL4_Call` on the root CNode
     // cap); the error reply *is* the expected behaviour. Don't spam the
     // log — set the label and let the caller read it.
-    uc.regs[UserRegister::A0.index()] = 0;
-    uc.regs[UserRegister::A1.index()] = MessageInfo::new(e.to_label(), 0, 0, 0).0;
+    uc.set_cap_reg(0);
+    uc.set_msg_info(MessageInfo::new(e.to_label(), 0, 0, 0).0);
 }
 
 /// `seL4_Send` / `seL4_NBSend`: dispatch by cap type.
@@ -182,8 +182,8 @@ fn write_error_reply(uc: &mut UserContext, e: SyscallError) {
 /// during SYSCALL0001/0002/0004) are silently dropped to match the local
 /// compatibility baseline.
 pub fn do_send(uc: &mut UserContext, nb: bool) {
-    let cptr = uc.regs[UserRegister::A0.index()];
-    let raw_info = uc.regs[UserRegister::A1.index()];
+    let cptr = uc.cap_reg();
+    let raw_info = uc.msg_info();
     let info = MessageInfo(raw_info);
     let label = info.label();
     let mut length = info.length();
@@ -248,7 +248,7 @@ pub fn do_send(uc: &mut UserContext, nb: bool) {
 /// we walk the EP state machine in `api::ipc::recv`. Invalid receive caps
 /// raise a receive-phase CapFault, matching seL4 `handleRecv`.
 pub fn do_recv(uc: &mut UserContext, blocking: bool) {
-    let reply_cptr = uc.regs[UserRegister::A6.index()];
+    let reply_cptr = uc.reply_reg();
     if reply_cptr == 0 {
         do_recv_inner(uc, blocking, 0, false)
     } else {
@@ -258,7 +258,7 @@ pub fn do_recv(uc: &mut UserContext, blocking: bool) {
 
 pub fn do_recv_mcs(uc: &mut UserContext, blocking: bool, can_reply: bool) {
     let reply_cptr = if can_reply {
-        uc.regs[UserRegister::A6.index()]
+        uc.reply_reg()
     } else {
         0
     };
@@ -266,7 +266,7 @@ pub fn do_recv_mcs(uc: &mut UserContext, blocking: bool, can_reply: bool) {
 }
 
 fn do_recv_inner(uc: &mut UserContext, blocking: bool, reply_cptr: u64, can_reply: bool) {
-    let cptr = uc.regs[UserRegister::A0.index()];
+    let cptr = uc.cap_reg();
     let cap = match unsafe { thread::with_current(|t| lookup_cap(t, cptr)) } {
         Ok((cap, _slot)) => cap,
         Err(_) => {
@@ -298,13 +298,13 @@ fn do_recv_inner(uc: &mut UserContext, blocking: bool, reply_cptr: u64, can_repl
             let outcome = unsafe { crate::object::notification::wait(ntfn_ptr, cur_tcb, blocking) };
             match outcome {
                 crate::object::notification::WaitOutcome::Got(badge) => {
-                    uc.regs[UserRegister::A0.index()] = badge;
-                    uc.regs[UserRegister::A1.index()] = 0;
+                    uc.set_cap_reg(badge);
+                    uc.set_msg_info(0);
                     thread::zero_current_ipc_buffer_words(1, 4);
-                    uc.regs[UserRegister::A2.index()] = 0;
-                    uc.regs[UserRegister::A3.index()] = 0;
-                    uc.regs[UserRegister::A4.index()] = 0;
-                    uc.regs[UserRegister::A5.index()] = 0;
+                    uc.set_mr(0, 0);
+                    uc.set_mr(1, 0);
+                    uc.set_mr(2, 0);
+                    uc.set_mr(3, 0);
                 }
                 crate::object::notification::WaitOutcome::Blocked => {
                     // Caller is now BlockedOnNotification; signal() will
@@ -325,12 +325,12 @@ fn valid_reply_cap_for_recv(reply_cptr: u64) -> bool {
 }
 
 pub fn do_reply_recv_mcs(uc: &mut UserContext) {
-    let reply_cptr = uc.regs[UserRegister::A6.index()];
+    let reply_cptr = uc.reply_reg();
     if reply_cptr != 0 {
-        let saved_cptr = uc.regs[UserRegister::A0.index()];
-        uc.regs[UserRegister::A0.index()] = reply_cptr;
+        let saved_cptr = uc.cap_reg();
+        uc.set_cap_reg(reply_cptr);
         do_send(uc, false);
-        uc.regs[UserRegister::A0.index()] = saved_cptr;
+        uc.set_cap_reg(saved_cptr);
     } else {
         crate::api::ipc::reply(uc);
     }
@@ -338,20 +338,20 @@ pub fn do_reply_recv_mcs(uc: &mut UserContext) {
 }
 
 pub fn do_nbsend_recv_mcs(uc: &mut UserContext, wait: bool) {
-    let src = uc.regs[UserRegister::A0.index()];
-    let reply_or_dest = uc.regs[UserRegister::A6.index()];
+    let src = uc.cap_reg();
+    let reply_or_dest = uc.reply_reg();
     let send_dest = if wait { reply_or_dest } else { read_t0(uc) };
     let saved_src = src;
     if send_dest != 0 {
-        uc.regs[UserRegister::A0.index()] = send_dest;
+        uc.set_cap_reg(send_dest);
         do_send_with_reply_rights(uc, true);
     }
-    uc.regs[UserRegister::A0.index()] = saved_src;
+    uc.set_cap_reg(saved_src);
     do_recv_inner(uc, true, if wait { 0 } else { reply_or_dest }, !wait);
 }
 
 fn do_send_with_reply_rights(uc: &mut UserContext, nb: bool) {
-    let cptr = uc.regs[UserRegister::A0.index()];
+    let cptr = uc.cap_reg();
     let (cap, _slot) = match unsafe { thread::with_current(|t| lookup_cap(t, cptr)) } {
         Ok(v) => v,
         Err(_) => return,
@@ -375,7 +375,7 @@ fn do_send_with_reply_rights(uc: &mut UserContext, nb: bool) {
 }
 
 fn read_t0(uc: &UserContext) -> u64 {
-    uc.regs[UserRegister::T0.index()]
+    uc.scratch_reg()
 }
 
 fn write_recv_cap_fault_or_empty(uc: &mut UserContext, cptr: u64) {
@@ -385,11 +385,11 @@ fn write_recv_cap_fault_or_empty(uc: &mut UserContext, cptr: u64) {
 }
 
 fn write_empty(uc: &mut UserContext) {
-    uc.regs[UserRegister::A0.index()] = 0;
-    uc.regs[UserRegister::A1.index()] = 0;
-    uc.regs[UserRegister::A2.index()] = 0;
-    uc.regs[UserRegister::A3.index()] = 0;
-    uc.regs[UserRegister::A4.index()] = 0;
-    uc.regs[UserRegister::A5.index()] = 0;
+    uc.set_cap_reg(0);
+    uc.set_msg_info(0);
+    uc.set_mr(0, 0);
+    uc.set_mr(1, 0);
+    uc.set_mr(2, 0);
+    uc.set_mr(3, 0);
     thread::zero_current_ipc_buffer_words(1, 4);
 }
