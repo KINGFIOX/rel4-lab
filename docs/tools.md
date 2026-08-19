@@ -27,7 +27,7 @@ run is not a correctness signal for the current ABI.
 
 | Script | Check |
 |--------|--------|
-| `audit-trap-layout.py` | `trap.S` constants vs Rust `offset_of!` (x86 trap is wired) |
+| `audit-trap-layout.py` | RISC-V `trap.S` constants vs Rust `offset_of!`. The x86 trap path is wired (`arch/x86_64/trap.S`); this script still skips the x86 layout check. |
 | `audit-user-context-abi.py` | `seL4_UserContext` word order |
 | `audit-syscall-abi.py` | syscall numbers and object size bits vs `sel4-user` |
 | `audit-smp-abi.py` | remote stall / IPI / scratch patterns |

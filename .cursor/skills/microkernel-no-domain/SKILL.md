@@ -41,7 +41,7 @@ Keep these behaviors available:
 2. Search for domain terms with `rg -n "domain|Domain|ksCurDomain|DomainTime|domain_time|tcbDomain" kernel userspace tools`.
 3. Keep domain policy out of shared scheduler and TCB code before touching architecture trap handlers.
 4. Replace domain eligibility checks with single-domain behavior: a runnable thread on the current core is schedulable without comparing a domain ID.
-5. Keep RISC-V and x86_64 behavior symmetric; single-domain behavior should normally live in shared scheduler code, not architecture-specific branches. The x86_64 backend is staged (no trap yet).
+5. Keep RISC-V and x86_64 behavior symmetric; single-domain behavior should normally live in shared scheduler code, not architecture-specific branches. Both backends already run `kernel_exit` on trap return.
 6. If retaining seL4-compatible domain ABI, document and implement it as a single-domain no-op rather than chasing a domain-name-free source tree.
 
 ## Validation
@@ -50,7 +50,7 @@ Use the smallest useful validation stage:
 
 - Rust-only edits: `cargo fmt --all --check`, then `cargo check`.
 - Scheduler-sensitive changes: run focused sel4tests for scheduling, IPC, and multicore behavior on RISC-V first.
-- Architecture parity: run matching `ARCH=x86_64` build/check commands when shared scheduler code changed. The x86_64 backend is staged (no trap yet).
+- Architecture parity: when shared scheduler code changed, `cargo check`/`cargo build --target x86_64-unknown-none -p kernel` and `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 tools/run-hello.py`. x86 IPI and linux-compat are still out of scope.
 - linux-compat impact: run `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py`.
 
 Do not claim domain scheduling avoidance is complete until temporary diagnostics are cleaned up, compatibility paths are no-ops, and relevant focused validations pass.

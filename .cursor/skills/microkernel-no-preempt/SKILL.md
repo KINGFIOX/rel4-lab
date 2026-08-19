@@ -15,7 +15,7 @@ User-space written for this project should be portable across seL4 and rel4. It 
 
 Read this before describing the scheduler. The previous version of this skill got it wrong, and so did the README and milestone docs.
 
-- `kernel_exit` appends the current runnable thread to the tail of its core runqueue and then takes the head. It runs on every trap cause, including timer interrupts. See `kernel_exit` in `kernel/src/arch/riscv64/kernel/trap.rs`. The x86_64 backend is staged (no trap yet).
+- `kernel_exit` appends the current runnable thread to the tail of its core runqueue and then takes the head. It runs on every trap cause, including timer interrupts. Each backend has a copy: `kernel/src/arch/riscv64/kernel/trap.rs` and `kernel/src/arch/x86_64/kernel/trap.rs`.
 - Involuntary, timer-driven context switches therefore do happen whenever another runnable thread is queued on the same core. This is the same append-tail-and-reschedule mechanism as upstream non-MCS `timerTick` in `third_party/sel4test/kernel/src/kernel/thread.c`, with an effective `CONFIG_TIME_SLICE` of one tick.
 - The only exception is the one-shot resume hint `continue_current_once` in `kernel/src/object/tcb.rs`, set only by the `TCBResume` invocation.
 - What is genuinely absent is accounting, not switching: no per-TCB timeslice counter, no consumed-time charging, and no priority-driven preemption.
@@ -58,7 +58,7 @@ Keep these behaviors available:
 2. Keep preemption policy out of shared scheduler code before modifying architecture trap handlers.
 3. Keep the timer handlers in `kernel/src/arch/riscv64/kernel/trap.rs` focused on interrupt delivery and timer reprogramming, not quantum accounting. Note that the rotation itself lives in the shared `kernel_exit` path rather than in the timer handler, so review `kernel_exit` when changing switch policy.
 4. Keep runqueue operations deterministic: enqueue runnable threads at the tail and dequeue the selected thread. If you change when rescheduling happens, update `README.md` and `docs/kernel.md` in the same change so the described policy stays true.
-5. Keep RISC-V trap/timer behavior as the reference. The x86_64 backend is staged (no trap yet).
+5. Keep RISC-V trap/timer behavior as the linux-compat and sel4test reference. The x86_64 backend has a matching `kernel_exit` plus `syscall`/`sysret` and a single-core LAPIC timer; do not add timeslice accounting there either.
 6. When changing user-space owned by this project, write it so it remains correct on both seL4 and rel4 without relying on timer preemption; add explicit yield/blocking/synchronization where interleaving is required.
 
 ## Validation
@@ -67,7 +67,7 @@ Use the smallest useful validation stage:
 
 - Rust-only edits: `cargo fmt --all --check`, then `cargo check`.
 - Focused seL4 checks: choose tests around IPC, yield, timers, or interrupts affected by the edit.
-- Architecture parity: validate `ARCH=riscv64` when shared scheduling or the trap handler changed. The x86_64 backend is staged (no trap yet).
+- Architecture parity: validate `ARCH=riscv64` when shared scheduling or the RISC-V trap handler changed. When the x86 trap, timer, or shared `kernel_exit` policy changed, also run `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 tools/run-hello.py`.
 - linux-compat impact: run `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py`.
 
 Do not claim the scheduler is non-preemptive or cooperative; verify the `kernel_exit` rotation before making any statement about switch policy. Do not claim timeslice/budget avoidance is complete until temporary diagnostics are cleaned up and relevant focused validations pass.

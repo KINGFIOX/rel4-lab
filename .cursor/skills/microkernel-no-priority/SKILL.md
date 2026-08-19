@@ -46,7 +46,7 @@ Keep these behaviors available:
 3. Keep priority policy out of shared scheduler and TCB code before touching architecture trap handlers.
 4. Replace priority queues with a round-robin runnable queue. Enqueue newly runnable TCBs at the tail unless an existing non-priority IPC invariant requires a narrower choice.
 5. Preserve explicit `Yield` by rotating the current runnable TCB to the tail of the round-robin queue.
-6. Keep RISC-V and x86_64 behavior symmetric; priority-insensitive behavior should normally be shared scheduler code, not architecture-specific branches. The x86_64 backend is staged (no trap yet).
+6. Keep RISC-V and x86_64 behavior symmetric; priority-insensitive behavior should normally be shared scheduler code, not architecture-specific branches. Both backends already run `kernel_exit` on trap return.
 7. When changing user-space, avoid assumptions that higher priority makes a task run first or receive IPC first; keep priority calls only for seL4 portability.
 
 ## Validation
@@ -55,7 +55,7 @@ Use the smallest useful validation stage:
 
 - Rust-only edits: `cargo fmt --all --check`, then `cargo check`.
 - Scheduler-sensitive changes: run focused sel4tests for yield, IPC ordering, notifications, and multicore behavior on RISC-V first.
-- Architecture parity: run matching `ARCH=x86_64` build/check commands when shared scheduler code changed. The x86_64 backend is staged (no trap yet).
+- Architecture parity: when shared scheduler code changed, `cargo check`/`cargo build --target x86_64-unknown-none -p kernel` and `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 tools/run-hello.py`.
 - linux-compat impact: run `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py`.
 
 Do not claim priority scheduling avoidance is complete until temporary diagnostics are cleaned up, priority APIs are behaviorally no-op on rel4, user-space does not depend on priority semantics, and relevant focused validations pass.

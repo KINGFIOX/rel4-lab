@@ -165,13 +165,16 @@ cargo build --release --target riscv64gc-unknown-none-elf -p kernel
 cargo build --release --target x86_64-unknown-none -p kernel
 ```
 
-The x86_64 kernel target is compile-only in this phase: trap, timer, and
-user-space are not wired yet.
+The x86_64 kernel boots on QEMU `pc` as a Multiboot image: trap,
+`syscall`/`sysret`, the LAPIC timer, and `hello-rootserver` are wired.
+IOAPIC, SMP IPI, lazy FPU, and linux-compat are not on this path. The
+x86 user gate is `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 ./tools/run-hello.py`.
 
-Current smoke path:
+Current smoke paths:
 
 ```sh
 TIMEOUT=180 ARCH=riscv64 ./tools/run-ltp.py
+TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 ./tools/run-hello.py
 ```
 
 Clean up a stuck QEMU test process if a run is interrupted:
