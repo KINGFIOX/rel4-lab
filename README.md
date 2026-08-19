@@ -1,8 +1,8 @@
 # microkernel
 
-`microkernel` is a Rust seL4-style kernel for RV64 `qemu-riscv-virt`, with a
-staged `x86_64` backend, plus a user-space xv6 compatibility stack built on
-top of a seL4-like capability ABI.
+`microkernel` is a Rust seL4-style kernel for RV64 `qemu-riscv-virt` and a
+single-core x86_64 QEMU `pc` user bring-up, plus a user-space xv6
+compatibility stack (RISC-V only) built on a seL4-like capability ABI.
 
 The current rel4 scope intentionally keeps the scheduler simpler than upstream
 seL4 MCS: there are no `SchedContext`/`SchedControl` objects, dispatch is
@@ -39,6 +39,7 @@ microkernel/
 |-- kernel/                    # Rust seL4 kernel
 |-- userspace/
 |   |-- sel4-user/             # shared no_std seL4 user ABI wrappers
+|   |-- hello-rootserver/      # minimal x86/RV rootserver gate
 |   |-- xv6-abi/               # xv6 syscall/fs/disk protocol constants
 |   |-- xv6-host/              # xv6 rootserver and syscall server
 |   |-- vfs-server/            # Unix fd, path, pipe, and console VFS
@@ -116,6 +117,15 @@ SEL4TEST_REGEX='Test that there are tests' ./tools/pack-image.py
 TIMEOUT=480 SMP=1 ./tools/run-tests.py
 SMP=OFF NUM_NODES=1 ./tools/pack-image.py
 ```
+
+x86_64 user bring-up (QEMU `pc`, single core):
+
+```sh
+TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 ./tools/run-hello.py
+```
+
+Success is the log line `hello-rootserver: ok`. This is not the xv6 stack
+and is not `ARCH=x86_64 ./tools/run-tests.py`.
 
 The unmodified upstream `sel4test-driver` still assumes seL4's MCS
 `SchedContext`/`SchedControl` ABI. After the rel4 no-MCS rollback, successful

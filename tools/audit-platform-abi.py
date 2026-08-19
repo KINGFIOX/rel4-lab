@@ -217,7 +217,7 @@ def main(argv: list[str]) -> int:
         die(PREFIX, f"kernel platform source not found: {kernel_platform_rs}")
     if not userspace_platform_rs.is_file():
         if target.name == "x86_64":
-            print("PASS: x86_64 platform ABI audit skipped; backend is staged (no trap yet)")
+            print("PASS: x86_64 platform ABI audit skipped; xv6-abi is RISC-V only")
             return 0
         die(PREFIX, f"xv6 platform source not found: {userspace_platform_rs}")
 
@@ -229,7 +229,7 @@ def main(argv: list[str]) -> int:
     if target.name == "riscv64":
         errors = audit_riscv64(kernel_consts, platform_consts, regions)
     elif target.name == "x86_64":
-        print("PASS: x86_64 platform ABI audit skipped; backend is staged (no trap yet)")
+        print("PASS: x86_64 platform ABI audit skipped; xv6-abi is RISC-V only")
         return 0
     else:
         die(PREFIX, f"unsupported target {target.name}")

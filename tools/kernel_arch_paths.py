@@ -39,6 +39,10 @@ def trap_rs(target_name: str) -> Path:
     return arch_kernel(target_name, "trap.rs")
 
 
+def sel4_arch_rs(target_name: str) -> Path:
+    return arch_dir(target_name) / "sel4_arch" / "mod.rs"
+
+
 def trap_scratch_rs(target_name: str) -> Path:
     return arch_kernel(target_name, "trap_scratch.rs")
 

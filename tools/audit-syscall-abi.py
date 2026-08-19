@@ -175,9 +175,43 @@ def audit_object_size_bits(errors: list[str]) -> None:
             errors.append(f"kernel {name}={value}, expected {expected_value}")
 
 
+def audit_userspace_arch_x86_64(errors: list[str]) -> None:
+    path = ROOT_DIR / "userspace" / "sel4-user" / "src" / "arch" / "x86_64.rs"
+    text = path.read_text()
+    if text.count('"syscall"') < 7:
+        errors.append(f"{path.relative_to(ROOT_DIR)} has too few syscall instructions")
+    for reg in ("rdi", "rsi", "r10", "r8", "r9", "r15", "rax"):
+        require_text(errors, path, f'inlateout("{reg}")', f"{reg} syscall register")
+    require_text(errors, path, 'inlateout("r12")', "r12 reply register")
+    require_text(errors, path, 'clobber_abi("C")', "C ABI clobber declaration")
+    require_text(errors, path, "options(nostack)", "nostack asm option")
+    for syscall in (
+        "SYS_CALL",
+        "SYS_REPLY_RECV",
+        "SYS_SEND",
+        "SYS_YIELD",
+        "SYS_DEBUG_PUT_CHAR",
+        "SYS_DEBUG_HALT",
+    ):
+        require_text(errors, path, syscall, f"{syscall} use")
+
+    call = arch_function_source(errors, path, "call")
+    require_function_text(errors, path, call, 'inlateout("rdi")', "call uses rdi")
+    require_function_text(errors, path, call, 'inlateout("rsi")', "call uses rsi")
+    require_function_text(errors, path, call, "SYS_CALL", "call uses SYS_CALL")
+    forbid_function_text(errors, path, call, 'inlateout("r12")', "call reply-cap register")
+
+    recv = arch_function_source(errors, path, "recv_with_reply")
+    require_function_text(errors, path, recv, 'inlateout("r12")', "recv_with_reply uses r12")
+    require_function_text(errors, path, recv, "reply => _", "recv_with_reply passes reply cap")
+
+    debug_put_char = arch_function_source(errors, path, "debug_put_char")
+    require_function_text(errors, path, debug_put_char, "SYS_DEBUG_PUT_CHAR", "debug_put_char uses SYS_DEBUG_PUT_CHAR")
+
+
 def audit_userspace_arch(errors: list[str], target_name: str) -> None:
     if target_name == "x86_64":
-        # Userspace x86_64 is not present yet; the kernel backend is staged.
+        audit_userspace_arch_x86_64(errors)
         return
     expectation = ARCH_EXPECTATIONS[target_name]
     path = ROOT_DIR / "userspace" / "sel4-user" / "src" / "arch" / f"{target_name}.rs"
@@ -275,9 +309,23 @@ def audit_userspace_common(errors: list[str]) -> None:
         require_text(errors, path, syscall, f"{syscall} definition/use")
 
 
+def audit_kernel_trap_x86_64(errors: list[str]) -> None:
+    path = trap_rs("x86_64")
+    rel = path.relative_to(ROOT_DIR)
+    source = path.read_text()
+    require_text(errors, path, "uc.syscall_reg() as isize", "syscall number read from rax")
+    require_text(errors, path, "restore_user_context", "user restore entry")
+    require_text(errors, path, "fn kernel_exit(", "kernel_exit after every trap")
+    for kernel_name in KERNEL_SYSCALLS:
+        if f"SyscallNumber::{kernel_name}" not in source:
+            errors.append(f"{rel} does not dispatch SyscallNumber::{kernel_name}")
+    require_text(errors, path, "crate::api::syscall::do_call(uc)", "Call syscall handler")
+    require_text(errors, path, "crate::machine::console::putc(ch)", "DebugPutChar syscall handler")
+
+
 def audit_kernel_trap(errors: list[str], target_name: str) -> None:
     if target_name == "x86_64":
-        # Trap decode is not wired; this is a staged backend, not a leftover ISA.
+        audit_kernel_trap_x86_64(errors)
         return
     path = trap_rs(target_name)
     rel = path.relative_to(ROOT_DIR)

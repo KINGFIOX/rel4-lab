@@ -9,7 +9,7 @@ pub use object_type::ObjectType;
 /// Opaque address-space root programmed by `switch_vspace`.
 pub type VspaceRoot = u64;
 
-use crate::object::cap::Cap;
+use crate::object::cap::{Cap, CapTag};
 
 pub const X86_64_NUM_FP_REGS: usize = 16;
 pub const SEL4_USER_CONTEXT_WORDS: usize = 24;
@@ -30,13 +30,75 @@ const FS_BASE: usize = 22;
 /// User-visible TCB register ABI indices for Read/WriteRegisters.
 /// Index 0 is the FaultIP sentinel used by shared TCB code.
 pub const SEL4_USER_CONTEXT_REGS: [usize; 32] = [
-    FAULT_IP, RSP, FLAGS, RAX, 3, 4, 5, 6, 7, R8, R9, R10, 18, 19, R15, RSI, RDI, FS_BASE, 23, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    UserRegister::Rip.index(),
+    UserRegister::Rsp.index(),
+    UserRegister::Rflags.index(),
+    UserRegister::Rax.index(),
+    3,
+    4,
+    5,
+    6,
+    7,
+    UserRegister::R8.index(),
+    UserRegister::R9.index(),
+    UserRegister::R10.index(),
+    18,
+    19,
+    UserRegister::R15.index(),
+    UserRegister::Rsi.index(),
+    UserRegister::Rdi.index(),
+    UserRegister::FsBase.index(),
+    23,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
 ];
 pub const SEL4_TCB_FRAME_REGS: [usize; 16] = [
-    FAULT_IP, RSP, FLAGS, RAX, 3, 4, 5, 6, 7, R8, R9, R10, 18, 19, R15, RSI,
+    UserRegister::Rip.index(),
+    UserRegister::Rsp.index(),
+    UserRegister::Rflags.index(),
+    UserRegister::Rax.index(),
+    3,
+    4,
+    5,
+    6,
+    7,
+    UserRegister::R8.index(),
+    UserRegister::R9.index(),
+    UserRegister::R10.index(),
+    18,
+    19,
+    UserRegister::R15.index(),
+    UserRegister::Rsi.index(),
 ];
-pub const SEL4_TCB_GP_REGS: [usize; 16] = [FS_BASE, 23, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+pub const SEL4_TCB_GP_REGS: [usize; 16] = [
+    UserRegister::FsBase.index(),
+    23,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+];
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -230,6 +292,37 @@ pub fn init_rootserver_context(context: &mut UserContext, entry: u64, stack: u64
 
 pub fn set_fpu_context_enabled(_context: &mut UserContext, _enabled: bool) {}
 
-pub fn same_object_as(_left: Cap, _right: Cap) -> bool {
-    false
+pub fn same_object_as(left: Cap, right: Cap) -> bool {
+    match (left.tag(), right.tag()) {
+        (Some(CapTag::Endpoint), Some(CapTag::Endpoint)) => {
+            left.endpoint_ptr() == right.endpoint_ptr()
+        }
+        (Some(CapTag::Notification), Some(CapTag::Notification)) => {
+            left.notification_ptr() == right.notification_ptr()
+        }
+        (Some(CapTag::CNode), Some(CapTag::CNode)) => {
+            left.cnode_ptr() == right.cnode_ptr() && left.cnode_radix() == right.cnode_radix()
+        }
+        (Some(CapTag::Thread), Some(CapTag::Thread)) => left.thread_ptr() == right.thread_ptr(),
+        (Some(CapTag::Reply), Some(CapTag::Reply)) => {
+            left.reply_object_ptr() == right.reply_object_ptr()
+        }
+        (Some(CapTag::IrqHandler), Some(CapTag::IrqHandler)) => {
+            left.irq_handler_irq() == right.irq_handler_irq()
+        }
+        (Some(CapTag::Domain), Some(CapTag::Domain))
+        | (Some(CapTag::AsidControl), Some(CapTag::AsidControl)) => true,
+        (Some(CapTag::PageTable), Some(CapTag::PageTable)) => {
+            left.page_table_base_ptr() == right.page_table_base_ptr()
+        }
+        (Some(CapTag::AsidPool), Some(CapTag::AsidPool)) => {
+            left.asid_pool_ptr() == right.asid_pool_ptr()
+        }
+        (Some(CapTag::Frame), Some(CapTag::Frame)) => {
+            left.frame_base_ptr() == right.frame_base_ptr()
+                && left.frame_size() == right.frame_size()
+                && left.frame_is_device() == right.frame_is_device()
+        }
+        _ => false,
+    }
 }

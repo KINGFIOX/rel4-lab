@@ -1,9 +1,9 @@
 //! x86_64 kernel backend.
 //!
-//! This backend is intentionally staged behind compile-time support first. It
-//! provides the seL4-shaped module contract (`sel4_arch`, `machine`, `object`,
-//! `plat`, `smp`) so shared kernel code stays ISA-neutral. Trap, timer, and
-//! IPI paths are still stubs.
+//! Provides the seL4-shaped module contract (`sel4_arch`, `machine`, `object`,
+//! `plat`, `smp`) plus user-mode return through `syscall`/`sysret`, a 4-level
+//! VSpace, COM1 output, and a single-core x2APIC timer. IPI and IOAPIC stay
+//! unwired.
 
 pub mod api;
 pub mod kernel;

@@ -147,6 +147,33 @@ def audit_common_paging(errors: list[str], consts: dict[str, int], target_name: 
     )
 
 
+def audit_x86_64(errors: list[str]) -> None:
+    abi_consts = parse_consts(
+        ROOT_DIR / "kernel" / "src" / "abi" / "constants.rs",
+        target_name="x86_64",
+    )
+    paging = paging_rs("x86_64")
+    consts = parse_consts(paging, abi_consts)
+    expect(errors, "x86_64 PAGE_SHIFT", consts.get("PAGE_SHIFT"), 12)
+    expect(errors, "x86_64 PAGE_SIZE", consts.get("PAGE_SIZE"), 0x1000)
+    expect(errors, "x86_64 LEAF_LEVEL", consts.get("LEAF_LEVEL"), 0)
+    expect(errors, "x86_64 ROOT_LEVEL", consts.get("ROOT_LEVEL"), 3)
+    expect(errors, "x86_64 ROOT_CHILD_COVERAGE_BITS", consts.get("ROOT_CHILD_COVERAGE_BITS"), 39)
+    expect(errors, "x86_64 LEAF_PARENT_COVERAGE_BITS", consts.get("LEAF_PARENT_COVERAGE_BITS"), 21)
+    for name, value in (
+        ("PTE_PRESENT", 1 << 0),
+        ("PTE_W", 1 << 1),
+        ("PTE_U", 1 << 2),
+        ("PTE_PS", 1 << 7),
+        ("PTE_G", 1 << 8),
+        ("PTE_NX", 1 << 63),
+    ):
+        expect(errors, f"x86_64 {name}", consts.get(name), value)
+    vspace = ROOT_DIR / "kernel" / "src" / "arch" / "x86_64" / "object" / "vspace.rs"
+    require_text(errors, vspace, "prepare_user_frame_map_at", "4-level user frame map")
+    require_text(errors, vspace, "USER_ROOT_ENTRIES << (PAGE_SHIFT + PT_INDEX_BITS * ROOT_LEVEL)", "4-level USER_TOP")
+
+
 def audit_riscv64(errors: list[str]) -> None:
     abi_consts = parse_consts(
         ROOT_DIR / "kernel" / "src" / "abi" / "constants.rs",
@@ -185,8 +212,7 @@ def main(argv: list[str]) -> int:
     if target.name == "riscv64":
         audit_riscv64(errors)
     elif target.name == "x86_64":
-        print("PASS: x86_64 VSpace ABI audit skipped; backend is staged (no trap yet)")
-        return 0
+        audit_x86_64(errors)
     else:
         errors.append(f"unsupported target {target.name}")
 

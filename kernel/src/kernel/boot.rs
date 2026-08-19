@@ -8,8 +8,8 @@ use log_crate::{info, warn};
 
 use crate::abi::bootinfo::{BootInfo, RootCNodeCapSlot, SlotRegion, UntypedDesc};
 use crate::abi::constants::{
-    KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, MAX_NUM_NODES, ROOT_CNODE_SIZE_BITS,
-    SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
+    KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, MAX_NUM_NODES, PT_INDEX_BITS,
+    ROOT_CNODE_SIZE_BITS, SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
 };
 use crate::arch::current::api::UserContext;
 use crate::arch::current::kernel::BOOT_PROFILE;
@@ -17,8 +17,7 @@ use crate::arch::current::kernel::trap::{
     init_timer, install_trap_vector, restore_user_context_with_kernel_lock,
 };
 use crate::arch::current::machine::paging::{
-    LEAF_PARENT_COVERAGE_BITS, PAGE_SHIFT, PAGE_SIZE, PageTable, Pte, ROOT_CHILD_COVERAGE_BITS,
-    pt_index,
+    PAGE_SHIFT, PAGE_SIZE, PageTable, Pte, ROOT_LEVEL, pt_index,
 };
 use crate::arch::current::object::vspace::{
     alloc_pt_page, kpptr_to_paddr, make_boot_root_pt, paddr_to_kpptr, switch_vspace, user_flags,
@@ -127,9 +126,13 @@ impl BootUserPaging {
     fn map_4k(&mut self, vaddr: usize, paddr: usize, flags: u64) {
         assert!(vaddr & (PAGE_SIZE - 1) == 0, "user VA is not 4K-aligned");
         assert!(paddr & (PAGE_SIZE - 1) == 0, "user PA is not 4K-aligned");
-        let l1 = self.ensure_table(self.root, vaddr, 2);
-        let l0 = self.ensure_table(l1, vaddr, 1);
-        let slot = unsafe { &mut (*l0).entries[pt_index(vaddr, 0)] };
+        let mut table = self.root;
+        let mut parent_level = ROOT_LEVEL;
+        while parent_level > 0 {
+            table = self.ensure_table(table, vaddr, parent_level);
+            parent_level -= 1;
+        }
+        let slot = unsafe { &mut (*table).entries[pt_index(vaddr, 0)] };
         assert!(
             !slot.is_valid(),
             "duplicate boot user mapping at VA {:#x}",
@@ -187,11 +190,7 @@ impl BootUserPaging {
 }
 
 const fn table_coverage_bits(level: usize) -> usize {
-    match level {
-        1 => ROOT_CHILD_COVERAGE_BITS,
-        0 => LEAF_PARENT_COVERAGE_BITS,
-        _ => PAGE_SHIFT,
-    }
+    PAGE_SHIFT + PT_INDEX_BITS * (level + 1)
 }
 
 fn align_down(value: usize, bits: usize) -> usize {
@@ -709,7 +708,7 @@ fn install_boot_user_paging_caps(
     let start = *next_slot;
     let mut emitted = [false; MAX_BOOT_USER_PAGING_CAPS];
 
-    for level in [1usize, 0usize] {
+    for level in (0..ROOT_LEVEL).rev() {
         loop {
             let mut best: Option<usize> = None;
             for i in 0..paging.cap_count {

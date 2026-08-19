@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "kernel",
     "userspace/sel4-user",
+    "userspace/hello-rootserver",
     "userspace/uart-server",
     "userspace/virtio-disk-server",
     "userspace/vfs-server",
@@ -13,6 +14,7 @@ members = [
 default-members = [
     "kernel",
     "userspace/sel4-user",
+    "userspace/hello-rootserver",
     "userspace/uart-server",
     "userspace/virtio-disk-server",
     "userspace/vfs-server",

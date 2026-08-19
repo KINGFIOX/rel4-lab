@@ -116,7 +116,7 @@ def main(argv: list[str]) -> int:
     if target.name == "riscv64":
         audit_riscv64(errors)
     elif target.name == "x86_64":
-        print("PASS: x86_64 SMP ABI audit skipped; backend is staged (no trap yet)")
+        print("PASS: x86_64 SMP ABI audit skipped; remote IPI is not wired")
         return 0
     else:
         errors.append(f"unsupported target {target.name}")

@@ -2,7 +2,7 @@
 //!
 //! RISC-V values are frozen against the upstream `qemu-riscv-virt` build of
 //! the official seL4 kernel. x86_64 values follow the pc99 / high-half
-//! kernel window used by the staged backend.
+//! kernel window used by the x86_64 backend.
 
 #![allow(dead_code)]
 
@@ -99,7 +99,7 @@ pub const PADDR_BASE: usize = 0;
 #[cfg(target_arch = "x86_64")]
 pub const PHYS_BASE_RAW: usize = 0x0020_0000;
 #[cfg(target_arch = "x86_64")]
-pub const PPTR_BASE: usize = 0xFFFF_FF80_0000_0000;
+pub const PPTR_BASE: usize = 0xFFFF_FFC0_0000_0000;
 #[cfg(target_arch = "x86_64")]
 pub const PPTR_TOP: usize = 0xFFFF_FFFF_8000_0000;
 #[cfg(target_arch = "x86_64")]

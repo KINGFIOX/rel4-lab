@@ -44,7 +44,7 @@ impl Pte {
 
     #[inline]
     pub const fn next(pt_paddr: u64) -> Pte {
-        Pte((pt_paddr & PTE_ADDR_MASK) | PTE_PRESENT | PTE_W)
+        Pte((pt_paddr & PTE_ADDR_MASK) | PTE_PRESENT | PTE_W | PTE_U)
     }
 
     #[inline]

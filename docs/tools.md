@@ -11,6 +11,7 @@ so Cargo writes into the repository `target/` that the installer copies from.
 | Script | Behavior in code |
 |--------|------------------|
 | `pack-image.py` | Builds `-p kernel`, runs the kernel audit suite, injects the ELF into the sel4test elfloader, optional `ROOTSERVER_ELF`. Prints `image ready:`. |
+| `run-hello.py` | x86_64 gate: builds kernel + `hello-rootserver`, runs the kernel audits, objcopies a Multiboot kernel, boots QEMU `-kernel`/`-initrd` `-serial stdio`. Success is `hello-rootserver: ok`. |
 | `run-tests.py` | Boots an already packed image. Default `TIMEOUT=180`, `SMP=2`. Exit 0 on `Test suite passed.` (or a configured baseline fail banner). |
 | `simulate.py` | Interactive QEMU. `MODE=image` if a packed image exists, else `standalone` kernel ELF. |
 | `run-xv6-user.py` | Builds payload + xv6-host, optional `fs.img`, packs with `ROOTSERVER_ELF`, boots. Success is `xv6-host: exit(0) pid=1`. |
@@ -28,12 +29,12 @@ run is not a correctness signal for the current ABI.
 
 | Script | Check |
 |--------|--------|
-| `audit-trap-layout.py` | `trap.S` constants vs Rust `offset_of!` |
+| `audit-trap-layout.py` | `trap.S` constants vs Rust `offset_of!` (x86 trap is wired) |
 | `audit-user-context-abi.py` | `seL4_UserContext` word order |
 | `audit-syscall-abi.py` | syscall numbers and object size bits vs `sel4-user` |
 | `audit-smp-abi.py` | remote stall / IPI / scratch patterns |
 | `audit-platform-abi.py` | UART / virtio MMIO constants vs `xv6-abi` |
-| `audit-vspace-abi.py` | page-table / ASID constants |
+| `audit-vspace-abi.py` | page-table / ASID constants (x86 4-level) |
 | `audit-kernel-elf.py` | kernel ELF entry and PT_LOAD layout |
 | `audit-kernel-fpu.py` | FP instructions confined to the RV64 FPU module |
 

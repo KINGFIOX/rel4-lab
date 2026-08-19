@@ -7,7 +7,8 @@ is architecture-neutral. Each ISA backend is selected at compile time with
 is not implemented.
 
 Runnable today: `riscv64gc-unknown-none-elf` on QEMU `virt`, booted through the
-upstream seL4 elfloader. `x86_64-unknown-none` links; trap return is `hlt`.
+upstream seL4 elfloader, and `x86_64-unknown-none` on QEMU `pc` with a
+Multiboot kernel plus a user initrd. The xv6 stack is RISC-V only.
 
 ## Layout
 
@@ -18,9 +19,9 @@ kernel/src/
 |-- object/        # caps, CTE/MDB, TCB, endpoint, notification, reply, ASID, IRQ
 |-- kernel/        # shared boot and SMP / BKL
 |-- machine/       # shared console only
-`-- arch/
+    `-- arch/
     |-- riscv64/   # sel4_arch, machine, kernel (trap.S), object, plat, smp
-    `-- x86_64/    # same module names; trap/timer/IPI are empty or halt
+    `-- x86_64/    # same module names; trap.S, x2APIC timer, 4-level VSpace
 ```
 
 Each arch crate follows the seL4 compile-time split:
@@ -28,7 +29,7 @@ Each arch crate follows the seL4 compile-time split:
 | Module | Role |
 |--------|------|
 | `sel4_arch` | `UserContext` accessors, arch invocation IDs, `ObjectType`, `VspaceRoot` |
-| `machine` | paging bits, TLB, FPU, IRQ/PLIC or stubs |
+| `machine` | paging bits, TLB, FPU, IRQ/PLIC or x2APIC |
 | `kernel` | boot, trap, `TrapScratch` |
 | `object` | VSpace map/unmap |
 | `plat` | QEMU virt or pc99 constants |
@@ -120,8 +121,8 @@ with no error reply.
 Per-core FIFO runqueues in `object/tcb.rs`. `schedule()` dequeues the head
 runnable TCB on the current core. Priority is not consulted.
 
-Every RV64 trap returns through `kernel_exit` in
-`arch/riscv64/kernel/trap.rs`:
+Every trap returns through `kernel_exit` in the arch `trap.rs`
+(`arch/riscv64` and `arch/x86_64` each have a copy):
 
 1. If `TCBResume` set `continue_current_once` on the current TCB, resume it.
 2. Otherwise enqueue the current TCB if it is still runnable.
@@ -177,10 +178,11 @@ RV64 is Sv39: one `PageTable` object type, 4K / 2M / 1G leaves
 uses `satp` and `sfence.vma` only inside that backend.
 
 x86_64 paging types are PML4 / PDPT / PD / PT. `machine/paging.rs` uses a
-4-level walk (`ROOT_LEVEL = 3`). Boot maps a kernel window
-(`make_boot_root_pt`, `switch_cr3`). User `prepare_user_frame_map` returns
-`InvalidArgument`; unmap helpers return false/`None`; page-table map
-`commit` is empty. Trap-time address-space switch is not wired.
+4-level walk (`ROOT_LEVEL = 3`). `USER_TOP` is the canonical user half
+(`256 << (12 + 9 * 3)`). Boot maps a kernel 1G window and walks all four
+levels for user 4K maps. `prepare_user_frame_map` / `unmap_user_frame` /
+`prepare_user_page_table_map` install or clear PTEs and `invlpg`. PDPT/PML4
+user invocations stay unwired; boot uses the internal helpers.
 
 ## SMP
 
@@ -210,18 +212,20 @@ Domain=11. On the RISC-V profile, `IoPortControl` and `IoSpace` stay null.
 
 `arch/riscv64/` implements trap entry (`trap.S` + `kernel/trap.rs`), SBI
 timer, PLIC (`machine/plic.rs`), Sv39, lazy FPU (`machine/fpu.rs`), and
-QEMU virt constants (`plat`). This is the only backend that returns to user
-mode.
+QEMU virt constants (`plat`). This is the xv6 and sel4test host.
 
 ## x86_64 backend
 
-`arch/x86_64/kernel/boot.rs` has a Multiboot header, 32→64 trampoline, and
-boot page tables, then calls `bringup_rootserver`.
-`arch/x86_64/kernel/trap.rs` implements `restore_user_context` as `hlt`.
-`install_trap_vector`, `init_timer`, FPU, IRQ claim, and IPI are empty.
-User VSpace maps do not install PTEs. Userspace is not built for this
-target. The backend therefore compiles and can run shared boot setup; it
-does not return to a user thread.
+`arch/x86_64/kernel/boot.rs` has a Multiboot header, 32→64 trampoline
+(enables NX and SSE), and early identity maps, then calls
+`bringup_rootserver`. `arch/x86_64/trap.S` plus `kernel/trap.rs` install a
+GDT/IDT/TSS, `syscall`/`sysret`, and `iret` for faults and the LAPIC timer.
+`#PF` is delivered as VM-fault IPC when a fault endpoint exists.
+`machine/irq.rs` programs an x2APIC periodic timer and EOIs; IOAPIC and IPI
+stay unwired (`SUPPORTS_REMOTE_*` remain false). Console output is COM1
+`0x3f8`. Lazy FPU stays a stub; SSE is enabled at long-mode entry so the
+`x86_64-unknown-none` ABI can run. The hello-rootserver gate is
+`tools/run-hello.py`.
 
 ## Comments that are not true
 

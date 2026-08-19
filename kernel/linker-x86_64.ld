@@ -1,9 +1,8 @@
 /*
- * Staging linker script for the x86_64 kernel backend.
- *
- * Upstream seL4 already has x86_64/pc99 elfloader support. This script keeps
- * the same section/symbol contract as the existing Rust backends while the
- * x86_64 boot path is brought up.
+ * Linker script for the x86_64 kernel. Low 1 MiB holds the Multiboot header
+ * and the 32-bit trampoline; the high window at KERNEL_ELF_BASE is the
+ * running kernel. GOT/PLT stay in the high image so RIP-relative helper
+ * calls remain mapped after switch_vspace.
  */
 
 OUTPUT_ARCH(i386:x86-64)
@@ -96,7 +95,14 @@ SECTIONS {
 
     .data . : AT(ADDR(.data) - KERNEL_OFFSET) {
         *(.data .data.*)
+        *(.data.rel.ro .data.rel.ro.*)
+        *(.got .got.*)
+        *(.got.plt)
     } :data
+
+    .plt . : AT(ADDR(.plt) - KERNEL_OFFSET) {
+        *(.plt .plt.*)
+    } :text
 
     . = ALIGN(4K);
 

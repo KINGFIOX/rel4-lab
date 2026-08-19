@@ -1,4 +1,4 @@
-//! Local TLB invalidation for the staged x86_64 backend.
+//! Local TLB invalidation for the x86_64 backend.
 
 use super::registers;
 

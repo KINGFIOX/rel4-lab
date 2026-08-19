@@ -4,6 +4,8 @@ unsafe extern "C" {
     static __bss_start: u8;
     static __bss_end: u8;
     static __stack_top: u8;
+    static x86_mb_magic: u32;
+    static x86_mb_info: u32;
 }
 
 #[used]
@@ -17,6 +19,8 @@ pub unsafe extern "C" fn _start() -> ! {
     core::arch::naked_asm!(
         ".code32",
         "cli",
+        "movl %eax, x86_mb_magic",
+        "movl %ebx, x86_mb_info",
         "mov $0x3f8, %dx",
         "mov $0x41, %al",
         "out %al, %dx",
@@ -80,7 +84,7 @@ pub unsafe extern "C" fn _start() -> ! {
         "mov %eax, %cr4",
         "mov $0xc0000080, %ecx",
         "rdmsr",
-        "or $0x100, %eax",
+        "or $0x900, %eax",
         "wrmsr",
         "mov %cr0, %eax",
         "or $0x80000000, %eax",
@@ -89,9 +93,18 @@ pub unsafe extern "C" fn _start() -> ! {
         "ret",
         ".code64",
         "3:",
+        "mov %cr0, %rax",
+        "and $~0xc, %rax",
+        "or $0x2, %rax",
+        "mov %rax, %cr0",
+        "mov %cr4, %rax",
+        "or $0x10600, %rax",
+        "mov %rax, %cr4",
         "mov $0x3f8, %dx",
         "mov $0x42, %al",
         "out %al, %dx",
+        "movq (%rsp), %rdi",
+        "movq 8(%rsp), %rsi",
         "movabs $x86_64_high_entry, %rax",
         "jmp *%rax",
         ".pushsection .phys.rodata, \"a\"",
@@ -112,6 +125,10 @@ pub unsafe extern "C" fn _start() -> ! {
         ".align 16",
         "x86_boot_stack: .skip 4096",
         "x86_boot_stack_top:",
+        ".globl x86_mb_magic",
+        "x86_mb_magic: .long 0",
+        ".globl x86_mb_info",
+        "x86_mb_info: .long 0",
         ".popsection",
         options(att_syntax),
     );
@@ -125,6 +142,13 @@ pub extern "C" fn x86_64_high_entry(multiboot_magic: usize, multiboot_info: usiz
         core::arch::asm!("mov rsp, {}", in(reg) &__stack_top as *const u8 as usize, options(nostack));
     }
     clear_bss();
+    let (multiboot_magic, multiboot_info) = unsafe {
+        let _ = (multiboot_magic, multiboot_info);
+        (
+            core::ptr::read_volatile(core::ptr::addr_of!(x86_mb_magic) as *const u32) as usize,
+            core::ptr::read_volatile(core::ptr::addr_of!(x86_mb_info) as *const u32) as usize,
+        )
+    };
     let args = parse_multiboot_boot_args(multiboot_magic, multiboot_info);
     init_kernel(
         args.user_pstart,
@@ -185,7 +209,9 @@ fn parse_multiboot_boot_args(
     multiboot_info: usize,
 ) -> crate::kernel::boot::BootArgs {
     if multiboot_magic != MULTIBOOT_MAGIC {
-        panic!("x86_64 bootloader did not provide Multiboot1 handoff");
+        panic!(
+            "x86_64 bootloader did not provide Multiboot1 handoff (magic={multiboot_magic:#x} info={multiboot_info:#x})"
+        );
     }
     let mbi = unsafe { &*(multiboot_info as *const MultibootInfoPart1) };
     let flags = unsafe { core::ptr::addr_of!(mbi.flags).read_unaligned() };
@@ -201,10 +227,11 @@ fn parse_multiboot_boot_args(
         panic!("x86_64 rootserver module has invalid bounds");
     }
     let user_ventry = elf64_entry(user_pstart);
+    let pv_offset = elf64_pv_offset(user_pstart);
     crate::kernel::boot::BootArgs {
         user_pstart,
         user_pend,
-        pv_offset: 0,
+        pv_offset,
         user_ventry,
         dtb_pa: 0,
         dtb_size: 0,
@@ -214,6 +241,30 @@ fn parse_multiboot_boot_args(
 }
 
 fn elf64_entry(image_paddr: usize) -> usize {
+    let hdr = elf64_header(image_paddr);
+    unsafe { core::ptr::read_unaligned(hdr.add(24) as *const u64) as usize }
+}
+
+fn elf64_pv_offset(image_paddr: usize) -> usize {
+    let hdr = elf64_header(image_paddr);
+    let phoff = unsafe { core::ptr::read_unaligned(hdr.add(32) as *const u64) as usize };
+    let phentsize = unsafe { core::ptr::read_unaligned(hdr.add(54) as *const u16) as usize };
+    let phnum = unsafe { core::ptr::read_unaligned(hdr.add(56) as *const u16) as usize };
+    let mut i = 0usize;
+    while i < phnum {
+        let phdr = unsafe { hdr.add(phoff + i * phentsize) };
+        let p_type = unsafe { core::ptr::read_unaligned(phdr as *const u32) };
+        if p_type == 1 {
+            let p_offset = unsafe { core::ptr::read_unaligned(phdr.add(8) as *const u64) as usize };
+            let p_vaddr = unsafe { core::ptr::read_unaligned(phdr.add(16) as *const u64) as usize };
+            return image_paddr.wrapping_add(p_offset).wrapping_sub(p_vaddr);
+        }
+        i += 1;
+    }
+    0
+}
+
+fn elf64_header(image_paddr: usize) -> *const u8 {
     let base = image_paddr as *const u8;
     let magic = unsafe { core::slice::from_raw_parts(base, 4) };
     if magic != b"\x7fELF" {
@@ -223,8 +274,7 @@ fn elf64_entry(image_paddr: usize) -> usize {
     if class != 2 {
         panic!("x86_64 rootserver module is not ELF64");
     }
-    let entry_ptr = unsafe { base.add(24) as *const u64 };
-    unsafe { entry_ptr.read_unaligned() as usize }
+    base
 }
 
 #[unsafe(no_mangle)]

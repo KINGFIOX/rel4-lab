@@ -4,15 +4,17 @@ First-party user code is no_std. Every crate that talks to the kernel goes
 through `userspace/sel4-user`. The xv6 stack is a set of servers, not an
 in-kernel Unix layer.
 
-Production builds are `riscv64gc-unknown-none-elf` only.
-`sel4-user/src/arch/mod.rs`, `xv6-abi/src/platform/mod.rs`,
-`xv6-host/src/arch/mod.rs`, and every server `build.rs` reject other targets.
+`sel4-user` builds for `riscv64gc-unknown-none-elf` and `x86_64-unknown-none`.
+The xv6 stack does not: `xv6-abi/src/platform/mod.rs`,
+`xv6-host/src/arch/mod.rs`, and the server `build.rs` files still reject
+non-RISC-V targets. `hello-rootserver` is the x86 user gate.
 
 ## Crates
 
 | Crate | Path | Role |
 |-------|------|------|
 | sel4-user | `userspace/sel4-user` | IPC wrappers, boot constants, `log` macros, `rt` |
+| hello-rootserver | `userspace/hello-rootserver` | Minimal rootserver: banner, Untyped_Retype Endpoint, NBRecv, `hello-rootserver: ok` |
 | xv6-abi | `userspace/xv6-abi` | xv6 syscall numbers, VFS/FS/UART/disk opcodes, MMIO numbers |
 | xv6-host | `userspace/xv6-host` | Rootserver: fault loop, process table, server spawn |
 | vfs-server | `userspace/vfs-server` | fds, pipes, console routing, FS/UART client |

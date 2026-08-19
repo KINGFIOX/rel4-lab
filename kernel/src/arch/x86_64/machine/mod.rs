@@ -2,6 +2,7 @@
 
 pub mod fpu;
 pub mod irq;
+pub mod lapic;
 pub mod paging;
 pub mod registers;
 pub mod tlb;

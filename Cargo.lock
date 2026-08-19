@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "hello-rootserver"
+version = "0.1.0"
+dependencies = [
+ "sel4-user",
+]
+
+[[package]]
 name = "kernel"
 version = "0.1.0"
 dependencies = [

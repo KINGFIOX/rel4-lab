@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from kernel_arch_paths import trap_rs
+from kernel_arch_paths import sel4_arch_rs, trap_rs
 from target_config import target_from_env
 from tool_common import ROOT_DIR, die, log
 
@@ -52,38 +52,38 @@ EXPECTED_CONTEXT_REGS = {
         4,
     ],
     "x86_64": [
-        0,
-        7,
-        0,
-        0,
-        0,
-        0,
-        0,
-        15,
-        14,
+        17,
+        16,
         13,
-        12,
-        8,
-        9,
+        2,
+        3,
         4,
         5,
-        1,
         6,
+        7,
         10,
         11,
-        16,
-        17,
+        9,
         18,
         19,
-        20,
-        21,
+        12,
+        1,
+        0,
         22,
         23,
-        24,
-        25,
-        26,
-        27,
-        28,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     ],
 }
 
@@ -128,19 +128,20 @@ RISCV_USER_REGISTER_INDEX = {
 }
 
 X86_64_USER_REGISTER_INDEX = {
-    "Ra": 1,
-    "Sp": 7,
-    "Gp": 0,
-    "Tp": 6,
-    "T0": 10,
-    "A0": 15,
-    "A1": 14,
-    "A2": 13,
-    "A3": 12,
-    "A4": 8,
-    "A5": 9,
-    "A6": 4,
-    "A7": 5,
+    "Rip": 17,
+    "Rsp": 16,
+    "Rflags": 13,
+    "Rax": 2,
+    "Rdi": 0,
+    "Rsi": 1,
+    "R10": 9,
+    "R8": 10,
+    "R9": 11,
+    "R15": 12,
+    "FsBase": 22,
+    "A0": 0,
+    "A1": 1,
+    "Sp": 16,
 }
 
 
@@ -230,40 +231,41 @@ def main(argv: list[str]) -> int:
     parser.parse_args(argv)
 
     target = target_from_env(PREFIX)
-    trap_rs_path = trap_rs(target.name)
+    kernel_regs_path = (
+        sel4_arch_rs(target.name) if target.name == "x86_64" else trap_rs(target.name)
+    )
     userspace_arch = ROOT_DIR / "userspace" / "xv6-host" / "src" / "arch" / f"{target.name}.rs"
-    if not trap_rs_path.is_file():
-        die(PREFIX, f"kernel trap source not found: {trap_rs_path}")
-    if not userspace_arch.is_file():
-        if target.name == "x86_64":
-            print("PASS: x86_64 seL4_UserContext userspace audit skipped; backend is staged (no trap yet)")
-            return 0
-        die(PREFIX, f"xv6-host arch source not found: {userspace_arch}")
+    if not kernel_regs_path.is_file():
+        die(PREFIX, f"kernel user-context source not found: {kernel_regs_path}")
 
-    kernel_regs = parse_kernel_context_regs(trap_rs_path, target.name)
+    kernel_regs = parse_kernel_context_regs(kernel_regs_path, target.name)
     expected_regs = EXPECTED_CONTEXT_REGS[target.name]
     errors: list[str] = []
     if kernel_regs != expected_regs:
         errors.append(f"kernel SEL4_USER_CONTEXT_REGS={kernel_regs}, expected {expected_regs}")
     audit_boot_rootserver_context(errors, target.name, kernel_regs)
 
-    userspace_consts = parse_userspace_consts(userspace_arch)
-    words = userspace_consts.get("USER_CONTEXT_WORDS")
-    if words != len(expected_regs):
-        errors.append(f"USER_CONTEXT_WORDS={words}, expected {len(expected_regs)}")
-    for name, expected in expected_userspace_indexes(target.name, kernel_regs).items():
-        got = userspace_consts.get(name)
-        if got is None and name == "USER_CONTEXT_RA" and target.name == "riscv64":
-            continue
-        if got != expected:
-            errors.append(f"{name}={got}, expected {expected}")
+    if userspace_arch.is_file():
+        userspace_consts = parse_userspace_consts(userspace_arch)
+        words = userspace_consts.get("USER_CONTEXT_WORDS")
+        if words != len(expected_regs):
+            errors.append(f"USER_CONTEXT_WORDS={words}, expected {len(expected_regs)}")
+        for name, expected in expected_userspace_indexes(target.name, kernel_regs).items():
+            got = userspace_consts.get(name)
+            if got is None and name == "USER_CONTEXT_RA" and target.name == "riscv64":
+                continue
+            if got != expected:
+                errors.append(f"{name}={got}, expected {expected}")
+    elif target.name != "x86_64":
+        die(PREFIX, f"xv6-host arch source not found: {userspace_arch}")
 
     if errors:
         for error in errors:
             log(PREFIX, f"FAIL: {error}")
         return 1
 
-    print(f"PASS: {target.name} seL4_UserContext ABI words={len(expected_regs)}")
+    extra = "" if userspace_arch.is_file() else "; xv6-host not built for this target"
+    print(f"PASS: {target.name} seL4_UserContext ABI words={len(expected_regs)}{extra}")
     return 0
 
 
