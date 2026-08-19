@@ -296,8 +296,8 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     // --- Root CNode -------------------------------------------------------
     //
     // Allocate the root CNode from the boot pool. sel4test uses the upstream
-    // 13-bit root CNode, while the xv6 rootserver opts into a larger one for
-    // service processes and usertest churn.
+    // 13-bit root CNode, while linux-compat opts into a larger one for
+    // service processes and LTP process churn.
     let cnode_pages = cnode_bytes(ROOT_CNODE_SIZE_BITS) / PAGE_SIZE;
     let cnode_base = bootmem::alloc_pages(cnode_pages);
     let cnode_kva = cnode_base as u64;

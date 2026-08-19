@@ -1,8 +1,8 @@
 # microkernel
 
 `microkernel` is a Rust seL4-style kernel for RV64 `qemu-riscv-virt` and a
-single-core x86_64 QEMU `pc` user bring-up, plus a user-space xv6
-compatibility stack (RISC-V only) built on a seL4-like capability ABI.
+single-core x86_64 QEMU `pc` user bring-up, plus a user-space Linux RV64
+compat stack (RISC-V only) built on a seL4-like capability ABI.
 
 The current rel4 scope intentionally keeps the scheduler simpler than upstream
 seL4 MCS: there are no `SchedContext`/`SchedControl` objects, dispatch is
@@ -21,9 +21,9 @@ The repository has two main parts:
 
 - `kernel/`: the Rust kernel that boots through the upstream seL4 elfloader and
   implements the current rel4 seL4-style ABI subset.
-- `userspace/`: no_std seL4 user libraries and servers, including an xv6 stack
-  that runs xv6 user programs through user-space services rather than an
-  in-kernel Unix compatibility layer.
+- `userspace/`: no_std seL4 user libraries and servers, including a
+  linux-compat stack that runs Linux RV64 user programs through user-space
+  services rather than an in-kernel Unix compatibility layer.
 
 Current-state notes, written from the source tree:
 
@@ -40,15 +40,14 @@ microkernel/
 |-- userspace/
 |   |-- sel4-user/             # shared no_std seL4 user ABI wrappers
 |   |-- hello-rootserver/      # minimal x86/RV rootserver gate
-|   |-- xv6-abi/               # xv6 syscall/fs/disk protocol constants
-|   |-- xv6-host/              # xv6 rootserver and syscall server
-|   |-- vfs-server/            # Unix fd, path, pipe, and console VFS
-|   |-- xv6fs-server/          # xv6 fs.img filesystem backend
+|   |-- linux-abi/             # Linux RV64 syscall/VFS/UART protocol constants
+|   |-- linux-compat/          # Linux rootserver and syscall server
+|   |-- vfs-server/            # ramfs, pipe, and console VFS
 |   |-- uart-server/           # user console UART server
-|   `-- virtio-disk-server/    # virtio-blk device server
+|   `-- linux-rootfs/          # wave-1 ET_EXEC programs and LTP wrap
 |-- third_party/
 |   |-- sel4test/              # upstream seL4/sel4test submodule tree
-|   `-- xv6-riscv/             # upstream xv6 tree for user programs/fs.img
+|   `-- ltp/                   # upstream LTP sources for selected tests
 |-- tools/                     # build, pack, QEMU, and test helpers
 `-- docs/                      # current-state notes (from source)
 ```
@@ -124,7 +123,7 @@ x86_64 user bring-up (QEMU `pc`, single core):
 TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 ./tools/run-hello.py
 ```
 
-Success is the log line `hello-rootserver: ok`. This is not the xv6 stack
+Success is the log line `hello-rootserver: ok`. This is not linux-compat
 and is not `ARCH=x86_64 ./tools/run-tests.py`.
 
 The unmodified upstream `sel4test-driver` still assumes seL4's MCS
@@ -133,48 +132,22 @@ image packing is useful, but upstream sel4test runs are not the default
 correctness signal unless the selected slice avoids the removed scheduler
 surface or the rootserver is adjusted.
 
-## Run xv6 Programs
+## Run linux-compat / LTP
 
-Build xv6's `fs.img`:
-
-```sh
-./tools/build-xv6-fs-img.py
-```
-
-Boot an interactive xv6 shell:
+Build the wave-1 ramfs cpio:
 
 ```sh
-./tools/run-xv6-shell.py
+./tools/build-linux-rootfs.py
 ```
 
-Run individual xv6 user programs:
+Run the RISC-V linux-compat gate:
 
 ```sh
-./tools/run-xv6-user.py echo hello from xv6
-./tools/run-xv6-user.py forktest
-./tools/run-xv6-user.py cat README
-./tools/run-xv6-user.py ls .
+TIMEOUT=180 ARCH=riscv64 ./tools/run-ltp.py
 ```
 
-Run the xv6 user test suite:
-
-```sh
-TIMEOUT=1200 ./tools/run-xv6-user.py usertests
-```
-
-Run a program with scripted console input:
-
-```sh
-./tools/run-xv6-user.py --stdin 'echo hi
-exit
-' sh
-```
-
-Run a timeout-expected workload:
-
-```sh
-TIMEOUT=90 ./tools/run-xv6-user.py --expect-timeout grind
-```
+Success is the log line `ltp-wave1: ok`. The image has no virtio-blk
+device. x86 remains `tools/run-hello.py`.
 
 ## Common Checks
 
@@ -198,12 +171,12 @@ user-space are not wired yet.
 Current smoke path:
 
 ```sh
-TIMEOUT=90 ARCH=riscv64 ./tools/run-xv6-user.py echo hello
+TIMEOUT=180 ARCH=riscv64 ./tools/run-ltp.py
 ```
 
 Clean up a stuck QEMU test process if a run is interrupted:
 
 ```sh
 pkill -TERM -f sel4test-driver-image-riscv-qemu-riscv-virt
-pkill -TERM -f 'xv6-.*image-riscv-qemu-riscv-virt'
+pkill -TERM -f 'linux-.*image-riscv-qemu-riscv-virt'
 ```

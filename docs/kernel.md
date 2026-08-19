@@ -8,7 +8,7 @@ is not implemented.
 
 Runnable today: `riscv64gc-unknown-none-elf` on QEMU `virt`, booted through the
 upstream seL4 elfloader, and `x86_64-unknown-none` on QEMU `pc` with a
-Multiboot kernel plus a user initrd. The xv6 stack is RISC-V only.
+Multiboot kernel plus a user initrd. linux-compat is RISC-V only.
 
 ## Layout
 
@@ -165,7 +165,7 @@ transfer live in `api/ipc.rs` plus `object/{endpoint,notification,reply}.rs`.
 Fault labels (`abi/fault.rs`): CapFault=1, UnknownSyscall=2, UserException=3.
 `Timeout` and `VmFault` both encode as 5.
 
-xv6 user programs enter the host as `UnknownSyscall` fault IPC.
+linux-compat user programs enter the host as `UnknownSyscall` fault IPC.
 
 ## VSpace
 
@@ -212,7 +212,7 @@ Domain=11. On the RISC-V profile, `IoPortControl` and `IoSpace` stay null.
 
 `arch/riscv64/` implements trap entry (`trap.S` + `kernel/trap.rs`), SBI
 timer, PLIC (`machine/plic.rs`), Sv39, lazy FPU (`machine/fpu.rs`), and
-QEMU virt constants (`plat`). This is the xv6 and sel4test host.
+QEMU virt constants (`plat`). This is the linux-compat and sel4test host.
 
 ## x86_64 backend
 

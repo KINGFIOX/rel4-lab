@@ -1,6 +1,3 @@
-[submodule "third_party/xv6-riscv"]
-	path = third_party/xv6-riscv
-	url = https://github.com/mit-pdos/xv6-riscv
 [submodule "third_party/sel4test/kernel"]
 	path = third_party/sel4test/kernel
 	url = https://github.com/KINGFIOX/seL4.git
@@ -31,3 +28,6 @@
 [submodule "third_party/sel4test/tools/seL4"]
 	path = third_party/sel4test/tools/seL4
 	url = https://github.com/KINGFIOX/seL4_tools.git
+[submodule "third_party/ltp"]
+	path = third_party/ltp
+	url = https://github.com/kingfiox/ltp.git

@@ -80,11 +80,9 @@ class TargetConfig:
     qemu_machine: str
     qemu_cpu: str | None
     qemu_bios: str | None
-    xv6_dir_name: str
-    xv6_toolprefixes: tuple[str, ...]
-    xv6_march: str
-    xv6_mabi: str
-    xv6_disk_transport: str
+    linux_toolprefixes: tuple[str, ...]
+    linux_march: str
+    linux_mabi: str
 
     def qemu_base_cmd(self, smp: str, memory: str) -> list[str]:
         cmd = [
@@ -108,27 +106,6 @@ class TargetConfig:
         if self.qemu_bios is not None:
             cmd.extend(["-bios", self.qemu_bios])
         return cmd
-
-    def xv6_fs_device_args(self, fs_img: Path) -> list[str]:
-        drive_args = [
-            "-drive",
-            f"file={fs_img},if=none,format=raw,id=xv6fs",
-        ]
-        if self.xv6_disk_transport == "virtio-mmio":
-            return [
-                "-global",
-                "virtio-mmio.force-legacy=false",
-                *drive_args,
-                "-device",
-                "virtio-blk-device,drive=xv6fs,bus=virtio-mmio-bus.0",
-            ]
-        if self.xv6_disk_transport == "virtio-pci":
-            return [
-                *drive_args,
-                "-device",
-                "virtio-blk-pci,drive=xv6fs,disable-legacy=on,disable-modern=off,addr=4",
-            ]
-        die("target", f"unsupported xv6 disk transport: {self.xv6_disk_transport}")
 
     def require_qemu(self, prefix: str) -> None:
         if not command_exists(self.qemu):
@@ -224,17 +201,15 @@ TARGETS: dict[str, TargetConfig] = {
         qemu_machine="virt",
         qemu_cpu="rv64",
         qemu_bios="none",
-        xv6_dir_name="xv6-riscv",
-        xv6_toolprefixes=(
+        linux_toolprefixes=(
             "riscv64-none-elf-",
             "riscv64-unknown-elf-",
             "riscv64-elf-",
             "riscv64-linux-gnu-",
             "riscv64-unknown-linux-gnu-",
         ),
-        xv6_march="rv64gc",
-        xv6_mabi="lp64",
-        xv6_disk_transport="virtio-mmio",
+        linux_march="rv64gc",
+        linux_mabi="lp64",
     ),
     "x86_64": TargetConfig(
         name="x86_64",
@@ -249,17 +224,15 @@ TARGETS: dict[str, TargetConfig] = {
         qemu_machine="pc",
         qemu_cpu="qemu64,+pdpe1gb,+syscall,+lm,+x2apic,+fsgsbase,enforce",
         qemu_bios=None,
-        xv6_dir_name="xv6-x86_64",
-        xv6_toolprefixes=(
+        linux_toolprefixes=(
             "x86_64-none-elf-",
             "x86_64-unknown-none-",
             "x86_64-elf-",
             "x86_64-linux-gnu-",
             "x86_64-unknown-linux-gnu-",
         ),
-        xv6_march="x86-64",
-        xv6_mabi="",
-        xv6_disk_transport="virtio-pci",
+        linux_march="x86-64",
+        linux_mabi="",
     ),
 }
 
@@ -329,12 +302,10 @@ def strip_from_env(target: TargetConfig) -> str:
 
 
 def infer_toolprefix_for(target: TargetConfig, extra_prefixes: Sequence[str] = ()) -> str | None:
-    prefixes = tuple(extra_prefixes) + target.xv6_toolprefixes
+    prefixes = tuple(extra_prefixes) + target.linux_toolprefixes
     for tool_prefix in prefixes:
         if command_exists(f"{tool_prefix}gcc"):
             return tool_prefix
     return None
 
 
-def require_supported_xv6_user_abi(_prefix: str, _target: TargetConfig, _mabi: str) -> None:
-    return

@@ -1,6 +1,6 @@
 ---
 name: microkernel-dev-env
-description: Use the already-loaded direnv flake environment for this microkernel repository. Use whenever Codex runs cargo, rustfmt, Rust target builds, seL4 pack/sim/test helpers, QEMU, xv6 filesystem/user-test helpers, or other validation commands here; avoid re-running nix develop unless the current shell lacks the required tools.
+description: Use the already-loaded direnv flake environment for this microkernel repository. Use whenever Codex runs cargo, rustfmt, Rust target builds, seL4 pack/sim/test helpers, QEMU, linux-compat/LTP helpers, or other validation commands here; avoid re-running nix develop unless the current shell lacks the required tools.
 ---
 
 # Microkernel Dev Env
@@ -12,9 +12,9 @@ Run validation from the current project shell first. This repository's `.envrc` 
 ## Workflow
 
 1. Prefer direct commands from the current shell:
-   - Run `cargo`, `rustfmt`, `cargo fmt`, `cargo check`, `tools/*.py`, QEMU helpers, seL4 test helpers, and xv6 helpers directly when they are already available.
+   - Run `cargo`, `rustfmt`, `cargo fmt`, `cargo check`, `tools/*.py`, QEMU helpers, seL4 test helpers, and linux-compat helpers directly when they are already available.
    - Do not prefix routine validation with `nix develop` by default.
-   - Do not spend time entering a new Nix shell before every formatter, check, build, seL4 test, or xv6 usertest run.
+   - Do not spend time entering a new Nix shell before every formatter, check, build, seL4 test, or LTP run.
 
 2. Check the environment only when needed:
    - Use `command -v cargo`, `command -v rustfmt`, `command -v qemu-system-riscv64`, or the specific missing tool to verify availability.
@@ -30,7 +30,7 @@ Run validation from the current project shell first. This repository's `.envrc` 
    - For Rust formatting, prefer `cargo fmt --all --check` after edits.
    - For Rust type checking, run the narrowest useful `cargo check` or package-specific check for the changed area.
    - For kernel image or seL4 regressions, use `tools/pack-image.py` and `tools/run-tests.py` with targeted filters when possible.
-   - For xv6 behavior, prefer targeted `tools/run-xv6-user.py <program>` before broader `usertests`.
+   - For linux-compat behavior, use `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py`.
    - Use longer QEMU runs only when they cover the changed behavior.
 
 ## Current Repo Assumption

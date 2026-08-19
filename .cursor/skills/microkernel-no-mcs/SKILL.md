@@ -25,7 +25,7 @@ Keep these semantics intact while avoiding MCS:
 - Basic TCB runnable, blocked-on-send, blocked-on-receive, blocked-on-reply, and restart transitions.
 - Endpoint, notification, ordinary reply, CSpace, VSpace, IRQ, and non-timeout user fault behavior needed by sel4tests.
 - Architecture-neutral scheduler interfaces usable by both `riscv64` and `x86_64`.
-- xv6 userspace compatibility paths that depend on ordinary IPC and IRQ delivery.
+- linux-compat userspace paths that depend on ordinary IPC and IRQ delivery.
 
 ## Workflow
 
@@ -42,6 +42,6 @@ Use the smallest useful validation stage:
 - Rust-only edits: `cargo fmt --all --check`, then `cargo check`.
 - Focused seL4 checks: `SEL4TEST_REGEX='<test>' ARCH=riscv64 tools/pack-image.py`, then `ARCH=riscv64 tools/run-tests.py`.
 - Architecture parity: run matching `ARCH=x86_64` build/check commands when shared scheduler code changed. The x86_64 backend is staged (no trap yet).
-- xv6 impact: run a targeted xv6 program such as `tools/run-xv6-user.py forktest` before broad `usertests`.
+- linux-compat impact: run `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py`.
 
 Do not claim MCS avoidance is complete until diagnostics are cleaned up and the relevant focused validations pass.

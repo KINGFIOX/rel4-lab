@@ -1,12 +1,12 @@
 use core::cell::UnsafeCell;
 
-use xv6_abi::{MAX_OPEN_FILES, MAX_PIPES, PIPE_BUF};
+use linux_abi::{MAX_OPEN_FILES, MAX_PIPES, PIPE_BUF};
 
 pub(crate) const CONSOLE_BUF_SIZE: usize = 128;
 
 pub(crate) const FILE_CLOSED: u8 = 0;
-pub(crate) const FILE_XV6_FILE: u8 = 1;
-pub(crate) const FILE_XV6_DIR: u8 = 2;
+pub(crate) const FILE_RAM_FILE: u8 = 1;
+pub(crate) const FILE_RAM_DIR: u8 = 2;
 pub(crate) const FILE_PIPE_READ: u8 = 3;
 pub(crate) const FILE_PIPE_WRITE: u8 = 4;
 pub(crate) const FILE_CONSOLE: u8 = 5;
@@ -101,8 +101,6 @@ struct VfsRuntime {
     state: UnsafeCell<VfsRuntimeState>,
 }
 
-// vfs-server runs one cooperative request loop. Runtime tables are only
-// mutated through this module's scoped accessors.
 unsafe impl Sync for VfsRuntime {}
 
 impl VfsRuntime {
@@ -126,7 +124,7 @@ static VFS_RUNTIME: VfsRuntime = VfsRuntime::new();
 pub(crate) enum ReleaseResult {
     Invalid,
     Done,
-    Xv6(u32),
+    Inode(u32),
 }
 
 pub(crate) fn reset_all() {
@@ -195,18 +193,7 @@ pub(crate) fn retain_file(file: usize) -> bool {
 }
 
 pub(crate) fn release_file(file: usize) -> bool {
-    let state = VFS_RUNTIME.state();
-    if file < MAX_OPEN_FILES
-        && state.files[file].used
-        && (state.files[file].kind == FILE_XV6_FILE || state.files[file].kind == FILE_XV6_DIR)
-    {
-        return false;
-    }
-    match detach_file(file) {
-        ReleaseResult::Invalid => false,
-        ReleaseResult::Done => true,
-        ReleaseResult::Xv6(_) => false,
-    }
+    matches!(detach_file(file), ReleaseResult::Done)
 }
 
 pub(crate) fn detach_file(file: usize) -> ReleaseResult {
@@ -221,7 +208,7 @@ pub(crate) fn detach_file(file: usize) -> ReleaseResult {
     let old = state.files[file];
     state.files[file] = OpenFile::closed();
     match old.kind {
-        FILE_XV6_FILE | FILE_XV6_DIR => return ReleaseResult::Xv6(old.node),
+        FILE_RAM_FILE | FILE_RAM_DIR => return ReleaseResult::Inode(old.node),
         FILE_PIPE_READ => {
             if old.aux < MAX_PIPES && state.pipes[old.aux].readers > 0 {
                 state.pipes[old.aux].readers -= 1;
@@ -271,6 +258,12 @@ pub(crate) fn with_pipe_mut<R>(pipe_idx: usize, op: impl FnOnce(&mut Pipe) -> R)
         return None;
     }
     Some(op(&mut VFS_RUNTIME.state_mut().pipes[pipe_idx]))
+}
+
+pub(crate) fn set_file_offset(file: usize, offset: usize) {
+    if file < MAX_OPEN_FILES {
+        VFS_RUNTIME.state_mut().files[file].offset = offset;
+    }
 }
 
 pub(crate) fn add_file_offset(file: usize, amount: usize) {

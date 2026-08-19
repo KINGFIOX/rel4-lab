@@ -68,6 +68,6 @@ Use the smallest useful validation stage:
 - Rust-only edits: `cargo fmt --all --check`, then `cargo check`.
 - Focused seL4 checks: choose tests around IPC, yield, timers, or interrupts affected by the edit.
 - Architecture parity: validate `ARCH=riscv64` when shared scheduling or the trap handler changed. The x86_64 backend is staged (no trap yet).
-- xv6 impact: run a targeted xv6 program such as `tools/run-xv6-user.py forktest` before broad `usertests`.
+- linux-compat impact: run `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py`.
 
 Do not claim the scheduler is non-preemptive or cooperative; verify the `kernel_exit` rotation before making any statement about switch policy. Do not claim timeslice/budget avoidance is complete until temporary diagnostics are cleaned up and relevant focused validations pass.

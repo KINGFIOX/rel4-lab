@@ -1,12 +1,12 @@
 # Userspace
 
 First-party user code is no_std. Every crate that talks to the kernel goes
-through `userspace/sel4-user`. The xv6 stack is a set of servers, not an
-in-kernel Unix layer.
+through `userspace/sel4-user`. Linux syscall semantics live in userspace
+(`linux-compat` + `vfs-server`), not in the kernel.
 
 `sel4-user` builds for `riscv64gc-unknown-none-elf` and `x86_64-unknown-none`.
-The xv6 stack does not: `xv6-abi/src/platform/mod.rs`,
-`xv6-host/src/arch/mod.rs`, and the server `build.rs` files still reject
+The linux-compat stack does not: `linux-abi/src/platform/mod.rs`,
+`linux-compat/src/arch/mod.rs`, and the server `build.rs` files still reject
 non-RISC-V targets. `hello-rootserver` is the x86 user gate.
 
 ## Crates
@@ -15,116 +15,88 @@ non-RISC-V targets. `hello-rootserver` is the x86 user gate.
 |-------|------|------|
 | sel4-user | `userspace/sel4-user` | IPC wrappers, boot constants, `log` macros, `rt` |
 | hello-rootserver | `userspace/hello-rootserver` | Minimal rootserver: banner, Untyped_Retype Endpoint, NBRecv, `hello-rootserver: ok` |
-| xv6-abi | `userspace/xv6-abi` | xv6 syscall numbers, VFS/FS/UART/disk opcodes, MMIO numbers |
-| xv6-host | `userspace/xv6-host` | Rootserver: fault loop, process table, server spawn |
-| vfs-server | `userspace/vfs-server` | fds, pipes, console routing, FS/UART client |
-| xv6fs-server | `userspace/xv6fs-server` | xv6 on-disk FS over the disk server |
-| virtio-disk-server | `userspace/virtio-disk-server` | virtio-blk |
+| linux-abi | `userspace/linux-abi` | Linux RV64 syscall numbers, errno, VFS/UART opcodes, MMIO numbers |
+| linux-compat | `userspace/linux-compat` | Rootserver: fault loop, process table, Linux syscall dispatch |
+| vfs-server | `userspace/vfs-server` | ramfs, pipes, console routing, UART client |
 | uart-server | `userspace/uart-server` | 16550 MMIO console |
+
+Wave-1 user programs live under `userspace/linux-rootfs/` and are packed into
+a newc cpio by `tools/build-linux-rootfs.py`.
 
 ## Process
 
-`xv6-host/src/main.rs::run` allocates, creates a fault endpoint, embeds and
-starts four servers, loads the initial payload ELF, then waits on the fault
-endpoint.
+`linux-compat/src/main.rs::run` allocates, creates a fault endpoint, embeds
+and starts uart-server and vfs-server, initializes ramfs, creates pid 1,
+loads `/ltp-wave1` from ramfs, then waits on the fault endpoint.
 
-Server spawn order and badges (`spawn_service_servers`):
+Server spawn order (`spawn_service_servers`):
 
 1. uart-server
-2. virtio-disk-server
-3. xv6fs-server
-4. vfs-server
+2. vfs-server
 
-Capability wiring is in the same function: VFS gets xv6fs + UART endpoints
-and a reply endpoint back to the host; xv6fs gets the disk endpoint and a
-completion notification.
+VFS gets the UART endpoint and a reply endpoint back to the host. There is
+no disk server and no virtio-blk.
 
-`MAX_PROCS` is 64 (`xv6-host/src/consts.rs`).
+`MAX_PROCS` is 64 (`linux-compat/src/consts.rs`).
 
-## xv6 syscalls
+## Linux syscalls
 
-`Xv6Syscall` in `xv6-abi/src/lib.rs` is 1–21. Dispatch is
-`xv6-host/src/xv6.rs::handle_xv6_syscall`. Unknown numbers reply `-1`.
+Dispatch is `linux-compat/src/linux.rs::handle_linux_syscall`. The kernel
+delivers `UnknownSyscall` fault IPC with Linux RV64 numbers in `a7` and
+arguments in `a0`–`a5`. Unimplemented numbers reply `-ENOSYS`.
 
-| # | Name | File |
-|---|------|------|
-| 1 | Fork | `process_syscalls.rs` |
-| 2 | Exit | `process_syscalls.rs` |
-| 3 | Wait | `process_syscalls.rs` |
-| 4 | Pipe | `fs_syscalls.rs` |
-| 5 | Read | `io_syscalls.rs` |
-| 6 | Kill | `process_syscalls.rs` |
-| 7 | Exec | `exec_syscalls.rs` |
-| 8 | Fstat | `fs_syscalls.rs` |
-| 9 | Chdir | `fs_syscalls.rs` |
-| 10 | Dup | `fs_syscalls.rs` |
-| 11 | GetPid | inline in `xv6.rs` |
-| 12 | Sbrk | `memory_syscalls.rs` |
-| 13 | Pause | `io_syscalls.rs` — one `sel4_yield()`, then 0 |
-| 14 | Uptime | `TICKS` atomic in `xv6.rs` |
-| 15 | Open | `fs_syscalls.rs` |
-| 16 | Write | `io_syscalls.rs` |
-| 17 | Mknod | `fs_syscalls.rs` |
-| 18 | Unlink | `fs_syscalls.rs` |
-| 19 | Link | `fs_syscalls.rs` |
-| 20 | Mkdir | `fs_syscalls.rs` |
-| 21 | Close | `fs_syscalls.rs` |
+Wave-1 coverage includes `exit`/`exit_group`, `write`, `openat`/`close`,
+`getpid`/`getppid`, `clone` (fork form), `wait4`/`waitid`, `read`,
+`mkdirat`/`unlinkat`, `getcwd`/`chdir`, `uname`, `getuid`/`getgid`,
+`clock_gettime`, `dup`/`dup3`, `pipe2`, plus musl-facing `brk`/`mmap`/
+`mprotect`/`set_tid_address`/`set_robust_list`/`prctl`.
 
-The host also handles VM faults (`memory_syscalls::handle_lazy_page_fault`)
-and unhandled faults (`fault_kill`).
-
-`sys_pause` does not sleep for `n` ticks. `pump_sleep_waiters` exists and
-looks at `PROC_SLEEPING`, but `sys_pause` never enters that state.
+`pause`/`nanosleep` only `Yield`. They do not depend on timeslice
+preemption.
 
 ## Exec and ELF
 
-`exec_syscalls.rs` copies path/argv from the child, reads the file through
-VFS (`vfs_read_exec_image`), resets mappings, then `child.rs::load_elf`.
+`exec_syscalls.rs` copies path/argv/envp from the child, reads the file
+through VFS (`vfs_read_exec_image`), resets mappings, then
+`child.rs::load_elf`.
 
 `load_elf` accepts ELF64 little-endian `ET_EXEC` with machine 243 (RISC-V),
-maps `PT_LOAD` segments, and sets brk to the aligned image end. The initial
-root program is the payload ELF embedded by `xv6-host/build.rs`
-(`include_bytes!` in `consts.rs`).
+maps `PT_LOAD` segments, records PHDR auxv fields, and sets brk to the
+aligned image end. The initial program is `/ltp-wave1` from ramfs, not an
+embedded payload.
+
+The Linux stack image includes argc, argv, envp, and auxv (`AT_PHDR`,
+`AT_PAGESZ`, `AT_RANDOM`, `AT_NULL`, and related keys).
 
 ## IPC between servers
 
-Opcodes are `xv6-abi` enums (`VfsOp`, `Xv6FsOp`, `UartOp`, `DiskRequestOp`)
-and `Xv6Protocol` tags (`HostToVfs`, `VfsToXv6Fs`, `VfsToUart`, `FsToDisk`,
-plus async variants).
+Opcodes are `linux-abi` enums (`VfsOp`, `UartOp`) and `IpcProtocol` tags
+(`HostToVfs`, `HostToVfsAsync`, `VfsToUart`, `VfsToUartAsync`).
 
 Concurrency limits in the sources:
 
 - Each server loop stages one reply cap (`reply_pending`).
-- Host VFS client: `VFS_ASYNC_REQUEST_CAP = 16` (`xv6-host/src/vfs.rs`).
-- Disk: `XV6_DISK_MAX_IN_FLIGHT = 2` (`xv6-abi`).
+- Host VFS client: `VFS_ASYNC_REQUEST_CAP = 16` (`linux-compat/src/vfs.rs`).
 - Fork/exec/IO syscalls listed in `should_defer_vfs_syscall` wait while a
   VFS async request is in flight.
 
-`sel4-user::rt` (`block_on`, `recv`, `reply_recv_with_reply`) is used by
-vfs-server, xv6fs-server, and virtio-disk-server. uart-server and xv6-host
-use a synchronous receive loop.
+`sel4-user::rt` is used by vfs-server. uart-server and linux-compat use a
+synchronous receive loop.
 
-## Disk and console
+## ramfs and console
 
-On riscv64, `xv6-host/src/disk_transport/mmio.rs` maps
-`VIRTIO_MMIO_FRAME_BASE` and issues `VIRTIO0_IRQ`. The device is
-`virtio-disk-server/src/device/mmio.rs`. Platform numbers are in
-`xv6-abi/src/platform/riscv64.rs`.
-
-PCI sources exist (`disk_transport/pci.rs`, `device/pci.rs`) behind
-`cfg(target_arch = "x86_64")`. There is no `xv6-abi` x86 platform module and
-no x86 linker script, so those files do not build.
-
-xv6 `read`/`write` on the console go host → vfs-server `console.rs` →
-uart-server → 16550 MMIO at `XV6_UART_MMIO_VADDR`.
+vfs-server unpacks an embedded newc cpio into an in-memory ramfs at
+`VfsOp::Init`. `/tmp` and `/dev/console` are created if missing. Console
+`read`/`write` go host → vfs-server `console.rs` → uart-server → 16550
+MMIO.
 
 Rust `log` macros in every crate go through `sel4-user::UserLogger` →
-`SYS_DEBUG_PUT_CHAR`. That is a different UART from the xv6 console. The
+`SYS_DEBUG_PUT_CHAR`. That is a different UART from the Linux console. The
 QEMU helpers attach a pci-serial chardev for the debug path.
 
 ## Not in the tree
 
-- x86_64 user crates, linker scripts, or platform ABI
-- xv6 syscalls beyond 1–21
-- tick-accurate `pause(n)`
+- x86_64 linux-compat
+- complete LTP, networking, ptrace, `/proc`
+- tick-accurate `nanosleep`
 - `println!` runtime logging (only Cargo `println!` in `build.rs`)

@@ -4,15 +4,23 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod console;
+mod cpio;
 mod ipc;
 mod ops;
 mod pipe;
+mod ramfs;
 mod state;
 
 use core::panic::PanicInfo;
 
+use linux_abi::{SERVER_RECV_REPLY_CPTR, SERVICE_ENDPOINT_CPTR};
 use sel4_user::{error, halt_loop, info, init_ipc_buffer, init_logger, msg_info, rt};
-use xv6_abi::{XV6_SERVER_RECV_REPLY_CPTR, XV6_SERVICE_ENDPOINT_CPTR};
+
+const ROOTFS_CPIO: &[u8] = include_bytes!(env!("LINUX_ROOTFS_CPIO"));
+
+pub(crate) fn rootfs_bytes() -> &'static [u8] {
+    ROOTFS_CPIO
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(ipc_buffer: usize) -> ! {
@@ -30,14 +38,14 @@ async fn server_loop() {
     loop {
         let msg = if reply_pending {
             rt::reply_recv_with_reply(
-                XV6_SERVICE_ENDPOINT_CPTR,
+                SERVICE_ENDPOINT_CPTR,
                 msg_info(0, 0, 0, 4),
                 &reply_mrs,
-                XV6_SERVER_RECV_REPLY_CPTR,
+                SERVER_RECV_REPLY_CPTR,
             )
             .await
         } else {
-            rt::recv_with_reply(XV6_SERVICE_ENDPOINT_CPTR, XV6_SERVER_RECV_REPLY_CPTR).await
+            rt::recv_with_reply(SERVICE_ENDPOINT_CPTR, SERVER_RECV_REPLY_CPTR).await
         };
         match ops::handle_request(&msg).await {
             ops::RequestResult::Reply(mrs) => {

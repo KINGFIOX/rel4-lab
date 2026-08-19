@@ -1,8 +1,8 @@
 use core::cmp::min;
 use core::sync::atomic::{Ordering, fence};
 
+use linux_abi::{FileKind, IpcStatus, PIPE_BUF};
 use sel4_user::IpcMessage;
-use xv6_abi::{PIPE_BUF, Xv6FileType, Xv6Status};
 
 use crate::ipc::{err, valid_host, with_shared_buffer, with_shared_buffer_mut};
 use crate::state::{
@@ -32,16 +32,16 @@ pub(crate) fn handle_pipe(msg: &IpcMessage) -> [u64; 4] {
         clear_pipe(pipe_idx);
         return err();
     }
-    [Xv6Status::Ok.raw(), read_file as u64, write_file as u64, 0]
+    [IpcStatus::Ok.raw(), read_file as u64, write_file as u64, 0]
 }
 
 pub(crate) fn read_pipe(pipe_idx: usize, max_len: usize) -> [u64; 4] {
     with_pipe_mut(pipe_idx, |pipe| {
         if pipe.len == 0 {
             if pipe.writers > 0 {
-                return [Xv6Status::WouldBlock.raw(), 0, 0, 0];
+                return [IpcStatus::WouldBlock.raw(), 0, 0, 0];
             }
-            return [Xv6Status::Ok.raw(), 0, Xv6FileType::File.raw() as u64, 0];
+            return [IpcStatus::Ok.raw(), 0, FileKind::File.raw() as u64, 0];
         }
         let n = min(max_len, pipe.len);
         with_shared_buffer_mut(|dst| {
@@ -55,9 +55,9 @@ pub(crate) fn read_pipe(pipe_idx: usize, max_len: usize) -> [u64; 4] {
         });
         fence(Ordering::SeqCst);
         [
-            Xv6Status::Ok.raw(),
+            IpcStatus::Ok.raw(),
             n as u64,
-            Xv6FileType::File.raw() as u64,
+            FileKind::File.raw() as u64,
             0,
         ]
     })
@@ -67,10 +67,10 @@ pub(crate) fn read_pipe(pipe_idx: usize, max_len: usize) -> [u64; 4] {
 pub(crate) fn write_pipe(pipe_idx: usize, max_len: usize) -> [u64; 4] {
     with_pipe_mut(pipe_idx, |pipe| {
         if pipe.readers == 0 {
-            return [Xv6Status::BrokenPipe.raw(), 0, 0, 0];
+            return [IpcStatus::BrokenPipe.raw(), 0, 0, 0];
         }
         if pipe.len >= PIPE_BUF {
-            return [Xv6Status::WouldBlock.raw(), 0, 0, 0];
+            return [IpcStatus::WouldBlock.raw(), 0, 0, 0];
         }
         let n = with_shared_buffer(|src| {
             let mut n = 0usize;
@@ -83,9 +83,9 @@ pub(crate) fn write_pipe(pipe_idx: usize, max_len: usize) -> [u64; 4] {
             n
         });
         [
-            Xv6Status::Ok.raw(),
+            IpcStatus::Ok.raw(),
             n as u64,
-            Xv6FileType::File.raw() as u64,
+            FileKind::File.raw() as u64,
             0,
         ]
     })

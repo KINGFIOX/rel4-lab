@@ -10,4 +10,4 @@ path = "src/main.rs"
 
 [dependencies]
 sel4-user = { path = "../sel4-user" }
-xv6-abi = { path = "../xv6-abi" }
+linux-abi = { path = "../linux-abi" }

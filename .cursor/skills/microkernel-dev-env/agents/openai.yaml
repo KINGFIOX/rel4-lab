@@ -1,4 +1,4 @@
 interface:
   display_name: "Microkernel Dev Env"
   short_description: "Use direnv-loaded validation tools"
-  default_prompt: "Use $microkernel-dev-env when running cargo, rustfmt, seL4, QEMU, or xv6 validation in this repository."
+  default_prompt: "Use $microkernel-dev-env when running cargo, rustfmt, seL4, QEMU, or linux-compat/LTP validation in this repository."

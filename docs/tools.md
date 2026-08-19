@@ -3,8 +3,8 @@
 First-party helpers are `tools/*.py`. They default to `ARCH=riscv64`.
 `tools/target_config.py` also knows `x86_64`.
 
-`pack-image.py` and `build-xv6-user-rootserver.py` drop `CARGO_TARGET_DIR`
-so Cargo writes into the repository `target/` that the installer copies from.
+`pack-image.py` and `run-ltp.py` drop `CARGO_TARGET_DIR` so Cargo writes
+into the repository `target/` that the installer copies from.
 
 ## Pack and run
 
@@ -14,10 +14,8 @@ so Cargo writes into the repository `target/` that the installer copies from.
 | `run-hello.py` | x86_64 gate: builds kernel + `hello-rootserver`, runs the kernel audits, objcopies a Multiboot kernel, boots QEMU `-kernel`/`-initrd` `-serial stdio`. Success is `hello-rootserver: ok`. |
 | `run-tests.py` | Boots an already packed image. Default `TIMEOUT=180`, `SMP=2`. Exit 0 on `Test suite passed.` (or a configured baseline fail banner). |
 | `simulate.py` | Interactive QEMU. `MODE=image` if a packed image exists, else `standalone` kernel ELF. |
-| `run-xv6-user.py` | Builds payload + xv6-host, optional `fs.img`, packs with `ROOTSERVER_ELF`, boots. Success is `xv6-host: exit(0) pid=1`. |
-| `run-xv6-shell.py` | Same path with `sh`. |
-| `build-xv6-user-rootserver.py` | Cross-links an xv6 user program and cargo-builds the host/servers. |
-| `build-xv6-fs-img.py` | Builds upstream xv6 `fs.img`. |
+| `run-ltp.py` | Builds the ramfs cpio, linux-compat + vfs + uart, packs with `ROOTSERVER_ELF` and a 16-bit root CNode, boots QEMU without virtio-blk. Success is `ltp-wave1: ok`. |
+| `build-linux-rootfs.py` | Cross-links wave-1 ET_EXEC programs (including LTP `uname01.c`) and writes a newc cpio. |
 
 Upstream `sel4test-driver` still talks MCS `SchedContext` / `SchedControl`.
 This kernel does not implement those objects, so a default `run-tests.py`
@@ -33,14 +31,14 @@ run is not a correctness signal for the current ABI.
 | `audit-user-context-abi.py` | `seL4_UserContext` word order |
 | `audit-syscall-abi.py` | syscall numbers and object size bits vs `sel4-user` |
 | `audit-smp-abi.py` | remote stall / IPI / scratch patterns |
-| `audit-platform-abi.py` | UART / virtio MMIO constants vs `xv6-abi` |
+| `audit-platform-abi.py` | UART / virtio MMIO constants vs `linux-abi` |
 | `audit-vspace-abi.py` | page-table / ASID constants (x86 4-level) |
 | `audit-kernel-elf.py` | kernel ELF entry and PT_LOAD layout |
 | `audit-kernel-fpu.py` | FP instructions confined to the RV64 FPU module |
 
 `audit-fpu-lifecycle.py` is a larger source-pattern suite for FPU ownership.
-`audit-xv6-host-elf-abi.py` runs from `build-xv6-user-rootserver.py` and
-checks RISC-V ELF machine 243 for embedded payloads.
+`audit-linux-compat-elf-abi.py` runs from `run-ltp.py` and checks RISC-V ELF
+machine 243 for embedded uart/vfs payloads.
 
-`kernel_arch_paths.py`, `tool_common.py`, and `xv6-build-lock.py` are shared
-helpers, not entry points.
+`kernel_arch_paths.py` and `tool_common.py` are shared helpers, not entry
+points.

@@ -150,12 +150,12 @@ def audit_common_device_window(
     platform_consts: dict[str, int],
     regions: list[tuple[int, int]],
 ) -> None:
-    device_base = require_symbol(platform_consts, "XV6_DEVICE_MMIO_BASE", errors, target_name)
-    device_size = require_symbol(platform_consts, "XV6_DEVICE_MMIO_SIZE", errors, target_name)
+    device_base = require_symbol(platform_consts, "DEVICE_MMIO_BASE", errors, target_name)
+    device_size = require_symbol(platform_consts, "DEVICE_MMIO_SIZE", errors, target_name)
     uart_frame = require_symbol(platform_consts, "UART0_MMIO_FRAME_BASE", errors, target_name)
-    expect_equal(errors, "XV6_DEVICE_MMIO_BASE", device_base, uart_frame)
-    expect_page_aligned(errors, "XV6_DEVICE_MMIO_BASE", device_base)
-    expect_covered(errors, "XV6_DEVICE_MMIO window", regions, device_base, device_size)
+    expect_equal(errors, "DEVICE_MMIO_BASE", device_base, uart_frame)
+    expect_page_aligned(errors, "DEVICE_MMIO_BASE", device_base)
+    expect_covered(errors, "DEVICE_MMIO window", regions, device_base, device_size)
 
     if "UART0_MMIO_BASE_PA" in kernel_consts:
         expect_equal(
@@ -203,23 +203,23 @@ def audit_riscv64(
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        description="Check kernel and xv6 platform MMIO ABI constants."
+        description="Check kernel and linux-abi platform MMIO ABI constants."
     )
     parser.parse_args(argv)
 
     target = target_from_env(PREFIX)
-    shared_platform_rs = ROOT_DIR / "userspace" / "xv6-abi" / "src" / "platform" / "mod.rs"
+    shared_platform_rs = ROOT_DIR / "userspace" / "linux-abi" / "src" / "platform" / "mod.rs"
     kernel_platform_rs = arch_plat(target.name)
     userspace_platform_rs = (
-        ROOT_DIR / "userspace" / "xv6-abi" / "src" / "platform" / f"{target.name}.rs"
+        ROOT_DIR / "userspace" / "linux-abi" / "src" / "platform" / f"{target.name}.rs"
     )
     if not kernel_platform_rs.is_file():
         die(PREFIX, f"kernel platform source not found: {kernel_platform_rs}")
     if not userspace_platform_rs.is_file():
         if target.name == "x86_64":
-            print("PASS: x86_64 platform ABI audit skipped; xv6-abi is RISC-V only")
+            print("PASS: x86_64 platform ABI audit skipped; linux-abi is RISC-V only")
             return 0
-        die(PREFIX, f"xv6 platform source not found: {userspace_platform_rs}")
+        die(PREFIX, f"linux-abi platform source not found: {userspace_platform_rs}")
 
     shared_consts = parse_consts(shared_platform_rs)
     kernel_consts = parse_consts(kernel_platform_rs)
@@ -229,7 +229,7 @@ def main(argv: list[str]) -> int:
     if target.name == "riscv64":
         errors = audit_riscv64(kernel_consts, platform_consts, regions)
     elif target.name == "x86_64":
-        print("PASS: x86_64 platform ABI audit skipped; xv6-abi is RISC-V only")
+        print("PASS: x86_64 platform ABI audit skipped; linux-abi is RISC-V only")
         return 0
     else:
         die(PREFIX, f"unsupported target {target.name}")

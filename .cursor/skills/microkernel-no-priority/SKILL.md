@@ -56,6 +56,6 @@ Use the smallest useful validation stage:
 - Rust-only edits: `cargo fmt --all --check`, then `cargo check`.
 - Scheduler-sensitive changes: run focused sel4tests for yield, IPC ordering, notifications, and multicore behavior on RISC-V first.
 - Architecture parity: run matching `ARCH=x86_64` build/check commands when shared scheduler code changed. The x86_64 backend is staged (no trap yet).
-- xv6 impact: run a targeted xv6 program such as `tools/run-xv6-user.py forktest` before broad `usertests`.
+- linux-compat impact: run `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py`.
 
 Do not claim priority scheduling avoidance is complete until temporary diagnostics are cleaned up, priority APIs are behaviorally no-op on rel4, user-space does not depend on priority semantics, and relevant focused validations pass.

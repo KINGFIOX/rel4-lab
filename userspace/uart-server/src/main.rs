@@ -7,13 +7,13 @@ use core::panic::PanicInfo;
 use core::ptr;
 use core::ptr::{read_volatile, write_volatile};
 
+use linux_abi::{
+    IpcProtocol, IpcStatus, LINUX_ABI_VERSION, SERVER_RECV_REPLY_CPTR, SERVICE_ENDPOINT_CPTR,
+    UART_MMIO_VADDR, UART_REPLY_ENDPOINT_CPTR, UartOp,
+};
 use sel4_user::{
     IpcMessage, error, halt_loop, info, init_ipc_buffer, init_logger, msg_info, msg_label,
     sel4_recv_with_reply, sel4_reply_recv_with_reply, sel4_send,
-};
-use xv6_abi::{
-    UartOp, XV6_ABI_VERSION, XV6_SERVER_RECV_REPLY_CPTR, XV6_SERVICE_ENDPOINT_CPTR,
-    XV6_UART_MMIO_VADDR, XV6_UART_REPLY_ENDPOINT_CPTR, Xv6Protocol, Xv6Status,
 };
 
 const RHR: usize = 0;
@@ -40,14 +40,14 @@ pub extern "C" fn _start(ipc_buffer: usize) -> ! {
         let msg = if reply_pending {
             unsafe {
                 sel4_reply_recv_with_reply(
-                    XV6_SERVICE_ENDPOINT_CPTR,
+                    SERVICE_ENDPOINT_CPTR,
                     msg_info(0, 0, 0, 4),
                     &reply_mrs,
-                    XV6_SERVER_RECV_REPLY_CPTR,
+                    SERVER_RECV_REPLY_CPTR,
                 )
             }
         } else {
-            unsafe { sel4_recv_with_reply(XV6_SERVICE_ENDPOINT_CPTR, XV6_SERVER_RECV_REPLY_CPTR) }
+            unsafe { sel4_recv_with_reply(SERVICE_ENDPOINT_CPTR, SERVER_RECV_REPLY_CPTR) }
         };
         if is_async_request(&msg) {
             handle_async_request(&msg);
@@ -73,36 +73,36 @@ unsafe fn clear_bss() {
 
 fn handle_request(msg: &IpcMessage) -> [u64; 4] {
     if !valid_request(msg) {
-        return [Xv6Status::InvalidArgument.raw(), 0, 0, 0];
+        return [IpcStatus::InvalidArgument.raw(), 0, 0, 0];
     }
     match UartOp::from_raw(msg_label(msg.info)) {
         Some(UartOp::Init) => {
             init_uart();
-            [Xv6Status::Ok.raw(), 0, 0, 0]
+            [IpcStatus::Ok.raw(), 0, 0, 0]
         }
         Some(UartOp::PutChar) => {
             putch(msg.mrs[2] as u8);
-            [Xv6Status::Ok.raw(), 1, 0, 0]
+            [IpcStatus::Ok.raw(), 1, 0, 0]
         }
         Some(UartOp::GetChar) => {
             let ch = getch();
             if ch < 0 {
-                [Xv6Status::WouldBlock.raw(), 0, 0, 0]
+                [IpcStatus::WouldBlock.raw(), 0, 0, 0]
             } else {
-                [Xv6Status::Ok.raw(), ch as u64, 0, 0]
+                [IpcStatus::Ok.raw(), ch as u64, 0, 0]
             }
         }
-        None => [Xv6Status::InvalidArgument.raw(), 0, 0, 0],
+        None => [IpcStatus::InvalidArgument.raw(), 0, 0, 0],
     }
 }
 
 fn valid_request(msg: &IpcMessage) -> bool {
-    (msg.mrs[0] == Xv6Protocol::VfsToUart.raw() && msg.mrs[1] == XV6_ABI_VERSION)
+    (msg.mrs[0] == IpcProtocol::VfsToUart.raw() && msg.mrs[1] == LINUX_ABI_VERSION)
         || is_async_request(msg)
 }
 
 fn is_async_request(msg: &IpcMessage) -> bool {
-    msg.mrs[0] == Xv6Protocol::VfsToUartAsync.raw() && msg.mrs[1] != 0
+    msg.mrs[0] == IpcProtocol::VfsToUartAsync.raw() && msg.mrs[1] != 0
 }
 
 fn handle_async_request(msg: &IpcMessage) {
@@ -110,8 +110,8 @@ fn handle_async_request(msg: &IpcMessage) {
     let reply = handle_request(msg);
     unsafe {
         sel4_send(
-            XV6_UART_REPLY_ENDPOINT_CPTR,
-            msg_info(Xv6Protocol::VfsToUartAsync.raw(), 0, 0, 5),
+            UART_REPLY_ENDPOINT_CPTR,
+            msg_info(IpcProtocol::VfsToUartAsync.raw(), 0, 0, 5),
             &[request_id, reply[0], reply[1], reply[2], reply[3]],
         );
     }
@@ -145,7 +145,7 @@ fn getch() -> i32 {
 
 #[inline]
 fn reg(offset: usize) -> *mut u8 {
-    (XV6_UART_MMIO_VADDR as usize + offset) as *mut u8
+    (UART_MMIO_VADDR as usize + offset) as *mut u8
 }
 
 #[panic_handler]

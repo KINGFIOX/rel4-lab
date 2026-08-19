@@ -5,22 +5,18 @@ members = [
     "userspace/sel4-user",
     "userspace/hello-rootserver",
     "userspace/uart-server",
-    "userspace/virtio-disk-server",
     "userspace/vfs-server",
-    "userspace/xv6-abi",
-    "userspace/xv6fs-server",
-    "userspace/xv6-host",
+    "userspace/linux-abi",
+    "userspace/linux-compat",
 ]
 default-members = [
     "kernel",
     "userspace/sel4-user",
     "userspace/hello-rootserver",
     "userspace/uart-server",
-    "userspace/virtio-disk-server",
     "userspace/vfs-server",
-    "userspace/xv6-abi",
-    "userspace/xv6fs-server",
-    "userspace/xv6-host",
+    "userspace/linux-abi",
+    "userspace/linux-compat",
 ]
 
 [profile.release]

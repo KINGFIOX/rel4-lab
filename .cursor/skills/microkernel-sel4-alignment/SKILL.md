@@ -89,6 +89,6 @@ SEL4TEST_REGEX='...' ./tools/pack-image.py
 ./tools/run-tests.py
 ```
 
-For xv6-visible effects, add a targeted `./tools/run-xv6-user.py <program>` run.
+For linux-compat-visible effects, add `TIMEOUT=180 ARCH=riscv64 ./tools/run-ltp.py`.
 Do not use QEMU wall-clock timing as a correctness oracle; prefer pass/fail
 markers, event ordering, counters, and repeated-run stability.

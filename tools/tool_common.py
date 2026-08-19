@@ -112,41 +112,6 @@ RISCV_EFLAGS_FLOAT_ABI_MASK = 0x6
 RISCV_EFLAGS_FLOAT_ABI_SOFT = 0x0
 
 
-def require_xv6_user_elf(prefix: str, target, path: Path) -> None:
-    expected_machines = {
-        "riscv64": RISCV_ELF_MACHINE,
-        "x86_64": X86_64_ELF_MACHINE,
-    }
-    expected_machine = expected_machines.get(target.name)
-    if expected_machine is None:
-        die(prefix, f"unsupported xv6 user ELF target: {target.name}")
-    try:
-        data = path.read_bytes()
-    except FileNotFoundError:
-        die(prefix, f"xv6 user ELF not found: {path}")
-    if (
-        len(data) < 64
-        or data[0:4] != b"\x7fELF"
-        or data[4] != 2
-        or data[5] != 1
-        or int.from_bytes(data[16:18], "little") != ELF_TYPE_EXECUTABLE
-        or int.from_bytes(data[18:20], "little") != expected_machine
-    ):
-        die(prefix, f"expected a little-endian executable {target.name} xv6 user ELF: {path}")
-
-    if target.name != "riscv64":
-        return
-    flags = int.from_bytes(data[48:52], "little")
-    if (flags & RISCV_EFLAGS_FLOAT_ABI_MASK) != RISCV_EFLAGS_FLOAT_ABI_SOFT:
-        die(
-            prefix,
-            (
-                f"RISC-V xv6 user ELF must use the soft-float ABI: {path} "
-                f"has e_flags={flags:#x}"
-            ),
-        )
-
-
 def require_target_executable_elf(prefix: str, target, path: Path, description: str) -> None:
     expected_machines = {
         "riscv64": RISCV_ELF_MACHINE,
@@ -212,33 +177,8 @@ def install_file(src: Path, dst: Path, mode: int = 0o644) -> None:
     os.chmod(dst, mode)
 
 
-def default_xv6_dir_for_target(target) -> Path:
-    return ROOT_DIR / "third_party" / target.xv6_dir_name
-
-
-def default_xv6_out_dir(target) -> Path:
-    return ROOT_DIR / "target" / "xv6compat" / target.name
-
-
-def prepare_xv6_dir_for_target(prefix: str, target, source_dir: Path, out_dir: Path) -> Path:
-    build_dir_name = f"xv6-{target.name}-user"
-    build_dir = Path(os.environ.get("XV6_BUILD_DIR", str(out_dir / build_dir_name)))
-    if source_dir.resolve() != build_dir.resolve():
-        build_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source_dir, build_dir, dirs_exist_ok=True)
-
-    patch_xv6_usertests_for_host(prefix, build_dir)
-    return build_dir
-
-
-def patch_xv6_usertests_for_host(prefix: str, xv6_dir: Path) -> None:
-    usertests = xv6_dir / "user" / "usertests.c"
-    require_file(prefix, usertests, f"xv6 usertests source not found: {usertests}")
-    text = usertests.read_text()
-    patched = text.replace('  {preempt, "preempt"},\n', "")
-    if patched == text:
-        return
-    usertests.write_text(patched)
+def default_linux_out_dir(target) -> Path:
+    return ROOT_DIR / "target" / "linux-compat" / target.name
 
 
 def remove_files(paths: Iterable[Path]) -> None:
@@ -264,21 +204,21 @@ def process_alive(pid: int) -> bool:
 
 
 class BuildLock:
-    """Directory lock compatible with the previous xv6-build-lock shell helper."""
+    """Directory lock for linux-compat / LTP image builds."""
 
     def __init__(self, root_dir: Path = ROOT_DIR):
         self.root_dir = root_dir
         self.lock_dir = Path(
             os.environ.get(
-                "XV6_BUILD_LOCK_DIR",
-                str(root_dir / "target" / "xv6compat" / ".build.lock"),
+                "LINUX_BUILD_LOCK_DIR",
+                str(root_dir / "target" / "linux-compat" / ".build.lock"),
             )
         )
         self.acquired = False
 
     def acquire(self) -> "BuildLock":
-        if os.environ.get("XV6_BUILD_LOCK_HELD") == "1":
-            os.environ["XV6_BUILD_LOCK_ACQUIRED"] = "0"
+        if os.environ.get("LINUX_BUILD_LOCK_HELD") == "1":
+            os.environ["LINUX_BUILD_LOCK_ACQUIRED"] = "0"
             return self
 
         self.lock_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -299,9 +239,9 @@ class BuildLock:
                 time.sleep(0.2)
 
         (self.lock_dir / "pid").write_text(f"{os.getpid()}\n")
-        os.environ["XV6_BUILD_LOCK_DIR_ACTIVE"] = str(self.lock_dir)
-        os.environ["XV6_BUILD_LOCK_ACQUIRED"] = "1"
-        os.environ["XV6_BUILD_LOCK_HELD"] = "1"
+        os.environ["LINUX_BUILD_LOCK_DIR_ACTIVE"] = str(self.lock_dir)
+        os.environ["LINUX_BUILD_LOCK_ACQUIRED"] = "1"
+        os.environ["LINUX_BUILD_LOCK_HELD"] = "1"
         self.acquired = True
         return self
 
@@ -309,9 +249,9 @@ class BuildLock:
         if not self.acquired:
             return
         shutil.rmtree(self.lock_dir, ignore_errors=True)
-        os.environ["XV6_BUILD_LOCK_ACQUIRED"] = "0"
-        os.environ.pop("XV6_BUILD_LOCK_HELD", None)
-        os.environ.pop("XV6_BUILD_LOCK_DIR_ACTIVE", None)
+        os.environ["LINUX_BUILD_LOCK_ACQUIRED"] = "0"
+        os.environ.pop("LINUX_BUILD_LOCK_HELD", None)
+        os.environ.pop("LINUX_BUILD_LOCK_DIR_ACTIVE", None)
         self.acquired = False
 
     def __enter__(self) -> "BuildLock":
@@ -321,14 +261,12 @@ class BuildLock:
         self.release()
 
 
-def xv6_user_cflags(
-    xv6_dir: Path,
+def linux_user_cflags(
+    include: Path,
     march: str,
     mabi: str,
-    include_dot: bool = False,
     code_model: str | None = "medany",
 ) -> list[str]:
-    include = "." if include_dot else str(xv6_dir)
     flags = [
         "-Wall",
         "-Werror",
@@ -340,7 +278,6 @@ def xv6_user_cflags(
         f"-march={march}",
         f"-mabi={mabi}",
         "-std=gnu99",
-        "-MD",
         "-ffreestanding",
         "-fno-common",
         "-nostdlib",

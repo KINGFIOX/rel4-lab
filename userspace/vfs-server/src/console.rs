@@ -1,15 +1,15 @@
 use core::cmp::min;
 use core::sync::atomic::{Ordering, fence};
 
-use sel4_user::{msg_info, msg_label, sel4_call};
-use xv6_abi::{
-    UartOp, XV6_ABI_VERSION, XV6_UART_ENDPOINT_CPTR, Xv6FileType, Xv6Protocol, Xv6Status,
+use linux_abi::{
+    FileKind, IpcProtocol, IpcStatus, LINUX_ABI_VERSION, MAX_IO_BYTES, UART_ENDPOINT_CPTR, UartOp,
 };
+use sel4_user::{msg_info, msg_label, sel4_call};
 
 use crate::ipc::{with_shared_buffer, with_shared_buffer_mut};
 use crate::state::{CONSOLE_BUF_SIZE, with_console, with_console_mut};
 
-const CONSOLE_INPUT: &[u8] = match option_env!("XV6_CONSOLE_INPUT") {
+const CONSOLE_INPUT: &[u8] = match option_env!("LINUX_CONSOLE_INPUT") {
     Some(input) => input.as_bytes(),
     None => b"",
 };
@@ -21,14 +21,14 @@ const DEL: u8 = 0x7f;
 pub(crate) fn init_console() -> bool {
     let reply = uart_call(
         UartOp::Init.raw(),
-        &[Xv6Protocol::VfsToUart.raw(), XV6_ABI_VERSION],
+        &[IpcProtocol::VfsToUart.raw(), LINUX_ABI_VERSION],
     );
-    reply[0] == Xv6Status::Ok.raw()
+    reply[0] == IpcStatus::Ok.raw()
 }
 
 pub(crate) async fn read_console(max_len: usize) -> [u64; 4] {
     if max_len == 0 {
-        return [Xv6Status::Ok.raw(), 0, Xv6FileType::Device.raw() as u64, 0];
+        return [IpcStatus::Ok.raw(), 0, FileKind::Device.raw() as u64, 0];
     }
     if !CONSOLE_INPUT.is_empty() {
         drain_scripted_input().await;
@@ -39,15 +39,15 @@ pub(crate) async fn read_console(max_len: usize) -> [u64; 4] {
     let (n, eof) = copy_console_output(max_len);
     if n == 0 {
         if eof || (!CONSOLE_INPUT.is_empty() && scripted_input_done()) {
-            return [Xv6Status::Ok.raw(), 0, Xv6FileType::Device.raw() as u64, 0];
+            return [IpcStatus::Ok.raw(), 0, FileKind::Device.raw() as u64, 0];
         }
-        return [Xv6Status::WouldBlock.raw(), 0, 0, 0];
+        return [IpcStatus::WouldBlock.raw(), 0, 0, 0];
     }
     fence(Ordering::SeqCst);
     [
-        Xv6Status::Ok.raw(),
+        IpcStatus::Ok.raw(),
         n as u64,
-        Xv6FileType::Device.raw() as u64,
+        FileKind::Device.raw() as u64,
         0,
     ]
 }
@@ -69,11 +69,11 @@ async fn drain_scripted_input() {
 async fn drain_uart_input() -> Result<(), [u64; 4]> {
     while !console_has_complete_line() {
         let reply = uart_getch().await;
-        if reply[0] == Xv6Status::WouldBlock.raw() {
+        if reply[0] == IpcStatus::WouldBlock.raw() {
             break;
         }
-        if reply[0] != Xv6Status::Ok.raw() {
-            return Err([Xv6Status::InvalidArgument.raw(), 0, 0, 0]);
+        if reply[0] != IpcStatus::Ok.raw() {
+            return Err([IpcStatus::InvalidArgument.raw(), 0, 0, 0]);
         }
         handle_console_input(reply[1] as u8).await;
     }
@@ -180,7 +180,7 @@ async fn echo_backspace() {
 }
 
 pub(crate) async fn write_console(max_len: usize) -> [u64; 4] {
-    let len = min(max_len, xv6_abi::XV6_MAX_FILE_WRITE);
+    let len = min(max_len, MAX_IO_BYTES);
     let mut done = 0usize;
     while done < len {
         let mut bytes = [0u8; 64];
@@ -192,9 +192,9 @@ pub(crate) async fn write_console(max_len: usize) -> [u64; 4] {
         while i < chunk {
             if !uart_putch(bytes[i]).await {
                 return [
-                    Xv6Status::InvalidArgument.raw(),
+                    IpcStatus::InvalidArgument.raw(),
                     (done + i) as u64,
-                    Xv6FileType::Device.raw() as u64,
+                    FileKind::Device.raw() as u64,
                     0,
                 ];
             }
@@ -203,9 +203,9 @@ pub(crate) async fn write_console(max_len: usize) -> [u64; 4] {
         done += chunk;
     }
     [
-        Xv6Status::Ok.raw(),
+        IpcStatus::Ok.raw(),
         len as u64,
-        Xv6FileType::Device.raw() as u64,
+        FileKind::Device.raw() as u64,
         0,
     ]
 }
@@ -213,28 +213,28 @@ pub(crate) async fn write_console(max_len: usize) -> [u64; 4] {
 async fn uart_putch(ch: u8) -> bool {
     let reply = uart_call(
         UartOp::PutChar.raw(),
-        &[Xv6Protocol::VfsToUart.raw(), XV6_ABI_VERSION, ch as u64],
+        &[IpcProtocol::VfsToUart.raw(), LINUX_ABI_VERSION, ch as u64],
     );
-    reply[0] == Xv6Status::Ok.raw()
+    reply[0] == IpcStatus::Ok.raw()
 }
 
 async fn uart_getch() -> [u64; 4] {
     uart_call(
         UartOp::GetChar.raw(),
-        &[Xv6Protocol::VfsToUart.raw(), XV6_ABI_VERSION],
+        &[IpcProtocol::VfsToUart.raw(), LINUX_ABI_VERSION],
     )
 }
 
 fn uart_call(label: u64, mrs: &[u64]) -> [u64; 4] {
     let reply = unsafe {
         sel4_call(
-            XV6_UART_ENDPOINT_CPTR,
+            UART_ENDPOINT_CPTR,
             msg_info(label, 0, 0, mrs.len() as u64),
             mrs,
         )
     };
     if msg_label(reply.info) != 0 {
-        return [Xv6Status::InvalidArgument.raw(), 0, 0, 0];
+        return [IpcStatus::InvalidArgument.raw(), 0, 0, 0];
     }
     [reply.mrs[0], reply.mrs[1], reply.mrs[2], reply.mrs[3]]
 }

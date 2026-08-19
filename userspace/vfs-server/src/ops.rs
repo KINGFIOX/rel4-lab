@@ -1,23 +1,24 @@
 use core::cmp::min;
 use core::future::Future;
 
-use sel4_user::{IpcMessage, info, msg_label, warn};
-use xv6_abi::{
-    CONSOLE_INO, FS_BLOCK_SIZE, ROOT_INO, VfsOp, XV6_ABI_VERSION, XV6_MAX_FILE_WRITE, Xv6FileType,
-    Xv6FsOp, Xv6OpenFlag, Xv6Protocol, Xv6Status, pack_stat_type_nlink,
+use linux_abi::{
+    CONSOLE_INO, EBADF, EINVAL, ENOSYS, FileKind, IpcStatus, MAX_IO_BYTES, ROOT_INO, VfsOp,
+    open_readable, open_writable, pack_stat_kind_nlink,
 };
+use sel4_user::{IpcMessage, info, msg_label, warn};
 
 use crate::console::{init_console, read_console, write_console};
+use crate::cpio;
 use crate::ipc::{
-    copy_path_words, err, host_request, ok, path_mrs_valid, reply4, send_host_async_reply,
-    valid_host, xv6fs_call, xv6fs_call_async, xv6fs_release, xv6fs_release_async, xv6fs_retain,
-    xv6fs_retain_async,
+    err, err_code, host_request, ok, path_mrs_valid, send_host_async_reply, valid_host,
+    with_shared_buffer, with_shared_buffer_mut,
 };
 use crate::pipe::{handle_pipe, read_pipe, write_pipe};
+use crate::ramfs;
 use crate::state::{
-    FILE_CONSOLE, FILE_PIPE_READ, FILE_PIPE_WRITE, FILE_XV6_DIR, FILE_XV6_FILE, ReleaseResult,
+    FILE_CONSOLE, FILE_PIPE_READ, FILE_PIPE_WRITE, FILE_RAM_DIR, FILE_RAM_FILE, ReleaseResult,
     acquire_file_io, add_file_offset, alloc_file, detach_file, file_snapshot, release_file,
-    release_file_io, reset_all, retain_file, valid_file,
+    release_file_io, reset_all, retain_file, set_file_offset, valid_file,
 };
 
 pub(crate) enum RequestResult {
@@ -40,16 +41,16 @@ pub(crate) async fn handle_request(msg: &IpcMessage) -> RequestResult {
         Some(VfsOp::Fstat) => handle_host_request(*msg, handle_fstat_async).await,
         Some(VfsOp::Chdir) => handle_host_request(*msg, handle_chdir_async).await,
         Some(VfsOp::Pipe) => handle_host_request(*msg, handle_pipe_async).await,
-        Some(VfsOp::Mknod) => handle_host_request(*msg, handle_mknod_async).await,
         Some(VfsOp::Unlink) => handle_host_request(*msg, handle_unlink_async).await,
-        Some(VfsOp::Link) => handle_host_request(*msg, handle_link_async).await,
         Some(VfsOp::Mkdir) => handle_host_request(*msg, handle_mkdir_async).await,
         Some(VfsOp::ExecOpen) => handle_host_request(*msg, handle_exec_open_async).await,
         Some(VfsOp::ExecRead) => handle_host_request(*msg, handle_exec_read_async).await,
         Some(VfsOp::ExecClose) => handle_host_request(*msg, handle_exec_close_async).await,
+        Some(VfsOp::Getcwd) => RequestResult::Reply(ok()),
+        Some(VfsOp::Lseek) => handle_host_request(*msg, handle_lseek_async).await,
         None => {
             warn!("vfs-server: unsupported op={}", raw_op);
-            RequestResult::Reply([Xv6Status::NoSyscall.raw(), 0, 0, 0])
+            RequestResult::Reply(err_code(ENOSYS))
         }
     }
 }
@@ -76,45 +77,48 @@ fn handle_init(msg: &IpcMessage) -> [u64; 4] {
         return err();
     }
     reset_all();
+    ramfs::reset();
+    if !ramfs::init_root() {
+        return err();
+    }
+    if !cpio::unpack(crate::rootfs_bytes()) {
+        warn!("vfs-server: rootfs unpack failed");
+        return err();
+    }
+    if ramfs::ensure_dir(b"/tmp").is_err() || ramfs::install_console().is_err() {
+        return err();
+    }
     if !init_console() {
         return err();
     }
-    let Some(reply) = xv6fs_call(
-        Xv6FsOp::Init.raw(),
-        &[Xv6Protocol::VfsToXv6Fs.raw(), XV6_ABI_VERSION],
-    ) else {
-        return err();
-    };
-    if reply.mrs[0] == Xv6Status::Ok.raw() {
-        info!("vfs-server: init complete");
-    }
-    reply4(&reply)
+    info!("vfs-server: ramfs init complete");
+    ok()
 }
 
 fn handle_proc_init(msg: &IpcMessage) -> [u64; 4] {
     if !valid_host(msg) {
         return err();
     }
-    if !xv6fs_retain(ROOT_INO) {
+    if !ramfs::retain(ROOT_INO) {
         return err();
     }
     let Some(stdin_file) = alloc_file(FILE_CONSOLE, CONSOLE_INO, 0, true, true) else {
-        let _ = xv6fs_release(ROOT_INO);
+        let _ = ramfs::release(ROOT_INO);
         return err();
     };
     let Some(stdout_file) = alloc_file(FILE_CONSOLE, CONSOLE_INO, 0, true, true) else {
         release_file(stdin_file);
-        let _ = xv6fs_release(ROOT_INO);
+        let _ = ramfs::release(ROOT_INO);
         return err();
     };
     let Some(stderr_file) = alloc_file(FILE_CONSOLE, CONSOLE_INO, 0, true, true) else {
         release_file(stdin_file);
         release_file(stdout_file);
-        let _ = xv6fs_release(ROOT_INO);
+        let _ = ramfs::release(ROOT_INO);
         return err();
     };
     [
-        Xv6Status::Ok.raw(),
+        IpcStatus::Ok.raw(),
         stdin_file as u64,
         stdout_file as u64,
         stderr_file as u64,
@@ -126,7 +130,7 @@ fn handle_proc_fork(msg: &IpcMessage) -> [u64; 4] {
         return err();
     }
     let cwd_inum = msg.mrs[2] as u32;
-    if cwd_inum == 0 || xv6fs_retain(cwd_inum) {
+    if cwd_inum == 0 || ramfs::retain(cwd_inum) {
         ok()
     } else {
         err()
@@ -138,7 +142,7 @@ fn handle_proc_exit(msg: &IpcMessage) -> [u64; 4] {
         return err();
     }
     let cwd_inum = msg.mrs[2] as u32;
-    if cwd_inum == 0 || xv6fs_release(cwd_inum) {
+    if cwd_inum == 0 || ramfs::release(cwd_inum) {
         ok()
     } else {
         err()
@@ -154,51 +158,40 @@ async fn handle_open_async(msg: IpcMessage) -> [u64; 4] {
     if !path_mrs_valid(&msg, 4, path_len) {
         return err();
     }
-    let mut mrs = [0u64; 64];
-    mrs[0] = Xv6Protocol::VfsToXv6Fs.raw();
-    mrs[1] = XV6_ABI_VERSION;
-    mrs[2] = ROOT_INO as u64;
-    mrs[3] = flags as u64;
-    mrs[4] = path_len as u64;
-    copy_path_words(&msg, 4, path_len, &mut mrs, 5);
-    let Some(reply) =
-        xv6fs_call_async(Xv6FsOp::OpenAt.raw(), &mrs[..5 + path_len.div_ceil(8)]).await
-    else {
+    let Some(path) = ramfs::path_from_words(&msg.mrs, 4, path_len) else {
         return err();
     };
-    if reply[0] != Xv6Status::Ok.raw() {
-        return reply;
+    match ramfs::open_path(&path[..path_len], flags) {
+        Ok((inum, kind, size)) => {
+            let (file_kind, node) = match kind {
+                FileKind::File => (FILE_RAM_FILE, inum),
+                FileKind::Directory => (FILE_RAM_DIR, inum),
+                FileKind::Device => {
+                    let _ = ramfs::release(inum);
+                    (FILE_CONSOLE, CONSOLE_INO)
+                }
+            };
+            let Some(file) = alloc_file(
+                file_kind,
+                node,
+                0,
+                open_readable(flags),
+                open_writable(flags),
+            ) else {
+                if file_kind != FILE_CONSOLE {
+                    let _ = ramfs::release(inum);
+                }
+                return err();
+            };
+            [
+                IpcStatus::Ok.raw(),
+                file as u64,
+                kind.raw() as u64,
+                size as u64,
+            ]
+        }
+        Err(e) => err_code(e),
     }
-    let inum = reply[1] as u32;
-    let typ = reply[2] as u16;
-    let wants_write = flags
-        & (Xv6OpenFlag::WriteOnly.raw()
-            | Xv6OpenFlag::ReadWrite.raw()
-            | Xv6OpenFlag::Create.raw()
-            | Xv6OpenFlag::Truncate.raw())
-        != 0;
-    let readable =
-        flags & Xv6OpenFlag::WriteOnly.raw() == 0 || flags & Xv6OpenFlag::ReadWrite.raw() != 0;
-    let writable = flags & (Xv6OpenFlag::WriteOnly.raw() | Xv6OpenFlag::ReadWrite.raw()) != 0;
-    let (kind, node) = match Xv6FileType::from_raw(typ) {
-        Some(Xv6FileType::File) => (FILE_XV6_FILE, inum),
-        Some(Xv6FileType::Directory) if !wants_write => (FILE_XV6_DIR, inum),
-        Some(Xv6FileType::Device) => {
-            let _ = xv6fs_release_async(inum).await;
-            (FILE_CONSOLE, CONSOLE_INO)
-        }
-        _ => {
-            let _ = xv6fs_release_async(inum).await;
-            return err();
-        }
-    };
-    let Some(file) = alloc_file(kind, node, 0, readable, writable) else {
-        if kind != FILE_CONSOLE {
-            let _ = xv6fs_release_async(inum).await;
-        }
-        return err();
-    };
-    [Xv6Status::Ok.raw(), file as u64, typ as u64, reply[3]]
 }
 
 async fn handle_close_async(msg: IpcMessage) -> [u64; 4] {
@@ -206,10 +199,10 @@ async fn handle_close_async(msg: IpcMessage) -> [u64; 4] {
         return err();
     }
     match detach_file(msg.mrs[2] as usize) {
-        ReleaseResult::Invalid => err(),
+        ReleaseResult::Invalid => err_code(EBADF),
         ReleaseResult::Done => ok(),
-        ReleaseResult::Xv6(inum) => {
-            if xv6fs_release_async(inum).await {
+        ReleaseResult::Inode(inum) => {
+            if ramfs::release(inum) {
                 ok()
             } else {
                 err()
@@ -220,9 +213,9 @@ async fn handle_close_async(msg: IpcMessage) -> [u64; 4] {
 
 async fn handle_dup_async(msg: IpcMessage) -> [u64; 4] {
     if !valid_host(&msg) || !retain_file(msg.mrs[2] as usize) {
-        return err();
+        return err_code(EBADF);
     }
-    [Xv6Status::Ok.raw(), msg.mrs[2], 0, 0]
+    [IpcStatus::Ok.raw(), msg.mrs[2], 0, 0]
 }
 
 async fn handle_pipe_async(msg: IpcMessage) -> [u64; 4] {
@@ -234,17 +227,17 @@ async fn handle_read_async(msg: IpcMessage) -> [u64; 4] {
         return err();
     }
     let Some(file_idx) = valid_file(msg.mrs[2] as usize) else {
-        return err();
+        return err_code(EBADF);
     };
-    let max_len = min(msg.mrs[3] as usize, FS_BLOCK_SIZE);
+    let max_len = min(msg.mrs[3] as usize, MAX_IO_BYTES);
     let Some(file) = file_snapshot(file_idx) else {
-        return err();
+        return err_code(EBADF);
     };
     if !file.readable {
-        return err();
+        return err_code(EBADF);
     }
     match file.kind {
-        FILE_XV6_FILE | FILE_XV6_DIR => read_xv6_file_async(file_idx, max_len).await,
+        FILE_RAM_FILE | FILE_RAM_DIR => read_ram_file(file_idx, max_len),
         FILE_PIPE_READ => read_pipe(file.aux, max_len),
         FILE_CONSOLE => read_console(max_len).await,
         _ => err(),
@@ -256,17 +249,17 @@ async fn handle_write_async(msg: IpcMessage) -> [u64; 4] {
         return err();
     }
     let Some(file_idx) = valid_file(msg.mrs[2] as usize) else {
-        return err();
+        return err_code(EBADF);
     };
-    let max_len = min(msg.mrs[3] as usize, XV6_MAX_FILE_WRITE);
+    let max_len = min(msg.mrs[3] as usize, MAX_IO_BYTES);
     let Some(file) = file_snapshot(file_idx) else {
-        return err();
+        return err_code(EBADF);
     };
     if !file.writable {
-        return err();
+        return err_code(EBADF);
     }
     match file.kind {
-        FILE_XV6_FILE => write_xv6_file_async(file_idx, max_len).await,
+        FILE_RAM_FILE => write_ram_file(file_idx, max_len),
         FILE_PIPE_WRITE => write_pipe(file.aux, max_len),
         FILE_CONSOLE => write_console(max_len).await,
         _ => err(),
@@ -278,44 +271,32 @@ async fn handle_fstat_async(msg: IpcMessage) -> [u64; 4] {
         return err();
     }
     let Some(file_idx) = valid_file(msg.mrs[2] as usize) else {
-        return err();
+        return err_code(EBADF);
     };
     let Some(file) = file_snapshot(file_idx) else {
-        return err();
+        return err_code(EBADF);
     };
     match file.kind {
-        FILE_XV6_FILE | FILE_XV6_DIR => {
-            let Some(reply) = xv6fs_call_async(
-                Xv6FsOp::Fstat.raw(),
-                &[
-                    Xv6Protocol::VfsToXv6Fs.raw(),
-                    XV6_ABI_VERSION,
-                    file.node as u64,
-                ],
-            )
-            .await
-            else {
+        FILE_RAM_FILE | FILE_RAM_DIR => {
+            let Some(node) = ramfs::inode(file.node) else {
                 return err();
             };
-            if reply[0] != Xv6Status::Ok.raw() {
-                return reply;
-            }
             [
-                Xv6Status::Ok.raw(),
-                pack_stat_type_nlink(reply[1] as u16, reply[2] as u16),
+                IpcStatus::Ok.raw(),
+                pack_stat_kind_nlink(node.kind.raw(), node.nlink),
                 file.node as u64,
-                reply[3],
+                node.size as u64,
             ]
         }
         FILE_PIPE_READ | FILE_PIPE_WRITE => [
-            Xv6Status::Ok.raw(),
-            pack_stat_type_nlink(Xv6FileType::File.raw(), 1),
+            IpcStatus::Ok.raw(),
+            pack_stat_kind_nlink(FileKind::File.raw(), 1),
             4 + file.aux as u64,
             1,
         ],
         FILE_CONSOLE => [
-            Xv6Status::Ok.raw(),
-            pack_stat_type_nlink(Xv6FileType::Device.raw(), 1),
+            IpcStatus::Ok.raw(),
+            pack_stat_kind_nlink(FileKind::Device.raw(), 1),
             CONSOLE_INO as u64,
             1,
         ],
@@ -327,70 +308,53 @@ async fn handle_chdir_async(msg: IpcMessage) -> [u64; 4] {
     if !valid_host(&msg) {
         return err();
     }
-    let old_cwd_inum = msg.mrs[2] as u32;
+    let old_cwd = msg.mrs[2] as u32;
     let path_len = msg.mrs[3] as usize;
     if !path_mrs_valid(&msg, 4, path_len) {
         return err();
     }
-    let mut mrs = [0u64; 64];
-    mrs[0] = Xv6Protocol::VfsToXv6Fs.raw();
-    mrs[1] = XV6_ABI_VERSION;
-    mrs[2] = ROOT_INO as u64;
-    mrs[4] = path_len as u64;
-    copy_path_words(&msg, 4, path_len, &mut mrs, 5);
-    let Some(reply) = xv6fs_call_async(
-        Xv6FsOp::LookupDirectory.raw(),
-        &mrs[..5 + path_len.div_ceil(8)],
-    )
-    .await
-    else {
+    let Some(path) = ramfs::path_from_words(&msg.mrs, 4, path_len) else {
         return err();
     };
-    if reply[0] != Xv6Status::Ok.raw() {
-        reply
-    } else {
-        let new_cwd_inum = reply[1] as u32;
-        if !xv6fs_retain_async(new_cwd_inum).await {
-            return err();
+    match ramfs::walk(&path[..path_len]) {
+        Ok(inum) => {
+            let Some(node) = ramfs::inode(inum) else {
+                return err();
+            };
+            if node.kind != FileKind::Directory {
+                return err_code(linux_abi::ENOTDIR);
+            }
+            if !ramfs::retain(inum) {
+                return err();
+            }
+            if old_cwd != 0 {
+                let _ = ramfs::release(old_cwd);
+            }
+            [IpcStatus::Ok.raw(), inum as u64, 0, 0]
         }
-        if old_cwd_inum != 0 && !xv6fs_release_async(old_cwd_inum).await {
-            let _ = xv6fs_release_async(new_cwd_inum).await;
-            return err();
-        }
-        [Xv6Status::Ok.raw(), new_cwd_inum as u64, 0, 0]
+        Err(e) => err_code(e),
     }
-}
-
-async fn handle_mknod_async(msg: IpcMessage) -> [u64; 4] {
-    if !valid_host(&msg) {
-        return err();
-    }
-    let path_len = msg.mrs[4] as usize;
-    if !path_mrs_valid(&msg, 5, path_len) {
-        return err();
-    }
-    let mut mrs = [0u64; 64];
-    mrs[0] = Xv6Protocol::VfsToXv6Fs.raw();
-    mrs[1] = XV6_ABI_VERSION;
-    mrs[2] = ROOT_INO as u64;
-    mrs[3] = msg.mrs[2];
-    mrs[4] = msg.mrs[3];
-    mrs[5] = path_len as u64;
-    copy_path_words(&msg, 5, path_len, &mut mrs, 6);
-    xv6fs_call_async(Xv6FsOp::Mknod.raw(), &mrs[..6 + path_len.div_ceil(8)])
-        .await
-        .unwrap_or_else(err)
 }
 
 async fn handle_unlink_async(msg: IpcMessage) -> [u64; 4] {
-    namespace_one_path_async(msg, Xv6FsOp::Unlink.raw()).await
+    if !valid_host(&msg) {
+        return err();
+    }
+    let path_len = msg.mrs[2] as usize;
+    let flags = msg.mrs[3] as u32;
+    if !path_mrs_valid(&msg, 4, path_len) {
+        return err();
+    }
+    let Some(path) = ramfs::path_from_words(&msg.mrs, 4, path_len) else {
+        return err();
+    };
+    match ramfs::unlink(&path[..path_len], flags) {
+        Ok(()) => ok(),
+        Err(e) => err_code(e),
+    }
 }
 
 async fn handle_mkdir_async(msg: IpcMessage) -> [u64; 4] {
-    namespace_one_path_async(msg, Xv6FsOp::Mkdir.raw()).await
-}
-
-async fn namespace_one_path_async(msg: IpcMessage, op: u64) -> [u64; 4] {
     if !valid_host(&msg) {
         return err();
     }
@@ -398,44 +362,13 @@ async fn namespace_one_path_async(msg: IpcMessage, op: u64) -> [u64; 4] {
     if !path_mrs_valid(&msg, 3, path_len) {
         return err();
     }
-    let mut mrs = [0u64; 64];
-    mrs[0] = Xv6Protocol::VfsToXv6Fs.raw();
-    mrs[1] = XV6_ABI_VERSION;
-    mrs[2] = ROOT_INO as u64;
-    mrs[3] = path_len as u64;
-    copy_path_words(&msg, 3, path_len, &mut mrs, 4);
-    xv6fs_call_async(op, &mrs[..4 + path_len.div_ceil(8)])
-        .await
-        .unwrap_or_else(err)
-}
-
-async fn handle_link_async(msg: IpcMessage) -> [u64; 4] {
-    if !valid_host(&msg) {
+    let Some(path) = ramfs::path_from_words(&msg.mrs, 3, path_len) else {
         return err();
+    };
+    match ramfs::mkdir(&path[..path_len]) {
+        Ok(_) => ok(),
+        Err(e) => err_code(e),
     }
-    let old_len = msg.mrs[2] as usize;
-    let new_len = msg.mrs[3] as usize;
-    let old_words = old_len.div_ceil(8);
-    if !path_mrs_valid(&msg, 4, old_len) || !path_mrs_valid(&msg, 4 + old_words, new_len) {
-        return err();
-    }
-    let mut mrs = [0u64; 64];
-    if 5 + old_words + new_len.div_ceil(8) > mrs.len() {
-        return err();
-    }
-    mrs[0] = Xv6Protocol::VfsToXv6Fs.raw();
-    mrs[1] = XV6_ABI_VERSION;
-    mrs[2] = ROOT_INO as u64;
-    mrs[3] = old_len as u64;
-    mrs[4] = new_len as u64;
-    copy_path_words(&msg, 4, old_len, &mut mrs, 5);
-    copy_path_words(&msg, 4 + old_words, new_len, &mut mrs, 5 + old_words);
-    xv6fs_call_async(
-        Xv6FsOp::Link.raw(),
-        &mrs[..5 + old_words + new_len.div_ceil(8)],
-    )
-    .await
-    .unwrap_or_else(err)
 }
 
 async fn handle_exec_open_async(msg: IpcMessage) -> [u64; 4] {
@@ -446,58 +379,68 @@ async fn handle_exec_open_async(msg: IpcMessage) -> [u64; 4] {
     if !path_mrs_valid(&msg, 3, path_len) {
         return err();
     }
-    let mut mrs = [0u64; 64];
-    mrs[0] = Xv6Protocol::VfsToXv6Fs.raw();
-    mrs[1] = XV6_ABI_VERSION;
-    mrs[2] = ROOT_INO as u64;
-    mrs[3] = 0;
-    mrs[4] = path_len as u64;
-    copy_path_words(&msg, 3, path_len, &mut mrs, 5);
-    let Some(reply) =
-        xv6fs_call_async(Xv6FsOp::OpenAt.raw(), &mrs[..5 + path_len.div_ceil(8)]).await
-    else {
+    let Some(path) = ramfs::path_from_words(&msg.mrs, 3, path_len) else {
         return err();
     };
-    if reply[0] != Xv6Status::Ok.raw() || reply[2] != Xv6FileType::File.raw() as u64 {
-        if reply[0] == Xv6Status::Ok.raw() {
-            let _ = xv6fs_release_async(reply[1] as u32).await;
+    match ramfs::open_path(&path[..path_len], 0) {
+        Ok((inum, FileKind::File, size)) => [IpcStatus::Ok.raw(), inum as u64, size as u64, 0],
+        Ok((inum, _, _)) => {
+            let _ = ramfs::release(inum);
+            err()
         }
-        return err();
+        Err(e) => err_code(e),
     }
-    [Xv6Status::Ok.raw(), reply[1], reply[3], 0]
 }
 
 async fn handle_exec_read_async(msg: IpcMessage) -> [u64; 4] {
     if !valid_host(&msg) {
         return err();
     }
-    let request = min(msg.mrs[5] as usize, FS_BLOCK_SIZE);
-    xv6fs_call_async(
-        Xv6FsOp::Read.raw(),
-        &[
-            Xv6Protocol::VfsToXv6Fs.raw(),
-            XV6_ABI_VERSION,
-            msg.mrs[2],
-            msg.mrs[3],
-            request as u64,
-        ],
+    let inum = msg.mrs[2] as u32;
+    let offset = msg.mrs[3] as usize;
+    let request = min(msg.mrs[5] as usize, MAX_IO_BYTES);
+    with_shared_buffer_mut(
+        |dst| match ramfs::read_inode(inum, offset, &mut dst[..request]) {
+            Ok(n) => [IpcStatus::Ok.raw(), n as u64, 0, 0],
+            Err(e) => err_code(e),
+        },
     )
-    .await
-    .unwrap_or_else(err)
 }
 
 async fn handle_exec_close_async(msg: IpcMessage) -> [u64; 4] {
     if !valid_host(&msg) {
         return err();
     }
-    if xv6fs_release_async(msg.mrs[2] as u32).await {
+    if ramfs::release(msg.mrs[2] as u32) {
         ok()
     } else {
         err()
     }
 }
 
-async fn read_xv6_file_async(file_idx: usize, max_len: usize) -> [u64; 4] {
+async fn handle_lseek_async(msg: IpcMessage) -> [u64; 4] {
+    if !valid_host(&msg) {
+        return err();
+    }
+    let Some(file_idx) = valid_file(msg.mrs[2] as usize) else {
+        return err_code(EBADF);
+    };
+    let Some(file) = file_snapshot(file_idx) else {
+        return err_code(EBADF);
+    };
+    if file.kind != FILE_RAM_FILE && file.kind != FILE_RAM_DIR {
+        return err_code(EINVAL);
+    }
+    match ramfs::seek(file.node, file.offset, msg.mrs[3] as i64, msg.mrs[4]) {
+        Ok(next) => {
+            set_file_offset(file_idx, next);
+            [IpcStatus::Ok.raw(), next as u64, 0, 0]
+        }
+        Err(e) => err_code(e),
+    }
+}
+
+fn read_ram_file(file_idx: usize, max_len: usize) -> [u64; 4] {
     if !acquire_file_io(file_idx) {
         return err();
     }
@@ -505,34 +448,20 @@ async fn read_xv6_file_async(file_idx: usize, max_len: usize) -> [u64; 4] {
         release_file_io(file_idx);
         return err();
     };
-    let op = if file.kind == FILE_XV6_DIR {
-        Xv6FsOp::ReadDir.raw()
-    } else {
-        Xv6FsOp::Read.raw()
-    };
-    let Some(reply) = xv6fs_call_async(
-        op,
-        &[
-            Xv6Protocol::VfsToXv6Fs.raw(),
-            XV6_ABI_VERSION,
-            file.node as u64,
-            file.offset as u64,
-            max_len as u64,
-        ],
-    )
-    .await
-    else {
-        release_file_io(file_idx);
-        return err();
-    };
-    if reply[0] == Xv6Status::Ok.raw() {
-        add_file_offset(file_idx, reply[1] as usize);
-    }
+    let reply = with_shared_buffer_mut(|dst| {
+        match ramfs::read_inode(file.node, file.offset, &mut dst[..max_len]) {
+            Ok(n) => {
+                add_file_offset(file_idx, n);
+                [IpcStatus::Ok.raw(), n as u64, file.kind as u64, 0]
+            }
+            Err(e) => err_code(e),
+        }
+    });
     release_file_io(file_idx);
     reply
 }
 
-async fn write_xv6_file_async(file_idx: usize, max_len: usize) -> [u64; 4] {
+fn write_ram_file(file_idx: usize, max_len: usize) -> [u64; 4] {
     if !acquire_file_io(file_idx) {
         return err();
     }
@@ -540,24 +469,20 @@ async fn write_xv6_file_async(file_idx: usize, max_len: usize) -> [u64; 4] {
         release_file_io(file_idx);
         return err();
     };
-    let Some(reply) = xv6fs_call_async(
-        Xv6FsOp::Write.raw(),
-        &[
-            Xv6Protocol::VfsToXv6Fs.raw(),
-            XV6_ABI_VERSION,
-            file.node as u64,
-            file.offset as u64,
-            max_len as u64,
-        ],
-    )
-    .await
-    else {
-        release_file_io(file_idx);
-        return err();
-    };
-    if reply[0] == Xv6Status::Ok.raw() {
-        add_file_offset(file_idx, reply[1] as usize);
-    }
+    let reply = with_shared_buffer(|src| {
+        match ramfs::write_inode(file.node, file.offset, &src[..max_len]) {
+            Ok(n) => {
+                add_file_offset(file_idx, n);
+                [
+                    IpcStatus::Ok.raw(),
+                    n as u64,
+                    FileKind::File.raw() as u64,
+                    0,
+                ]
+            }
+            Err(e) => err_code(e),
+        }
+    });
     release_file_io(file_idx);
     reply
 }

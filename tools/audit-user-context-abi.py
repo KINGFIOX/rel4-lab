@@ -226,7 +226,7 @@ def audit_boot_rootserver_context(
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        description="Check kernel and xv6-host seL4_UserContext ABI constants."
+        description="Check kernel and linux-compat seL4_UserContext ABI constants."
     )
     parser.parse_args(argv)
 
@@ -234,7 +234,7 @@ def main(argv: list[str]) -> int:
     kernel_regs_path = (
         sel4_arch_rs(target.name) if target.name == "x86_64" else trap_rs(target.name)
     )
-    userspace_arch = ROOT_DIR / "userspace" / "xv6-host" / "src" / "arch" / f"{target.name}.rs"
+    userspace_arch = ROOT_DIR / "userspace" / "linux-compat" / "src" / "arch" / f"{target.name}.rs"
     if not kernel_regs_path.is_file():
         die(PREFIX, f"kernel user-context source not found: {kernel_regs_path}")
 
@@ -257,14 +257,14 @@ def main(argv: list[str]) -> int:
             if got != expected:
                 errors.append(f"{name}={got}, expected {expected}")
     elif target.name != "x86_64":
-        die(PREFIX, f"xv6-host arch source not found: {userspace_arch}")
+        die(PREFIX, f"linux-compat arch source not found: {userspace_arch}")
 
     if errors:
         for error in errors:
             log(PREFIX, f"FAIL: {error}")
         return 1
 
-    extra = "" if userspace_arch.is_file() else "; xv6-host not built for this target"
+    extra = "" if userspace_arch.is_file() else "; linux-compat not built for this target"
     print(f"PASS: {target.name} seL4_UserContext ABI words={len(expected_regs)}{extra}")
     return 0
 

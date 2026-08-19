@@ -1,0 +1,24 @@
+use super::{MMIO_FRAME_SIZE, UartMmio};
+
+pub const UART0_MMIO_BASE: u64 = 0x1000_0000;
+pub const UART0_MMIO_SIZE: u64 = 0x1000;
+pub const UART0_MMIO_FRAME_BASE: u64 = UART0_MMIO_BASE;
+pub const UART_MMIO_FRAME_VADDR: u64 = 0x5000_4000;
+pub const UART_MMIO_VADDR: u64 = UART_MMIO_FRAME_VADDR;
+pub const UART0_IRQ: u64 = 10;
+
+pub const VIRTIO_MMIO_BASE: u64 = 0x1000_1000;
+pub const VIRTIO_MMIO_SIZE: u64 = 0x1000;
+pub const VIRTIO_MMIO_FRAME_BASE: u64 = VIRTIO_MMIO_BASE;
+
+pub const DEVICE_MMIO_BASE: u64 = UART0_MMIO_FRAME_BASE;
+pub const DEVICE_MMIO_SIZE: u64 = VIRTIO_MMIO_FRAME_BASE + MMIO_FRAME_SIZE - DEVICE_MMIO_BASE;
+
+pub const UART0: UartMmio = UartMmio {
+    paddr: UART0_MMIO_BASE,
+    size: UART0_MMIO_SIZE,
+    frame_paddr: UART0_MMIO_FRAME_BASE,
+    frame_vaddr: UART_MMIO_FRAME_VADDR,
+    vaddr: UART_MMIO_VADDR,
+    irq: UART0_IRQ,
+};

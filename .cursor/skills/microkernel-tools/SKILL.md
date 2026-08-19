@@ -1,13 +1,13 @@
 ---
 name: microkernel-tools
-description: Choose and run the repository helper tools for this Rust RV64 seL4/xv6 microkernel workspace with an x86_64 QEMU pc user bring-up. Use when Codex needs a tool mindset for README.md and tools/, including formatting, cargo checks, kernel image packing, sel4test, QEMU simulation, xv6 fs image builds, xv6 user-program runs, xv6 shell runs, logs, timeouts, and environment variables.
+description: Choose and run the repository helper tools for this Rust RV64 seL4/linux-compat microkernel workspace with an x86_64 QEMU pc user bring-up. Use when Codex needs a tool mindset for README.md and tools/, including formatting, cargo checks, kernel image packing, sel4test, QEMU simulation, linux-compat rootfs builds, LTP runs, logs, timeouts, and environment variables.
 ---
 
 # Microkernel Tools
 
 ## Overview
 
-Use the helper scripts as the project interface for build, packing, QEMU, seL4, and xv6 validation. Prefer the smallest command that exercises the changed behavior, and load `references/tool-catalog.md` when exact script defaults or environment knobs matter.
+Use the helper scripts as the project interface for build, packing, QEMU, seL4, and linux-compat validation. Prefer the smallest command that exercises the changed behavior, and load `references/tool-catalog.md` when exact script defaults or environment knobs matter.
 
 ## Tool Selection
 
@@ -22,11 +22,10 @@ Use the helper scripts as the project interface for build, packing, QEMU, seL4, 
    - Use `tools/run-tests.py` to run an already packed image headlessly and classify pass/fail/timeout.
    - Use `tools/simulate.py` for interactive QEMU boot debugging.
 
-3. For xv6 validation:
-   - Use `tools/run-xv6-user.py PROGRAM [ARG...]` for most xv6 checks. It builds the user payload/rootserver, builds or copies `fs.img`, packs a custom image, boots QEMU, watches logs, and classifies the run.
-   - Use targeted programs such as `echo`, `forktest`, `cat README`, `ls .`, `stressfs`, or a specific reproducer before running the full `TIMEOUT=1200 tools/run-xv6-user.py usertests`.
-   - Use `tools/run-xv6-shell.py` only for interactive shell work from a real terminal.
-   - Use `tools/build-xv6-fs-img.py` directly when only the xv6 filesystem image needs refreshing.
+3. For linux-compat / LTP validation:
+   - Use `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py` as the default RISC-V user gate. Success is `ltp-wave1: ok`.
+   - Use `tools/build-linux-rootfs.py` when only the ramfs cpio needs refreshing.
+   - The x86 user gate remains `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 tools/run-hello.py`.
 
 4. For environment handling:
    - Combine this with `$microkernel-dev-env`: run tools directly from the already-loaded direnv flake shell when available.
@@ -35,7 +34,7 @@ Use the helper scripts as the project interface for build, packing, QEMU, seL4, 
 5. For logs and timeouts:
    - Prefer increasing `TIMEOUT` for expected long workloads instead of treating silence as success.
    - Inspect the printed `log:` and `kernel debug log:` paths after failures or timeouts.
-   - Pass `--verbose` to `tools/run-tests.py` or `tools/run-xv6-user.py` when live QEMU output helps debugging.
+   - Pass `--verbose` to `tools/run-tests.py` or `tools/run-ltp.py` when live QEMU output helps debugging.
 
 ## Reference
 
@@ -45,4 +44,4 @@ Read `references/tool-catalog.md` when you need:
 - default paths and output files,
 - important environment variables,
 - QEMU/log classification rules,
-- xv6 build-lock and per-run fs image behavior.
+- linux-compat build-lock behavior.
