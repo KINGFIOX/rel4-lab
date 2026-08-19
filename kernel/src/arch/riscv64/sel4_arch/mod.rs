@@ -6,9 +6,9 @@ pub mod invocation;
 pub mod object_type;
 
 pub use crate::arch::riscv64::kernel::trap::{
-    ROOTSERVER_SSTATUS, SEL4_TCB_FRAME_REGS, SEL4_TCB_GP_REGS, SEL4_USER_CONTEXT_REGS,
-    SEL4_USER_CONTEXT_WORDS, SSTATUS_FS_CLEAN, SSTATUS_FS_MASK, USER_SSTATUS, UserContext,
-    UserRegister,
+    ROOTSERVER_SSTATUS, SEL4_TCB_FRAME_REGS, SEL4_TCB_GP_REGS, SEL4_USER_CONTEXT_ABI_WORDS,
+    SEL4_USER_CONTEXT_REGS, SEL4_USER_CONTEXT_WORDS, SSTATUS_FS_CLEAN, SSTATUS_FS_MASK,
+    USER_SSTATUS, UserContext, UserRegister,
 };
 pub use object_type::ObjectType;
 
@@ -105,8 +105,10 @@ impl UserContext {
     }
 }
 
-/// Fault-reply register slots. Index 0 is the fault PC sentinel.
-pub const UNKNOWN_SYSCALL_REPLY_REGS: [usize; 10] = [
+/// Fault-reply register slots. MR 0 is FaultIP.
+pub const UNKNOWN_SYSCALL_LENGTH: u64 = 11;
+pub const UNKNOWN_SYSCALL_FAULT_IP_MR: usize = 0;
+pub const UNKNOWN_SYSCALL_REPLY_REGS: &[usize] = &[
     0,
     UserRegister::Sp.index(),
     UserRegister::Ra.index(),
@@ -117,6 +119,7 @@ pub const UNKNOWN_SYSCALL_REPLY_REGS: [usize; 10] = [
     UserRegister::A4.index(),
     UserRegister::A5.index(),
     UserRegister::A6.index(),
+    0,
 ];
 pub const USER_EXCEPTION_SP_REG: usize = UserRegister::Sp.index();
 
@@ -131,6 +134,15 @@ pub fn init_rootserver_context(context: &mut UserContext, entry: u64, stack: u64
     context.set_cap_reg(bootinfo);
     context.set_msg_info(0);
     context.set_stack_reg(stack);
+}
+
+pub fn apply_written_pc(context: &mut UserContext, pc: u64) {
+    context.pc = pc;
+    context.restart_pc = pc;
+}
+
+pub fn apply_preemption_restart(context: &mut UserContext) {
+    apply_written_pc(context, context.restart_pc);
 }
 
 pub fn set_fpu_context_enabled(context: &mut UserContext, enabled: bool) {

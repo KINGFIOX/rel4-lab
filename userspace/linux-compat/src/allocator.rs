@@ -111,21 +111,23 @@ impl Allocator {
             warn!("linux-compat: no process untyped parent");
             halt_loop();
         }
-        if device_region_count == 0 {
-            warn!("linux-compat: no device untyped regions");
-            halt_loop();
-        }
-        if !has_device_range(
-            &device_regions,
-            device_region_count,
-            DEVICE_MMIO_BASE,
-            DEVICE_MMIO_SIZE,
-        ) {
-            warn!(
-                "linux-compat: no device MMIO untyped for pa={:#x}",
-                DEVICE_MMIO_BASE
-            );
-            halt_loop();
+        if DEVICE_MMIO_SIZE != 0 {
+            if device_region_count == 0 {
+                warn!("linux-compat: no device untyped regions");
+                halt_loop();
+            }
+            if !has_device_range(
+                &device_regions,
+                device_region_count,
+                DEVICE_MMIO_BASE,
+                DEVICE_MMIO_SIZE,
+            ) {
+                warn!(
+                    "linux-compat: no device MMIO untyped for pa={:#x}",
+                    DEVICE_MMIO_BASE
+                );
+                halt_loop();
+            }
         }
         let mut alloc = Self {
             next_slot: bi.empty.start,

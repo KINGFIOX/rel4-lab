@@ -1,4 +1,4 @@
-//! Local APIC timer delivery. IOAPIC and IPI are out of scope.
+//! Local APIC timer plus IOAPIC user IRQs.
 
 pub const IOAPIC_MAX_IRQ: usize = 255;
 pub const KERNEL_TIMER_IRQ: usize = IOAPIC_MAX_IRQ + 1;
@@ -7,6 +7,7 @@ pub const MAX_IRQ: usize = KERNEL_TIMER_IRQ;
 pub fn init() {
     mask_legacy_pic();
     super::lapic::init();
+    super::ioapic::init();
 }
 
 fn mask_legacy_pic() {
@@ -21,7 +22,9 @@ fn mask_legacy_pic() {
     }
 }
 
-pub fn init_current_core() {}
+pub fn init_current_core() {
+    super::lapic::init();
+}
 
 pub fn local_irq_save() -> bool {
     false
@@ -30,12 +33,16 @@ pub fn local_irq_save() -> bool {
 pub fn local_irq_restore(_irq_was_enabled: bool) {}
 
 pub fn is_external_irq(irq: u64) -> bool {
-    irq <= IOAPIC_MAX_IRQ as u64
+    super::ioapic::irq_to_vector(irq).is_some()
 }
 
-pub fn enable_external_irq(_irq: u64) {}
+pub fn enable_external_irq(irq: u64) {
+    super::ioapic::set_pin_masked(irq, false);
+}
 
-pub fn disable_external_irq(_irq: u64) {}
+pub fn disable_external_irq(irq: u64) {
+    super::ioapic::set_pin_masked(irq, true);
+}
 
 pub fn claim_external_irq() -> Option<u64> {
     None

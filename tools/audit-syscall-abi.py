@@ -38,6 +38,7 @@ KERNEL_SYSCALLS = {
     "DebugSnapshot": -13,
     "DebugNameThread": -14,
     "DebugSendIpi": -15,
+    "SetTLSBase": -29,
 }
 
 KERNEL_OBJECT_SIZE_BITS = {
@@ -314,8 +315,27 @@ def audit_kernel_trap_x86_64(errors: list[str]) -> None:
     rel = path.relative_to(ROOT_DIR)
     source = path.read_text()
     require_text(errors, path, "uc.syscall_reg() as isize", "syscall number read from rax")
+    require_text(
+        errors,
+        path,
+        "uc.libsel4_syscall_reg() as isize",
+        "seL4 libsel4 syscall number read from rdx",
+    )
     require_text(errors, path, "restore_user_context", "user restore entry")
     require_text(errors, path, "fn kernel_exit(", "kernel_exit after every trap")
+    require_text(errors, path, "UNKNOWN_SYSCALL_LENGTH", "seL4 x86 UnknownSyscall length")
+    require_text(
+        errors,
+        ROOT_DIR / "kernel" / "src" / "arch" / "x86_64" / "sel4_arch" / "mod.rs",
+        "UNKNOWN_SYSCALL_FAULT_IP_MR: usize = 15",
+        "UnknownSyscall FaultIP at MR 15",
+    )
+    require_text(
+        errors,
+        ROOT_DIR / "kernel" / "src" / "arch" / "x86_64" / "sel4_arch" / "mod.rs",
+        "UNKNOWN_SYSCALL_LENGTH: u64 = 19",
+        "UnknownSyscall length 19",
+    )
     for kernel_name in KERNEL_SYSCALLS:
         if f"SyscallNumber::{kernel_name}" not in source:
             errors.append(f"{rel} does not dispatch SyscallNumber::{kernel_name}")

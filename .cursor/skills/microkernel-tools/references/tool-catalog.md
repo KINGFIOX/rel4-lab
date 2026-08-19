@@ -25,7 +25,7 @@ Key behavior:
 - Uses `${SEL4_BUILD_DIR:-third_party/sel4-lab/sel4test/build-riscv64}`.
 - Infers `${SEL4_TREE_DIR}` from `SEL4_TREE_DIR`, `SEL4_ROOT`, or the default third-party path.
 - Reconfigures upstream CMake only when cache/source/env overrides differ.
-- Defaults CMake to `MCS=ON`, `SMP=ON`, `NUM_NODES=2`, `SIMULATION=ON`, `PLATFORM=qemu-riscv-virt`, `KernelSel4Arch=riscv64`, and `LibSel4TestPrinterRegex=.*`.
+- Defaults CMake to `MCS=OFF`. RISC-V also defaults `SMP=ON`, `NUM_NODES=2`. x86 defaults `SMP=OFF`, `NUM_NODES=1`, `Sel4testHaveTimer=ON`, and a narrow POSIX regex (CNode, IPC, `TIMER0001`).
 - Honors `SEL4TEST_REGEX`, `SMP`, `NUM_NODES`, `MCS`, `SIMULATION`, `DOMAINS`, `ARM_HYP`, `RELEASE`, `VERIFICATION`, `BAMBOO`, and `QEMU_DTB`.
 - Supports custom rootservers through `ROOTSERVER_ELF`.
 - Writes `${OUT_IMAGE:-images/sel4test-driver-image-riscv-qemu-riscv-virt}`.
@@ -42,8 +42,8 @@ Purpose: run the already packed sel4test image headlessly and classify result.
 
 Key behavior:
 
-- Requires `images/sel4test-driver-image-riscv-qemu-riscv-virt`; it does not pack.
-- Defaults `TIMEOUT=180`, `SMP=2`.
+- Requires the packed image for the selected `ARCH`; it does not pack.
+- Defaults `TIMEOUT=180`, RISC-V `SMP=2`, x86 `SMP=1` with Multiboot `-kernel`/`-initrd`.
 - Writes `${LOG_FILE:-target/sel4test-last-run.log}` and `${KERNEL_DEBUG_LOG_FILE:-target/sel4test-kernel-debug.log}`.
 - Raises `RUST_LOG` to at least `info`.
 - Treats `Test suite passed.` as success.
@@ -51,22 +51,23 @@ Key behavior:
 - Fails on `Test suite failed`, rootserver abort, or kernel panic.
 - `--verbose` mirrors QEMU output live.
 
-Use after `tools/pack-image.py`. Do not treat `ARCH=x86_64 ./tools/run-tests.py` as a gate.
+Use after `tools/pack-image.py`. The x86 gate is the default narrow unicore regex, not a full sel4test run.
 
 ### `tools/run-hello.py`
 
-Purpose: x86_64 single-core QEMU `pc` user bring-up gate.
+Purpose: smallest x86_64 single-core QEMU `pc` user bring-up gate. The other x86 gates are narrow sel4test and `ARCH=x86_64 run-ltp.py`.
 
 Key behavior:
 
 - Builds `kernel`, `sel4-user`, and `hello-rootserver` for `x86_64-unknown-none`.
 - Runs the kernel ABI/ELF audits, then objcopies a Multiboot kernel.
-- Boots QEMU `-kernel`/`-initrd` with `SMP=OFF` / `NUM_NODES=1`.
+- Boots QEMU `-kernel`/`-initrd`. Defaults `SMP=OFF` / `NUM_NODES=1`; `SMP=ON NUM_NODES=2` is the AP bring-up check.
 - Success is the console line `hello-rootserver: ok`.
 
 Use pattern:
 
 - Default x86 gate: `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 tools/run-hello.py`.
+- SMP hello: `TIMEOUT=60 ARCH=x86_64 SMP=ON NUM_NODES=2 tools/run-hello.py`.
 
 ### `tools/simulate.py`
 
@@ -102,7 +103,8 @@ Key behavior:
 
 Use patterns:
 
-- Default gate: `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py`.
+- Default RISC-V gate: `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py`.
+- x86 linux-compat gate: `TIMEOUT=180 ARCH=x86_64 tools/run-ltp.py`.
 
 ### `tools/build-linux-rootfs.py`
 

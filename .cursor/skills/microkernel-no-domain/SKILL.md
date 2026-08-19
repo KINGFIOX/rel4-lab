@@ -50,7 +50,7 @@ Use the smallest useful validation stage:
 
 - Rust-only edits: `cargo fmt --all --check`, then `cargo check`.
 - Scheduler-sensitive changes: run focused sel4tests for scheduling, IPC, and multicore behavior on RISC-V first.
-- Architecture parity: when shared scheduler code changed, `cargo check`/`cargo build --target x86_64-unknown-none -p kernel` and `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 tools/run-hello.py`. x86 IPI and linux-compat are still out of scope.
+- Architecture parity: when shared scheduler code changed, `cargo check`/`cargo build --target x86_64-unknown-none -p kernel` and `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 tools/run-hello.py`.
 - linux-compat impact: run `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py`.
 
 Do not claim domain scheduling avoidance is complete until temporary diagnostics are cleaned up, compatibility paths are no-ops, and relevant focused validations pass.

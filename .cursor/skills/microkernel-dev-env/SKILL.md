@@ -30,7 +30,7 @@ Run validation from the current project shell first. This repository's `.envrc` 
    - For Rust formatting, prefer `cargo fmt --all --check` after edits.
    - For Rust type checking, run the narrowest useful `cargo check` or package-specific check for the changed area.
    - For kernel image or seL4 regressions, use `tools/pack-image.py` and `tools/run-tests.py` with targeted filters when possible.
-   - For linux-compat behavior, use `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py`.
+   - For linux-compat behavior, use `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py` or `TIMEOUT=180 ARCH=x86_64 tools/run-ltp.py`.
    - Use longer QEMU runs only when they cover the changed behavior.
 
 ## Current Repo Assumption

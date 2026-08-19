@@ -8,7 +8,8 @@ is not implemented.
 
 Runnable today: `riscv64gc-unknown-none-elf` on QEMU `virt`, booted through the
 upstream seL4 elfloader, and `x86_64-unknown-none` on QEMU `pc` with a
-Multiboot kernel plus a user initrd. linux-compat is RISC-V only.
+Multiboot kernel plus a user initrd. linux-compat and a narrow unicore
+sel4test slice run on both.
 
 ## Layout
 
@@ -84,11 +85,12 @@ x86_64 arch labels (`arch/x86_64/sel4_arch/invocation.rs`) start at 33 with
 the seL4 x86 paging objects (PD, PT, page, PDPT, PML4, then ASID and IRQ
 trigger). Those IDs are not interchangeable with the RISC-V sequence.
 
-Shared `handle_frame` / `handle_page_table` only dispatch the current arch’s
-`PAGE_*` and `PAGE_TABLE_*` constants. On x86_64 that is page and page-table
-map/unmap/get-address. `PageDirectory*`, `Pdpt*`, and `Pml4*` labels are
-defined and otherwise return `IllegalOperation`. All x86 paging
-`ObjectType`s still create `Cap::new_page_table`.
+Shared `handle_frame` / `handle_page_table` dispatch the current arch’s
+`PAGE_*` and mapped-table labels. On x86_64 that includes page map/unmap,
+`PageTable` (2 MiB coverage), `PageDirectory` (1 GiB), and `PDPT` (512 GiB).
+`PML4_Map` stays `IllegalOperation` (the PML4 is the VSpace root). All x86
+paging `ObjectType`s still create `Cap::new_page_table`, and map checks the
+invocation coverage so a PT cannot be installed in a PDPT slot.
 
 ## Syscalls
 
@@ -181,8 +183,9 @@ x86_64 paging types are PML4 / PDPT / PD / PT. `machine/paging.rs` uses a
 4-level walk (`ROOT_LEVEL = 3`). `USER_TOP` is the canonical user half
 (`256 << (12 + 9 * 3)`). Boot maps a kernel 1G window and walks all four
 levels for user 4K maps. `prepare_user_frame_map` / `unmap_user_frame` /
-`prepare_user_page_table_map` install or clear PTEs and `invlpg`. PDPT/PML4
-user invocations stay unwired; boot uses the internal helpers.
+`prepare_user_page_table_map` install or clear PTEs and `invlpg`. User
+`PageTable` / `PageDirectory` / `PDPT` map invocations share those helpers
+and check coverage alignment. `PML4_Map` is illegal.
 
 ## SMP
 
@@ -194,9 +197,9 @@ set 2–8). Shared state is in `kernel/src/kernel/smp.rs`:
 - `remote_tcb_stall`, `remote_fpu_owner_release`, `wake_core`
 
 `TrapScratch` is arch-local (`arch/*/kernel/trap_scratch.rs`). RV64 IPI and
-remote `sfence.vma` use SBI (`arch/riscv64/smp`). x86
-`SUPPORTS_REMOTE_IPI` and `SUPPORTS_REMOTE_TLB_FLUSH` are false;
-`send_ipi` / remote TLB helpers return unsupported.
+remote `sfence.vma` use SBI (`arch/riscv64/smp`). x86 uses x2APIC IPI,
+an AP trampoline at physical `0x8000`, and IPI TLB shootdown
+(`SUPPORTS_REMOTE_IPI` / `SUPPORTS_REMOTE_TLB_FLUSH` are true).
 
 ## Boot
 
@@ -219,13 +222,15 @@ QEMU virt constants (`plat`). This is the linux-compat and sel4test host.
 `arch/x86_64/kernel/boot.rs` has a Multiboot header, 32→64 trampoline
 (enables NX and SSE), and early identity maps, then calls
 `bringup_rootserver`. `arch/x86_64/trap.S` plus `kernel/trap.rs` install a
-GDT/IDT/TSS, `syscall`/`sysret`, and `iret` for faults and the LAPIC timer.
-`#PF` is delivered as VM-fault IPC when a fault endpoint exists.
-`machine/irq.rs` programs an x2APIC periodic timer and EOIs; IOAPIC and IPI
-stay unwired (`SUPPORTS_REMOTE_*` remain false). Console output is COM1
-`0x3f8`. Lazy FPU stays a stub; SSE is enabled at long-mode entry so the
-`x86_64-unknown-none` ABI can run. The hello-rootserver gate is
-`tools/run-hello.py`.
+per-core GDT/TSS, a shared IDT, `syscall`/`sysret`, and `iret` for faults,
+the LAPIC timer, IOAPIC IRQs, and IPI. `#PF` is delivered as VM-fault IPC
+when a fault endpoint exists. UnknownSyscall uses the seL4 x86_64 19-word
+layout (RAX…R15, FaultIP, SP, FLAGS, Syscall); FaultIP is already the
+instruction after `syscall`. `machine/irq.rs` programs x2APIC plus the
+IOAPIC. `IRQIssueIRQHandler` issues the LAPIC timer only; IOAPIC pins use
+`GetIOAPIC`. Console output is COM1 `0x3f8`. Lazy FPU uses `#NM`, `CR0.TS`, and
+`fxsave`/`fxrstor`. Gates: `tools/run-hello.py`, a narrow unicore
+`pack-image.py` + `run-tests.py` slice, and `ARCH=x86_64 ./tools/run-ltp.py`.
 
 ## Comments that are not true
 

@@ -154,6 +154,13 @@ pub(crate) fn handle_linux_syscall(
         SYS_SET_TID_ADDRESS => SyscallResult::Reply(sys_set_tid_address(&mut procs[proc_idx], a0)),
         SYS_SET_ROBUST_LIST | SYS_GET_ROBUST_LIST => SyscallResult::Reply(0),
         SYS_NANOSLEEP => sys_nanosleep(a0, a1),
+        #[cfg(target_arch = "x86_64")]
+        SYS_PAUSE => {
+            unsafe {
+                sel4_user::sel4_yield();
+            }
+            SyscallResult::Reply(0)
+        }
         SYS_CLOCK_GETTIME => sys_clock_gettime(alloc, &procs[proc_idx], a0, a1),
         SYS_CLOCK_GETRES => sys_clock_getres(alloc, &procs[proc_idx], a0, a1),
         SYS_CLOCK_NANOSLEEP => sys_nanosleep(a2, a3),

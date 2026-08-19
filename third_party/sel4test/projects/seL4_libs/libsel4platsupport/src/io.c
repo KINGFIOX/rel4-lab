@@ -359,5 +359,12 @@ int sel4platsupport_new_io_ops(vspace_t *vspace, vka_t *vka, simple_t *simple, p
         return error;
     }
 
+    error = sel4platsupport_new_arch_ops(io_ops, simple, vka);
+    if (error) {
+        free(io_ops->io_mapper.cookie);
+        io_ops->io_mapper.cookie = NULL;
+        return error;
+    }
+
     return 0;
 }

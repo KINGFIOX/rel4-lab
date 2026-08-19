@@ -98,9 +98,6 @@ def main(argv: list[str]) -> int:
     trap_rs_path = trap_rs(target.name)
     trap_scratch_path = trap_scratch_rs(target.name)
     if not asm_path.is_file():
-        if target.name == "x86_64":
-            print("PASS: x86_64 trap layout audit skipped; trap.S is wired but this check is not implemented")
-            return 0
         die(PREFIX, f"trap assembly not found: {asm_path}")
     if not trap_rs_path.is_file():
         die(PREFIX, f"trap Rust source not found: {trap_rs_path}")

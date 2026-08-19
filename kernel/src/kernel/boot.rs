@@ -34,10 +34,19 @@ use crate::object::untyped::{FreeRange, UntypedChunks, make_untyped_cap};
 /// Where we place the user IPC buffer in the user's virtual address space.
 /// Picked above the rootserver image to avoid collisions with any segment
 /// the ELF was linked to.
-pub const USER_IPC_BUFFER_VA: usize = 0x7FFF_F000;
+pub const USER_IPC_BUFFER_VA: usize = 0x7FFF_D000;
 
-/// Where we place the BootInfo frame (one 4 KiB page).
+/// Where we place the BootInfo frame (one 4 KiB page). Extra bootinfo
+/// starts at `USER_BOOTINFO_VA + PAGE_SIZE`, matching libsel4simple.
 pub const USER_BOOTINFO_VA: usize = 0x7FFF_E000;
+#[cfg(target_arch = "x86_64")]
+pub const USER_EXTRA_BI_VA: usize = USER_BOOTINFO_VA + PAGE_SIZE;
+#[cfg(target_arch = "x86_64")]
+const SEL4_BOOTINFO_HEADER_X86_TSC_FREQ: u64 = 5;
+#[cfg(target_arch = "x86_64")]
+const EXTRA_BI_TSC_CHUNK_LEN: u64 = 2 * 8 + 4;
+#[cfg(target_arch = "x86_64")]
+const QEMU_TSC_FREQ_MHZ: u32 = 1000;
 
 /// User stack top — we give the rootserver a small static stack right below
 /// BootInfo so it can call its `crt0`. (sel4runtime sets up its own stack,
@@ -276,6 +285,20 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     let bi_pa = kpptr_to_paddr(bi_kva);
     boot_user_paging.map_4k(USER_BOOTINFO_VA, bi_pa, user_flags(true, true, false));
 
+    #[cfg(target_arch = "x86_64")]
+    {
+        let extra_bi_kva = bootmem::alloc_page();
+        let extra_bi_pa = kpptr_to_paddr(extra_bi_kva);
+        boot_user_paging.map_4k(USER_EXTRA_BI_VA, extra_bi_pa, user_flags(true, true, false));
+        unsafe {
+            ptr::write_bytes(extra_bi_kva as *mut u8, 0, PAGE_SIZE);
+            let header = extra_bi_kva as *mut u64;
+            *header = SEL4_BOOTINFO_HEADER_X86_TSC_FREQ;
+            *header.add(1) = EXTRA_BI_TSC_CHUNK_LEN;
+            *(extra_bi_kva as *mut u32).add(4) = QEMU_TSC_FREQ_MHZ;
+        }
+    }
+
     let ipc_kva = bootmem::alloc_page();
     let ipc_pa = kpptr_to_paddr(ipc_kva);
     boot_user_paging.map_4k(USER_IPC_BUFFER_VA, ipc_pa, user_flags(true, true, false));
@@ -349,6 +372,12 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
             cnode,
             RootCNodeCapSlot::IrqControl.index(),
             Cap::new_irq_control(),
+        );
+        #[cfg(target_arch = "x86_64")]
+        install_initial_cap(
+            cnode,
+            RootCNodeCapSlot::IoPortControl.index(),
+            Cap::new_io_port_control(),
         );
         install_initial_cap(cnode, RootCNodeCapSlot::Domain.index(), Cap::new_domain());
         install_initial_cap(
@@ -606,6 +635,10 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     let bi = bi_kva as *mut BootInfo;
     unsafe {
         ptr::write_bytes(bi as *mut u8, 0, core::mem::size_of::<BootInfo>());
+        #[cfg(target_arch = "x86_64")]
+        {
+            (*bi).extra_len = EXTRA_BI_TSC_CHUNK_LEN;
+        }
         (*bi).node_id = 0;
         (*bi).num_nodes = MAX_NUM_NODES as u64;
         (*bi).num_io_pt_levels = 0;
@@ -665,6 +698,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     log_arch_restore_state(root_pt, args.user_ventry, USER_BOOTINFO_VA, USER_STACK_TOP);
     info!("  entering user mode at {:#x}", args.user_ventry);
     info!("  --- transferring control to rootserver ---");
+    crate::arch::current::kernel::start_application_processors();
     let kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
     crate::kernel::smp::release_secondary_cpus();
     unsafe {

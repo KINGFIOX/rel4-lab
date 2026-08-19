@@ -30,3 +30,19 @@ pub const PAGE_GET_ADDRESS: u64 = ArchInvocation::PageGetAddress.raw();
 pub const ASID_CONTROL_MAKE_POOL: u64 = ArchInvocation::AsidControlMakePool.raw();
 pub const ASID_POOL_ASSIGN: u64 = ArchInvocation::AsidPoolAssign.raw();
 pub const IRQ_ISSUE_IRQ_HANDLER_TRIGGER: u64 = ArchInvocation::IrqIssueIrqHandlerTrigger.raw();
+
+pub fn mapped_table_coverage_bits(label_id: u64) -> Option<usize> {
+    if label_id == PAGE_TABLE_MAP {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+pub fn is_mapped_table_unmap(label_id: u64) -> bool {
+    label_id == PAGE_TABLE_UNMAP
+}
+
+pub fn io_port_in_reply_length(_label_id: u64) -> u64 {
+    0
+}

@@ -56,7 +56,7 @@ def main(argv: list[str]) -> int:
         getenv("KERNEL_DEBUG_LOG_FILE", str(ROOT_DIR / "target" / "sel4test-kernel-debug.log"))
     )
     timeout = int(getenv("TIMEOUT", "180"))
-    smp = qemu_smp_arg("2")
+    smp = qemu_smp_arg("1" if target.name == "x86_64" else "2")
     expected_baseline = getenv("SEL4TEST_EXPECTED_BASELINE", DEFAULT_EXPECTED_BASELINE)
 
     if not packed_image.is_file():

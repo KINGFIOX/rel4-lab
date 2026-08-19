@@ -126,6 +126,12 @@ pub fn do_call(uc: &mut UserContext) {
                 Some(CapTag::IrqHandler) => {
                     invocation::handle_irq_handler(t, cap, label, length, uc)
                 }
+                #[cfg(target_arch = "x86_64")]
+                Some(CapTag::IoPortControl) => {
+                    invocation::handle_io_port_control(t, slot, cap, label, length, uc)
+                }
+                #[cfg(target_arch = "x86_64")]
+                Some(CapTag::IoPort) => invocation::handle_io_port(t, cap, label, length, uc),
                 None => Err(SyscallError::InvalidCapability),
                 _ => Err(SyscallError::IllegalOperation),
             };
@@ -153,7 +159,7 @@ pub fn do_call(uc: &mut UserContext) {
 fn restart_current_invocation_after_preemption(uc: &mut UserContext) {
     let current = crate::object::tcb::current();
     if crate::object::tcb::runnable_snapshot(current) {
-        uc.pc = uc.restart_pc;
+        crate::arch::current::api::apply_preemption_restart(uc);
     }
 }
 

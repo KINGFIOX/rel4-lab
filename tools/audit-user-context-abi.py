@@ -57,21 +57,21 @@ EXPECTED_CONTEXT_REGS = {
         13,
         2,
         3,
+        19,
+        8,
+        1,
+        0,
         4,
-        5,
-        6,
-        7,
         10,
         11,
         9,
         18,
-        19,
+        5,
+        6,
+        7,
         12,
-        1,
-        0,
         22,
         23,
-        0,
         0,
         0,
         0,
@@ -87,6 +87,11 @@ EXPECTED_CONTEXT_REGS = {
     ],
 }
 
+EXPECTED_USERSPACE_WORDS = {
+    "riscv64": 32,
+    "x86_64": 20,
+}
+
 EXPECTED_USERSPACE_REGS = {
     "riscv64": {
         "USER_CONTEXT_PC": 0,
@@ -97,10 +102,9 @@ EXPECTED_USERSPACE_REGS = {
     },
     "x86_64": {
         "USER_CONTEXT_PC": 0,
-        "USER_CONTEXT_RA": 1,
-        "USER_CONTEXT_SP": 7,
-        "USER_CONTEXT_A0": 15,
-        "USER_CONTEXT_A1": 14,
+        "USER_CONTEXT_SP": 16,
+        "USER_CONTEXT_A0": 0,
+        "USER_CONTEXT_A1": 1,
     },
 }
 
@@ -248,11 +252,12 @@ def main(argv: list[str]) -> int:
     if userspace_arch.is_file():
         userspace_consts = parse_userspace_consts(userspace_arch)
         words = userspace_consts.get("USER_CONTEXT_WORDS")
-        if words != len(expected_regs):
-            errors.append(f"USER_CONTEXT_WORDS={words}, expected {len(expected_regs)}")
+        expected_words = EXPECTED_USERSPACE_WORDS[target.name]
+        if words != expected_words:
+            errors.append(f"USER_CONTEXT_WORDS={words}, expected {expected_words}")
         for name, expected in expected_userspace_indexes(target.name, kernel_regs).items():
             got = userspace_consts.get(name)
-            if got is None and name == "USER_CONTEXT_RA" and target.name == "riscv64":
+            if got is None and name == "USER_CONTEXT_RA":
                 continue
             if got != expected:
                 errors.append(f"{name}={got}, expected {expected}")

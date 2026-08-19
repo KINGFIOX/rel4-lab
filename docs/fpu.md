@@ -1,8 +1,10 @@
-# RISC-V FPU
+# FPU
 
-Only the RV64 backend implements floating point. The implementation is
-`kernel/src/arch/riscv64/machine/fpu.rs`, used from TCB flags, trap restore,
-and SMP remote release. x86_64 `arch/x86_64/machine/fpu.rs` is a stub.
+Both backends implement lazy FPU ownership without MCS handoff. RISC-V lives
+in `kernel/src/arch/riscv64/machine/fpu.rs` (`f0..f31` / `fcsr`). x86_64 lives
+in `kernel/src/arch/x86_64/machine/fpu.rs` (`#NM`, `CR0.TS`, `fxsave` /
+`fxrstor`). Shared TCB flags, trap restore, and SMP remote release call the
+current-arch module.
 
 ## What the code does
 
@@ -46,9 +48,9 @@ saved QEMU log.
 | Script | What it checks |
 |--------|----------------|
 | `tools/audit-fpu-lifecycle.py` | Boot/trap/TCB/flag/restore patterns against upstream seL4 RISC-V FPU |
-| `tools/audit-kernel-fpu.py` | Release disassembly: FP/SIMD instructions stay in the RV64 FPU module |
+| `tools/audit-kernel-fpu.py` | Release disassembly: FP/SIMD stay in the current-arch FPU module |
 
-`pack-image.py` runs `audit-kernel-fpu.py` for the RISC-V kernel ELF.
+`pack-image.py` runs `audit-kernel-fpu.py` for the kernel ELF of the selected arch.
 
 There is no local IPC fastpath, so there is no `nativeThreadUsingFPU`
 fastpath guard to maintain.

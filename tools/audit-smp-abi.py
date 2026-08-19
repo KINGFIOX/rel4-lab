@@ -116,8 +116,14 @@ def main(argv: list[str]) -> int:
     if target.name == "riscv64":
         audit_riscv64(errors)
     elif target.name == "x86_64":
-        print("PASS: x86_64 SMP ABI audit skipped; remote IPI is not wired")
-        return 0
+        x86_ipi = ROOT_DIR / "kernel" / "src" / "arch" / "x86_64" / "smp" / "ipi.rs"
+        require_text(errors, x86_ipi, "pub const SUPPORTS_REMOTE_IPI: bool = true;", "x2APIC IPI")
+        require_text(
+            errors,
+            x86_ipi,
+            "pub const SUPPORTS_REMOTE_TLB_FLUSH: bool = true;",
+            "x2APIC TLB shootdown",
+        )
     else:
         errors.append(f"unsupported target {target.name}")
 

@@ -7,6 +7,34 @@ typedef int pid_t;
 
 #define NULL ((void *)0)
 
+#ifdef __x86_64__
+#define SYS_READ 0
+#define SYS_WRITE 1
+#define SYS_CLOSE 3
+#define SYS_LSEEK 8
+#define SYS_BRK 12
+#define SYS_DUP 32
+#define SYS_NANOSLEEP 35
+#define SYS_GETPID 39
+#define SYS_CLONE 56
+#define SYS_EXECVE 59
+#define SYS_EXIT 60
+#define SYS_WAIT4 61
+#define SYS_UNAME 63
+#define SYS_GETCWD 79
+#define SYS_CHDIR 80
+#define SYS_GETUID 102
+#define SYS_GETGID 104
+#define SYS_GETPPID 110
+#define SYS_CLOCK_GETTIME 228
+#define SYS_EXIT_GROUP 231
+#define SYS_WAITID 247
+#define SYS_OPENAT 257
+#define SYS_MKDIRAT 258
+#define SYS_UNLINKAT 263
+#define SYS_PIPE2 293
+#define SYS_DUP3 292
+#else
 #define SYS_GETCWD 17
 #define SYS_DUP 23
 #define SYS_DUP3 24
@@ -33,6 +61,7 @@ typedef int pid_t;
 #define SYS_CLONE 220
 #define SYS_EXECVE 221
 #define SYS_WAIT4 260
+#endif
 
 #define AT_FDCWD (-100)
 #define AT_REMOVEDIR 0x200

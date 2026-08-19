@@ -270,16 +270,35 @@ pub unsafe fn prepare_user_page_table_map(
     root: *mut PageTable,
     vaddr: usize,
     pt_kva: *mut PageTable,
+    expected_coverage: Option<usize>,
 ) -> Result<PreparedUserPageTableMap, UserMapError> {
     if root.is_null() || pt_kva.is_null() || vaddr >= USER_TOP {
         return Err(UserMapError::InvalidArgument);
     }
+    // seL4 masks the syscall vaddr to the table window; libsel4vspace
+    // passes the page address, which is only 4K-aligned.
+    let vaddr = if let Some(bits) = expected_coverage.filter(|bits| *bits != 0) {
+        let aligned = vaddr & !((1usize << bits) - 1);
+        if !user_range_aligned(aligned, bits) {
+            return Err(UserMapError::InvalidArgument);
+        }
+        aligned
+    } else {
+        vaddr
+    };
     let pt_pa = kva_to_page_table_paddr(pt_kva as usize).ok_or(UserMapError::InvalidArgument)?;
 
     let _guard = lock_vspace(root);
     let lookup = unsafe { lookup_pt_slot_user(root, vaddr)? };
     let entry = unsafe { *lookup.slot };
-    if lookup.bits_left == PAGE_SHIFT || entry.is_valid() {
+    if let Some(bits) = expected_coverage.filter(|bits| *bits != 0) {
+        if lookup.bits_left != bits {
+            return Err(UserMapError::FailedLookup(lookup.bits_left));
+        }
+    } else if lookup.bits_left == PAGE_SHIFT {
+        return Err(UserMapError::DeleteFirst);
+    }
+    if entry.is_valid() {
         return Err(UserMapError::DeleteFirst);
     }
 

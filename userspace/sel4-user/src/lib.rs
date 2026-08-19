@@ -108,12 +108,63 @@ pub const LABEL_RISCV_PAGE_GET_ADDRESS: u64 = 37;
 pub const LABEL_RISCV_ASID_CONTROL_MAKE_POOL: u64 = 38;
 pub const LABEL_RISCV_ASID_POOL_ASSIGN: u64 = 39;
 pub const LABEL_RISCV_IRQ_ISSUE_IRQ_HANDLER_TRIGGER: u64 = 40;
+pub const LABEL_X86_PDPT_MAP: u64 = 33;
+pub const LABEL_X86_PDPT_UNMAP: u64 = 34;
+pub const LABEL_X86_PAGE_DIRECTORY_MAP: u64 = 35;
+pub const LABEL_X86_PAGE_DIRECTORY_UNMAP: u64 = 36;
+pub const LABEL_X86_PAGE_TABLE_MAP: u64 = 37;
+pub const LABEL_X86_PAGE_TABLE_UNMAP: u64 = 38;
+pub const LABEL_X86_PAGE_MAP: u64 = 39;
+pub const LABEL_X86_PAGE_UNMAP: u64 = 40;
+pub const LABEL_X86_PAGE_GET_ADDRESS: u64 = 41;
+pub const LABEL_X86_ASID_CONTROL_MAKE_POOL: u64 = 42;
+pub const LABEL_X86_ASID_POOL_ASSIGN: u64 = 43;
+pub const LABEL_X86_IO_PORT_CONTROL_ISSUE: u64 = 44;
+pub const LABEL_X86_IO_PORT_IN8: u64 = 45;
+pub const LABEL_X86_IO_PORT_IN16: u64 = 46;
+pub const LABEL_X86_IO_PORT_IN32: u64 = 47;
+pub const LABEL_X86_IO_PORT_OUT8: u64 = 48;
+pub const LABEL_X86_IO_PORT_OUT16: u64 = 49;
+pub const LABEL_X86_IO_PORT_OUT32: u64 = 50;
+pub const LABEL_X86_IRQ_ISSUE_IRQ_HANDLER_IOAPIC: u64 = 51;
+pub const LABEL_X86_IRQ_ISSUE_IRQ_HANDLER_MSI: u64 = 52;
+
+#[cfg(target_arch = "x86_64")]
+pub const LABEL_PAGE_TABLE_MAP: u64 = LABEL_X86_PAGE_TABLE_MAP;
+#[cfg(target_arch = "x86_64")]
+pub const LABEL_PAGE_TABLE_UNMAP: u64 = LABEL_X86_PAGE_TABLE_UNMAP;
+#[cfg(target_arch = "x86_64")]
+pub const LABEL_PAGE_DIRECTORY_MAP: u64 = LABEL_X86_PAGE_DIRECTORY_MAP;
+#[cfg(target_arch = "x86_64")]
+pub const LABEL_PDPT_MAP: u64 = LABEL_X86_PDPT_MAP;
+#[cfg(target_arch = "x86_64")]
+pub const LABEL_PAGE_MAP: u64 = LABEL_X86_PAGE_MAP;
+#[cfg(target_arch = "x86_64")]
+pub const LABEL_PAGE_UNMAP: u64 = LABEL_X86_PAGE_UNMAP;
+#[cfg(target_arch = "x86_64")]
+pub const LABEL_PAGE_GET_ADDRESS: u64 = LABEL_X86_PAGE_GET_ADDRESS;
+#[cfg(target_arch = "x86_64")]
+pub const LABEL_ASID_CONTROL_MAKE_POOL: u64 = LABEL_X86_ASID_CONTROL_MAKE_POOL;
+#[cfg(target_arch = "x86_64")]
+pub const LABEL_ASID_POOL_ASSIGN: u64 = LABEL_X86_ASID_POOL_ASSIGN;
+
+#[cfg(not(target_arch = "x86_64"))]
 pub const LABEL_PAGE_TABLE_MAP: u64 = LABEL_RISCV_PAGE_TABLE_MAP;
+#[cfg(not(target_arch = "x86_64"))]
 pub const LABEL_PAGE_TABLE_UNMAP: u64 = LABEL_RISCV_PAGE_TABLE_UNMAP;
+#[cfg(not(target_arch = "x86_64"))]
+pub const LABEL_PAGE_DIRECTORY_MAP: u64 = LABEL_RISCV_PAGE_TABLE_MAP;
+#[cfg(not(target_arch = "x86_64"))]
+pub const LABEL_PDPT_MAP: u64 = LABEL_RISCV_PAGE_TABLE_MAP;
+#[cfg(not(target_arch = "x86_64"))]
 pub const LABEL_PAGE_MAP: u64 = LABEL_RISCV_PAGE_MAP;
+#[cfg(not(target_arch = "x86_64"))]
 pub const LABEL_PAGE_UNMAP: u64 = LABEL_RISCV_PAGE_UNMAP;
+#[cfg(not(target_arch = "x86_64"))]
 pub const LABEL_PAGE_GET_ADDRESS: u64 = LABEL_RISCV_PAGE_GET_ADDRESS;
+#[cfg(not(target_arch = "x86_64"))]
 pub const LABEL_ASID_CONTROL_MAKE_POOL: u64 = LABEL_RISCV_ASID_CONTROL_MAKE_POOL;
+#[cfg(not(target_arch = "x86_64"))]
 pub const LABEL_ASID_POOL_ASSIGN: u64 = LABEL_RISCV_ASID_POOL_ASSIGN;
 
 pub const OBJ_UNTYPED: u64 = 0;
@@ -121,11 +172,40 @@ pub const OBJ_TCB: u64 = 1;
 pub const OBJ_ENDPOINT: u64 = 2;
 pub const OBJ_NOTIFICATION: u64 = 3;
 pub const OBJ_CAP_TABLE: u64 = 4;
+#[cfg(target_arch = "x86_64")]
+pub const OBJ_PDPT: u64 = 5;
+#[cfg(target_arch = "x86_64")]
+pub const OBJ_PML4: u64 = 6;
+#[cfg(target_arch = "x86_64")]
+pub const OBJ_HUGE_PAGE: u64 = 7;
+#[cfg(target_arch = "x86_64")]
+pub const OBJ_4K: u64 = 8;
+#[cfg(target_arch = "x86_64")]
+pub const OBJ_MEGA_PAGE: u64 = 9;
+#[cfg(target_arch = "x86_64")]
+pub const OBJ_PAGE_TABLE: u64 = 10;
+#[cfg(target_arch = "x86_64")]
+pub const OBJ_PAGE_DIRECTORY: u64 = 11;
+#[cfg(target_arch = "x86_64")]
+pub const OBJ_REPLY: u64 = 12;
+#[cfg(target_arch = "x86_64")]
+pub const OBJ_VSPACE: u64 = OBJ_PML4;
+#[cfg(not(target_arch = "x86_64"))]
 pub const OBJ_GIGA_PAGE: u64 = 5;
+#[cfg(not(target_arch = "x86_64"))]
 pub const OBJ_4K: u64 = 6;
+#[cfg(not(target_arch = "x86_64"))]
 pub const OBJ_MEGA_PAGE: u64 = 7;
+#[cfg(not(target_arch = "x86_64"))]
 pub const OBJ_PAGE_TABLE: u64 = 8;
+#[cfg(not(target_arch = "x86_64"))]
+pub const OBJ_PAGE_DIRECTORY: u64 = OBJ_PAGE_TABLE;
+#[cfg(not(target_arch = "x86_64"))]
+pub const OBJ_PDPT: u64 = OBJ_PAGE_TABLE;
+#[cfg(not(target_arch = "x86_64"))]
 pub const OBJ_REPLY: u64 = 9;
+#[cfg(not(target_arch = "x86_64"))]
+pub const OBJ_VSPACE: u64 = OBJ_PAGE_TABLE;
 
 pub const FAULT_UNKNOWN_SYSCALL: u64 = 2;
 pub const FAULT_USER_EXCEPTION: u64 = 3;
@@ -339,7 +419,28 @@ pub unsafe fn sel4_yield() {
     }
 }
 
+pub fn call_status(service: u64, label: u64, extra_caps: &[u64], mrs: &[u64]) -> u64 {
+    msg_label(call_reply(service, label, extra_caps, mrs).info)
+}
+
 pub fn call_checked(service: u64, label: u64, extra_caps: &[u64], mrs: &[u64]) {
+    let reply = call_reply(service, label, extra_caps, mrs);
+    let err = msg_label(reply.info);
+    if err != 0 {
+        log_crate::error!(
+            "sel4-user: seL4 call failed label={} err={} mr0={:#x} mr1={:#x} mr2={:#x} mr3={:#x}",
+            label,
+            err,
+            reply.mrs[0],
+            reply.mrs[1],
+            reply.mrs[2],
+            reply.mrs[3]
+        );
+        halt_loop();
+    }
+}
+
+fn call_reply(service: u64, label: u64, extra_caps: &[u64], mrs: &[u64]) -> IpcMessage {
     unsafe {
         let ipc = &mut *ipc_buffer_ptr();
         for i in 0..3 {
@@ -349,24 +450,11 @@ pub fn call_checked(service: u64, label: u64, extra_caps: &[u64], mrs: &[u64]) {
                 0
             };
         }
-        let reply = sel4_call(
+        sel4_call(
             service,
             msg_info(label, 0, extra_caps.len() as u64, mrs.len() as u64),
             mrs,
-        );
-        let err = msg_label(reply.info);
-        if err != 0 {
-            log_crate::error!(
-                "sel4-user: seL4 call failed label={} err={} mr0={:#x} mr1={:#x} mr2={:#x} mr3={:#x}",
-                label,
-                err,
-                reply.mrs[0],
-                reply.mrs[1],
-                reply.mrs[2],
-                reply.mrs[3]
-            );
-            halt_loop();
-        }
+        )
     }
 }
 

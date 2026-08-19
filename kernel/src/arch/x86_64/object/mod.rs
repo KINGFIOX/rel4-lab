@@ -1,3 +1,4 @@
+pub mod ioport;
 pub mod vspace;
 
 pub mod interrupt {

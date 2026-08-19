@@ -80,6 +80,8 @@ syscall_entry:
     movl    $SYSCALL_CAUSE, %esi
     andq    $~15, %rsp
     call    handle_trap_rust
+    // SysV returns the restore context in %rax; the restore path takes %rdi.
+    movq    %rax, %rdi
     jmp     restore_user_context_locked
 
     .globl interrupt_common
@@ -129,6 +131,7 @@ interrupt_common:
     movq    %rbx, %rdi
     andq    $~15, %rsp
     call    handle_trap_rust
+    movq    %rax, %rdi
     jmp     restore_user_context_locked
 
 kernel_interrupt:

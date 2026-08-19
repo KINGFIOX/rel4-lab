@@ -159,6 +159,7 @@ pub const SEL4_TCB_GP_REGS: [usize; 16] = [
 
 /// Word count of libsel4's RISC-V `seL4_UserContext`.
 pub const SEL4_USER_CONTEXT_WORDS: usize = SEL4_TCB_FRAME_REGS.len() + SEL4_TCB_GP_REGS.len();
+pub const SEL4_USER_CONTEXT_ABI_WORDS: usize = SEL4_USER_CONTEXT_WORDS;
 
 /// RISC-V `seL4_UserContext` word index to local GPR index.
 ///
@@ -438,8 +439,12 @@ pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> *mut UserContext {
     kernel_exit(uc, kernel_lock)
 }
 
-fn fault_message(code: usize, stval: u64, uc: &UserContext) -> (u64, u64, [u64; 16]) {
-    let mut mrs = [0; 16];
+fn fault_message(
+    code: usize,
+    stval: u64,
+    uc: &UserContext,
+) -> (u64, u64, crate::object::tcb::FaultMrs) {
+    let mut mrs = [0; crate::object::tcb::FAULT_IPC_MRS];
     match ExceptionCode::from_raw(code) {
         Some(
             fault @ (ExceptionCode::InstructionAccessFault
@@ -486,7 +491,7 @@ unsafe fn write_fault_ipc_message(
     badge: u64,
     label: u64,
     len: u64,
-    mrs: &[u64; 16],
+    mrs: &[u64],
 ) {
     if receiver.is_null() {
         return;
@@ -592,7 +597,7 @@ fn send_fault_ipc(uc: &mut UserContext, code: usize, stval: u64) -> bool {
 }
 
 pub fn send_cap_fault_ipc(uc: &mut UserContext, addr: u64, in_recv_phase: bool) -> bool {
-    let mut mrs = [0; 16];
+    let mut mrs = [0; crate::object::tcb::FAULT_IPC_MRS];
     mrs[0] = uc.restart_pc;
     mrs[1] = addr;
     mrs[2] = in_recv_phase as u64;
@@ -602,7 +607,7 @@ pub fn send_cap_fault_ipc(uc: &mut UserContext, addr: u64, in_recv_phase: bool) 
 }
 
 fn send_unknown_syscall_fault(uc: &mut UserContext, sysno: isize) -> bool {
-    let mut mrs = [0; 16];
+    let mut mrs = [0; crate::object::tcb::FAULT_IPC_MRS];
     mrs[0] = uc.restart_pc;
     mrs[1] = uc.regs[UserRegister::Sp.index()];
     mrs[2] = uc.regs[UserRegister::Ra.index()];
@@ -617,7 +622,7 @@ fn send_unknown_syscall_fault(uc: &mut UserContext, sysno: isize) -> bool {
     send_synthetic_fault_ipc(FaultLabel::UnknownSyscall.raw(), 11, mrs)
 }
 
-fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: [u64; 16]) -> bool {
+fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: crate::object::tcb::FaultMrs) -> bool {
     use crate::object::endpoint;
     use crate::object::tcb;
 
@@ -688,7 +693,7 @@ unsafe fn block_fault_sender_locked(
     can_grant_reply: bool,
     label: u64,
     len: u64,
-    mrs: [u64; 16],
+    mrs: crate::object::tcb::FaultMrs,
 ) {
     use crate::object::endpoint::{self, EpState};
     use crate::object::tcb;
@@ -1014,6 +1019,9 @@ fn handle_syscall(uc: &mut UserContext) {
         }
         Some(SyscallNumber::DebugSendIpi) => {
             debug_halt("SysDebugSendIPI: not supported on this architecture");
+        }
+        Some(SyscallNumber::SetTLSBase) => {
+            uc.set_tls_reg(uc.cap_reg());
         }
         Some(SyscallNumber::DebugDumpScheduler | SyscallNumber::DebugSnapshot) => {
             // Debug dumps are diagnostic only. The local kernel does not yet

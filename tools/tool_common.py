@@ -83,7 +83,33 @@ def bare_metal_tool_env() -> dict[str, str]:
     env["NIX_HARDENING_ENABLE_riscv64_none_elf"] = ""
     env["NIX_LDFLAGS_HARDEN"] = ""
     env["NIX_LDFLAGS_HARDEN_riscv64_none_elf"] = ""
+    env["PATH"] = gnu_cpio_path(env.get("PATH", ""))
     return env
+
+
+def gnu_cpio_path(path: str) -> str:
+    for candidate in path.split(":"):
+        if not candidate:
+            continue
+        cpio = Path(candidate) / "cpio"
+        if cpio.is_file() and _cpio_supports_reproducible(cpio):
+            if candidate == path.split(":", 1)[0]:
+                return path
+            return f"{candidate}:{path}"
+    return path
+
+
+def _cpio_supports_reproducible(cpio: Path) -> bool:
+    try:
+        result = subprocess.run(
+            [str(cpio), "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    return "--reproducible" in result.stdout or "--reproducible" in result.stderr
 
 
 def log(prefix: str, message: str) -> None:
@@ -276,7 +302,6 @@ def linux_user_cflags(
         "-ggdb",
         "-gdwarf-2",
         f"-march={march}",
-        f"-mabi={mabi}",
         "-std=gnu99",
         "-ffreestanding",
         "-fno-common",
@@ -304,8 +329,10 @@ def linux_user_cflags(
         "-fno-pie",
         "-no-pie",
     ]
+    if mabi:
+        flags.insert(8, f"-mabi={mabi}")
     if code_model is not None:
-        flags.insert(12, f"-mcmodel={code_model}")
+        flags.insert(12 if mabi else 11, f"-mcmodel={code_model}")
     return flags
 
 

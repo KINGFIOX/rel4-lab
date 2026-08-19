@@ -2,8 +2,7 @@
 //!
 //! Provides the seL4-shaped module contract (`sel4_arch`, `machine`, `object`,
 //! `plat`, `smp`) plus user-mode return through `syscall`/`sysret`, a 4-level
-//! VSpace, COM1 output, and a single-core x2APIC timer. IPI and IOAPIC stay
-//! unwired.
+//! VSpace, COM1 output, x2APIC timer/IPI, and IOAPIC user IRQs.
 
 pub mod api;
 pub mod kernel;

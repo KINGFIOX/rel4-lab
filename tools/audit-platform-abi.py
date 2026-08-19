@@ -216,9 +216,6 @@ def main(argv: list[str]) -> int:
     if not kernel_platform_rs.is_file():
         die(PREFIX, f"kernel platform source not found: {kernel_platform_rs}")
     if not userspace_platform_rs.is_file():
-        if target.name == "x86_64":
-            print("PASS: x86_64 platform ABI audit skipped; linux-abi is RISC-V only")
-            return 0
         die(PREFIX, f"linux-abi platform source not found: {userspace_platform_rs}")
 
     shared_consts = parse_consts(shared_platform_rs)
@@ -229,8 +226,9 @@ def main(argv: list[str]) -> int:
     if target.name == "riscv64":
         errors = audit_riscv64(kernel_consts, platform_consts, regions)
     elif target.name == "x86_64":
-        print("PASS: x86_64 platform ABI audit skipped; linux-abi is RISC-V only")
-        return 0
+        errors = []
+        if platform_consts.get("UART0_MMIO_FRAME_BASE") not in (0, None):
+            errors.append("x86 linux-abi UART0_MMIO_FRAME_BASE should be 0 (DebugPutChar console)")
     else:
         die(PREFIX, f"unsupported target {target.name}")
 

@@ -2,6 +2,9 @@ pub(crate) const USER_CONTEXT_WORDS: usize = 32;
 pub(crate) const FAULT_REPLY_WORDS: usize = 11;
 pub(crate) type FaultReplyFrame = [u64; FAULT_REPLY_WORDS];
 
+pub(crate) const EXPECTED_ELF_MACHINE: u16 = 243;
+pub(crate) const UTS_MACHINE: &[u8] = b"riscv64";
+
 const USER_CONTEXT_PC: usize = 0;
 const USER_CONTEXT_SP: usize = 2;
 const USER_CONTEXT_A0: usize = 16;

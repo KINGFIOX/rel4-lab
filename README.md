@@ -1,8 +1,9 @@
 # microkernel
 
-`microkernel` is a Rust seL4-style kernel for RV64 `qemu-riscv-virt` and a
-single-core x86_64 QEMU `pc` user bring-up, plus a user-space Linux RV64
-compat stack (RISC-V only) built on a seL4-like capability ABI.
+`microkernel` is a Rust seL4-style kernel for RV64 `qemu-riscv-virt` and
+x86_64 QEMU `pc`, plus a user-space Linux compatibility stack built on a
+seL4-like capability ABI. x86 gates are hello-rootserver, a narrow unicore
+sel4test slice, and `ARCH=x86_64 ./tools/run-ltp.py`.
 
 The current rel4 scope intentionally keeps the scheduler simpler than upstream
 seL4 MCS: there are no `SchedContext`/`SchedControl` objects, dispatch is
@@ -40,7 +41,7 @@ microkernel/
 |-- userspace/
 |   |-- sel4-user/             # shared no_std seL4 user ABI wrappers
 |   |-- hello-rootserver/      # minimal x86/RV rootserver gate
-|   |-- linux-abi/             # Linux RV64 syscall/VFS/UART protocol constants
+|   |-- linux-abi/             # Linux RV64/x86_64 syscall/VFS/UART protocol constants
 |   |-- linux-compat/          # Linux rootserver and syscall server
 |   |-- vfs-server/            # ramfs, pipe, and console VFS
 |   |-- uart-server/           # user console UART server
@@ -117,14 +118,19 @@ TIMEOUT=480 SMP=1 ./tools/run-tests.py
 SMP=OFF NUM_NODES=1 ./tools/pack-image.py
 ```
 
-x86_64 user bring-up (QEMU `pc`, single core):
+x86_64 gates (QEMU `pc`):
 
 ```sh
 TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 ./tools/run-hello.py
+ARCH=x86_64 SMP=OFF NUM_NODES=1 ./tools/pack-image.py
+TIMEOUT=180 ARCH=x86_64 ./tools/run-tests.py
+TIMEOUT=180 ARCH=x86_64 ./tools/run-ltp.py
 ```
 
-Success is the log line `hello-rootserver: ok`. This is not linux-compat
-and is not `ARCH=x86_64 ./tools/run-tests.py`.
+Success lines are `hello-rootserver: ok`, `Test suite passed.`, and
+`ltp-wave1: ok`. x86 pack defaults to `SMP=OFF`, `NUM_NODES=1`,
+`Sel4testHaveTimer=ON`, and a narrow POSIX regex covering CNode, IPC, and
+`TIMER0001`.
 
 The unmodified upstream `sel4test-driver` still assumes seL4's MCS
 `SchedContext`/`SchedControl` ABI. After the rel4 no-MCS rollback, successful
@@ -147,7 +153,7 @@ TIMEOUT=180 ARCH=riscv64 ./tools/run-ltp.py
 ```
 
 Success is the log line `ltp-wave1: ok`. The image has no virtio-blk
-device. x86 remains `tools/run-hello.py`.
+device. The same script accepts `ARCH=x86_64`.
 
 ## Common Checks
 
@@ -165,16 +171,18 @@ cargo build --release --target riscv64gc-unknown-none-elf -p kernel
 cargo build --release --target x86_64-unknown-none -p kernel
 ```
 
-The x86_64 kernel boots on QEMU `pc` as a Multiboot image: trap,
-`syscall`/`sysret`, the LAPIC timer, and `hello-rootserver` are wired.
-IOAPIC, SMP IPI, lazy FPU, and linux-compat are not on this path. The
-x86 user gate is `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 ./tools/run-hello.py`.
+The x86_64 kernel boots on QEMU `pc` as a Multiboot image with
+`syscall`/`sysret`, lazy FPU, IOAPIC IRQs, and x2APIC IPI. Gates are
+hello-rootserver, a narrow unicore sel4test slice, and
+`ARCH=x86_64 ./tools/run-ltp.py`. `NUM_NODES=2` hello checks AP bring-up.
 
 Current smoke paths:
 
 ```sh
 TIMEOUT=180 ARCH=riscv64 ./tools/run-ltp.py
 TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 ./tools/run-hello.py
+TIMEOUT=60 ARCH=x86_64 SMP=ON NUM_NODES=2 ./tools/run-hello.py
+TIMEOUT=180 ARCH=x86_64 ./tools/run-ltp.py
 ```
 
 Clean up a stuck QEMU test process if a run is interrupted:

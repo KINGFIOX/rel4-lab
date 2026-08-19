@@ -25,6 +25,9 @@ pub enum SyscallNumber {
     DebugSnapshot = -13,
     DebugNameThread = -14,
     DebugSendIpi = -15,
+    /// `seL4_SysSetTLSBase`. The generated libsel4 number stays -29 even when
+    /// unused debug/benchmark/VTX slots are compiled out of this kernel.
+    SetTLSBase = -29,
 }
 
 impl SyscallNumber {
@@ -49,6 +52,7 @@ impl SyscallNumber {
             -13 => Some(Self::DebugSnapshot),
             -14 => Some(Self::DebugNameThread),
             -15 => Some(Self::DebugSendIpi),
+            -29 => Some(Self::SetTLSBase),
             _ => None,
         }
     }

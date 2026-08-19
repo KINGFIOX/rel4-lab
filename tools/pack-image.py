@@ -78,6 +78,12 @@ def default_cmake_defs(target) -> dict[str, str]:
         values["KernelRiscvExtF"] = "ON"
     elif target.name == "x86_64":
         values["CROSS_COMPILER_PREFIX"] = os.environ.get("CROSS_COMPILER_PREFIX", "x86_64-elf-")
+        values["SMP"] = "OFF"
+        values["NUM_NODES"] = "1"
+        values["Sel4testHaveTimer"] = "ON"
+        values["LibSel4TestPrinterRegex"] = (
+            r"^(Test that there are tests|IPC0000|IPC0001|IPC0002|CNODEOP0001|CNODEOP0002|TIMER0001)$"
+        )
     return values
 
 
@@ -159,7 +165,15 @@ def cache_env_overrides_differ(build_dir: Path, cache: dict[str, str], target) -
     for key in ("KernelRiscvExtD", "KernelRiscvExtF"):
         if key in defaults and cache.get(key) != defaults[key]:
             return True
+    if "SMP" not in os.environ and cache.get("SMP") != defaults["SMP"]:
+        return True
     if "SMP" in os.environ and cache.get("SMP") != cmake_smp(os.environ["SMP"]):
+        return True
+    if (
+        target.name == "x86_64"
+        and "Sel4testHaveTimer" not in os.environ
+        and cache.get("Sel4testHaveTimer") != defaults.get("Sel4testHaveTimer")
+    ):
         return True
     if "SMP" in os.environ and "NUM_NODES" not in os.environ:
         expected_nodes = num_nodes_from_smp(os.environ["SMP"])
@@ -407,10 +421,14 @@ def main() -> int:
             install_file(tmp_stripped, sel4_build_dir / "images" / kernel_image_name)
 
             log(PREFIX, "installing x86 rootserver image...")
-            if rootserver_elf is not None:
-                install_file(rootserver_elf, sel4_build_dir / "images" / image_name)
             install_file(sel4_build_dir / "images" / kernel_image_name, out_kernel_image)
-            install_file(sel4_build_dir / "images" / image_name, out_image)
+            # Do not overwrite the ninja sel4test image. linux-compat's
+            # ROOTSERVER_ELF used to clobber it and leave later sel4test packs
+            # copying that ELF when ninja reported no work.
+            if rootserver_elf is not None:
+                install_file(rootserver_elf, out_image)
+            else:
+                install_file(sel4_build_dir / "images" / image_name, out_image)
             log(PREFIX, f"kernel image ready: {out_kernel_image}")
             log(PREFIX, f"rootserver image ready: {out_image}")
             return 0

@@ -12,7 +12,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from target_config import (
     image_suffix_from_env,
+    platform_from_env,
     rust_target_from_env,
+    sel4_arch_from_env,
     sel4_build_dir_from_env,
     sel4_tree_dir_from_env,
     target_from_env,
@@ -57,8 +59,6 @@ def rust_env() -> dict[str, str]:
 def main() -> int:
     ensure_rust_log_at_least_info()
     target = target_from_env(PREFIX)
-    if target.name != "riscv64":
-        die(PREFIX, f"run-ltp.py is the RISC-V linux-compat gate; ARCH={target.name} is unsupported")
 
     rust_target = rust_target_from_env(target)
     out_dir = default_linux_out_dir(target)
@@ -135,20 +135,42 @@ def main() -> int:
         pack_env["ROOTSERVER_ELF"] = str(host_elf)
         pack_env["OUT_IMAGE"] = str(packed_image)
         pack_env["KERNEL_ROOT_CNODE_SIZE_BITS"] = "16"
-        pack_env["ARCH"] = "riscv64"
+        pack_env["ARCH"] = target.name
+        if target.name == "x86_64":
+            pack_env.setdefault("SMP", "OFF")
+            pack_env.setdefault("NUM_NODES", "1")
         run([str(ROOT_DIR / "tools" / "pack-image.py")], cwd=ROOT_DIR, env=pack_env)
     finally:
         lock.release()
 
-    qemu_cmd = [
-        *target.qemu_base_cmd(smp, "3072"),
-        "-kernel",
-        str(packed_image),
-        "-chardev",
-        f"file,id=kerneldebug,path={kernel_debug_log_file}",
-        "-device",
-        "pci-serial,chardev=kerneldebug,addr=1",
-    ]
+    if target.name == "x86_64":
+        kernel_image = Path(
+            getenv(
+                "KERNEL_IMAGE",
+                str(ROOT_DIR / "images" / f"kernel-{sel4_arch_from_env(target)}-{platform_from_env(target)}"),
+            )
+        )
+        require_file(PREFIX, kernel_image, f"x86 kernel image missing: {kernel_image}")
+        qemu_cmd = [
+            *target.qemu_base_cmd(smp, "512M"),
+            "-serial",
+            "mon:stdio",
+            "-no-reboot",
+            "-kernel",
+            str(kernel_image),
+            "-initrd",
+            str(packed_image),
+        ]
+    else:
+        qemu_cmd = [
+            *target.qemu_base_cmd(smp, "3072"),
+            "-kernel",
+            str(packed_image),
+            "-chardev",
+            f"file,id=kerneldebug,path={kernel_debug_log_file}",
+            "-device",
+            "pci-serial,chardev=kerneldebug,addr=1",
+        ]
     kernel_debug_log_file.parent.mkdir(parents=True, exist_ok=True)
     kernel_debug_log_file.unlink(missing_ok=True)
     log_file.parent.mkdir(parents=True, exist_ok=True)

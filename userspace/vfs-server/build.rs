@@ -42,6 +42,7 @@ fn linker_script_for_target(manifest_dir: &PathBuf) -> PathBuf {
     let target = env::var("TARGET").unwrap();
     let filename = match target.as_str() {
         "riscv64gc-unknown-none-elf" => "linker-riscv64.ld",
+        "x86_64-unknown-none" => "linker-x86_64.ld",
         _ => panic!("unsupported target for vfs-server: {target}"),
     };
     manifest_dir.join(filename)

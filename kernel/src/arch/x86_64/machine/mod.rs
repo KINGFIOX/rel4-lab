@@ -1,6 +1,8 @@
-//! x86_64 machine hooks: paging, LAPIC/IOAPIC placeholders, and TLB.
+//! x86_64 machine hooks: paging, LAPIC/IOAPIC, and TLB.
 
 pub mod fpu;
+pub mod ioapic;
+pub mod ioport;
 pub mod irq;
 pub mod lapic;
 pub mod paging;

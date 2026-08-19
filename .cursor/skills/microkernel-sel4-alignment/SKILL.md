@@ -89,9 +89,11 @@ SEL4TEST_REGEX='...' ./tools/pack-image.py
 ./tools/run-tests.py
 ```
 
-For linux-compat-visible effects, add `TIMEOUT=180 ARCH=riscv64 ./tools/run-ltp.py`.
+For linux-compat-visible effects, add `TIMEOUT=180 ARCH=riscv64 ./tools/run-ltp.py`
+or `TIMEOUT=180 ARCH=x86_64 ./tools/run-ltp.py`.
 For x86 trap, syscall, or shared scheduler changes, add
 `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 ./tools/run-hello.py`.
+For AP bring-up, add `TIMEOUT=60 ARCH=x86_64 SMP=ON NUM_NODES=2 ./tools/run-hello.py`.
 Do not treat `ARCH=x86_64 ./tools/run-tests.py` as a gate.
 Do not use QEMU wall-clock timing as a correctness oracle; prefer pass/fail
 markers, event ordering, counters, and repeated-run stability.

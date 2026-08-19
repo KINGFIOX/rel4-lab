@@ -2,6 +2,20 @@
 
 long syscall6(long n, long a0, long a1, long a2, long a3, long a4, long a5)
 {
+#ifdef __x86_64__
+    register long r0 __asm__("rax") = n;
+    register long r1 __asm__("rdi") = a0;
+    register long r2 __asm__("rsi") = a1;
+    register long r3 __asm__("rdx") = a2;
+    register long r4 __asm__("r10") = a3;
+    register long r5 __asm__("r8") = a4;
+    register long r6 __asm__("r9") = a5;
+    __asm__ volatile("syscall"
+                     : "+r"(r0)
+                     : "r"(r1), "r"(r2), "r"(r3), "r"(r4), "r"(r5), "r"(r6)
+                     : "rcx", "r11", "memory");
+    return r0;
+#else
     register long t0 __asm__("a7") = n;
     register long r0 __asm__("a0") = a0;
     register long r1 __asm__("a1") = a1;
@@ -14,6 +28,7 @@ long syscall6(long n, long a0, long a1, long a2, long a3, long a4, long a5)
                      : "r"(t0), "r"(r1), "r"(r2), "r"(r3), "r"(r4), "r"(r5)
                      : "memory");
     return r0;
+#endif
 }
 
 long syscall3(long n, long a0, long a1, long a2)

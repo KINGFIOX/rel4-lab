@@ -4,10 +4,11 @@ First-party user code is no_std. Every crate that talks to the kernel goes
 through `userspace/sel4-user`. Linux syscall semantics live in userspace
 (`linux-compat` + `vfs-server`), not in the kernel.
 
-`sel4-user` builds for `riscv64gc-unknown-none-elf` and `x86_64-unknown-none`.
-The linux-compat stack does not: `linux-abi/src/platform/mod.rs`,
-`linux-compat/src/arch/mod.rs`, and the server `build.rs` files still reject
-non-RISC-V targets. `hello-rootserver` is the x86 user gate.
+`sel4-user` and the linux-compat stack build for
+`riscv64gc-unknown-none-elf` and `x86_64-unknown-none`. x86 linux-compat
+uses the Linux x86_64 syscall table, ELF machine 62, 4-level VSpace map
+labels, and uart-server `DebugPutChar` (no first-wave IoPort).
+`hello-rootserver` remains the smallest x86 user gate.
 
 ## Crates
 
@@ -15,10 +16,10 @@ non-RISC-V targets. `hello-rootserver` is the x86 user gate.
 |-------|------|------|
 | sel4-user | `userspace/sel4-user` | IPC wrappers, boot constants, `log` macros, `rt` |
 | hello-rootserver | `userspace/hello-rootserver` | Minimal rootserver: banner, Untyped_Retype Endpoint, NBRecv, `hello-rootserver: ok` |
-| linux-abi | `userspace/linux-abi` | Linux RV64 syscall numbers, errno, VFS/UART opcodes, MMIO numbers |
+| linux-abi | `userspace/linux-abi` | Arch syscall numbers, errno, VFS/UART opcodes, platform MMIO |
 | linux-compat | `userspace/linux-compat` | Rootserver: fault loop, process table, Linux syscall dispatch |
 | vfs-server | `userspace/vfs-server` | ramfs, pipes, console routing, UART client |
-| uart-server | `userspace/uart-server` | 16550 MMIO console |
+| uart-server | `userspace/uart-server` | 16550 MMIO on RISC-V; `DebugPutChar` on x86 |
 
 Wave-1 user programs live under `userspace/linux-rootfs/` and are packed into
 a newc cpio by `tools/build-linux-rootfs.py`.
@@ -42,8 +43,10 @@ no disk server and no virtio-blk.
 ## Linux syscalls
 
 Dispatch is `linux-compat/src/linux.rs::handle_linux_syscall`. The kernel
-delivers `UnknownSyscall` fault IPC with Linux RV64 numbers in `a7` and
-arguments in `a0`–`a5`. Unimplemented numbers reply `-ENOSYS`.
+delivers `UnknownSyscall` fault IPC. RISC-V uses Linux RV64 numbers in `a7`
+and arguments in `a0`–`a5`. x86_64 uses Linux x86_64 numbers in `RAX` and
+arguments in `RDI`/`RSI`/`RDX`/`R10`/`R8`/`R9`, with FaultIP +0 (not +4).
+Unimplemented numbers reply `-ENOSYS`.
 
 Wave-1 coverage includes `exit`/`exit_group`, `write`, `openat`/`close`,
 `getpid`/`getppid`, `clone` (fork form), `wait4`/`waitid`, `read`,
@@ -52,7 +55,8 @@ Wave-1 coverage includes `exit`/`exit_group`, `write`, `openat`/`close`,
 `mprotect`/`set_tid_address`/`set_robust_list`/`prctl`.
 
 `pause`/`nanosleep` only `Yield`. They do not depend on timeslice
-preemption.
+preemption. On x86 the host binds the LAPIC timer with `IRQIssueIRQHandler`
+so `clock_gettime` can count ticks.
 
 ## Exec and ELF
 
@@ -60,7 +64,8 @@ preemption.
 through VFS (`vfs_read_exec_image`), resets mappings, then
 `child.rs::load_elf`.
 
-`load_elf` accepts ELF64 little-endian `ET_EXEC` with machine 243 (RISC-V),
+`load_elf` accepts ELF64 little-endian `ET_EXEC` with machine 243 (RISC-V)
+or 62 (x86_64),
 maps `PT_LOAD` segments, records PHDR auxv fields, and sets brk to the
 aligned image end. The initial program is `/ltp-wave1` from ramfs, not an
 embedded payload.
@@ -87,16 +92,16 @@ synchronous receive loop.
 
 vfs-server unpacks an embedded newc cpio into an in-memory ramfs at
 `VfsOp::Init`. `/tmp` and `/dev/console` are created if missing. Console
-`read`/`write` go host → vfs-server `console.rs` → uart-server → 16550
-MMIO.
+`read`/`write` go host → vfs-server `console.rs` → uart-server. RISC-V
+uses 16550 MMIO; x86 uses `DebugPutChar` (COM1), with no first-wave IoPort
+or UART MMIO map.
 
 Rust `log` macros in every crate go through `sel4-user::UserLogger` →
-`SYS_DEBUG_PUT_CHAR`. That is a different UART from the Linux console. The
-QEMU helpers attach a pci-serial chardev for the debug path.
+`SYS_DEBUG_PUT_CHAR`. On RISC-V that is a different UART from the Linux
+console (QEMU pci-serial). On x86 both paths land on COM1.
 
 ## Not in the tree
 
-- x86_64 linux-compat
 - complete LTP, networking, ptrace, `/proc`
 - tick-accurate `nanosleep`
 - `println!` runtime logging (only Cargo `println!` in `build.rs`)

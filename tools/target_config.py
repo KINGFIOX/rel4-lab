@@ -222,7 +222,7 @@ TARGETS: dict[str, TargetConfig] = {
         strip="x86_64-elf-strip",
         qemu="qemu-system-x86_64",
         qemu_machine="pc",
-        qemu_cpu="qemu64,+pdpe1gb,+syscall,+lm,+x2apic,+fsgsbase,enforce",
+        qemu_cpu="qemu64,+pdpe1gb,+syscall,+lm,+x2apic,+fsgsbase,+ssse3,+sse4.1,+sse4.2,+popcnt,+cx16,enforce",
         qemu_bios=None,
         linux_toolprefixes=(
             "x86_64-none-elf-",

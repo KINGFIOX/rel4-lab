@@ -24,6 +24,7 @@ from tool_common import (
 PREFIX = "audit-kernel-fpu"
 DEFAULT_RUST_TARGET = "riscv64gc-unknown-none-elf"
 DEFAULT_RISCV_ALLOWED_SOURCE = "kernel/src/arch/riscv64/machine/fpu.rs"
+DEFAULT_X86_ALLOWED_SOURCE = "kernel/src/arch/x86_64/machine/fpu.rs"
 
 INSTRUCTION_RE = re.compile(
     r"^\s*([0-9a-fA-F]+):(?:\s+[0-9a-fA-F]{2,8})+\s+([A-Za-z0-9_.]+)\b(?:\s+(.*))?$"
@@ -107,7 +108,7 @@ def default_allowed_source(target: str) -> str | None:
         case "riscv64":
             return DEFAULT_RISCV_ALLOWED_SOURCE
         case "x86_64":
-            return None
+            return DEFAULT_X86_ALLOWED_SOURCE
         case _:
             raise AssertionError("unreachable target architecture")
 
@@ -156,12 +157,31 @@ def is_riscv_fpu_mnemonic(mnemonic: str, operands: str = "") -> bool:
     )
 
 
+X86_FPU_MNEMONICS = {
+    "fxsave",
+    "fxsave64",
+    "fxrstor",
+    "fxrstor64",
+    "xsave",
+    "xrstor",
+    "clts",
+    "fninit",
+    "fnsave",
+    "frstor",
+}
+
+
+def is_x86_fpu_mnemonic(mnemonic: str) -> bool:
+    name = mnemonic.lower().lstrip("%")
+    return name in X86_FPU_MNEMONICS
+
+
 def is_fpu_mnemonic(target: str, mnemonic: str, operands: str = "") -> bool:
     match target_arch(target):
         case "riscv64":
             return is_riscv_fpu_mnemonic(mnemonic, operands)
         case "x86_64":
-            return False
+            return is_x86_fpu_mnemonic(mnemonic)
         case _:
             raise AssertionError("unreachable target architecture")
 

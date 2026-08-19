@@ -24,8 +24,10 @@ Use the helper scripts as the project interface for build, packing, QEMU, seL4, 
 
 3. For linux-compat / LTP validation:
    - Use `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py` as the default RISC-V user gate. Success is `ltp-wave1: ok`.
+   - Use `TIMEOUT=180 ARCH=x86_64 tools/run-ltp.py` as the x86 linux-compat gate.
    - Use `tools/build-linux-rootfs.py` when only the ramfs cpio needs refreshing.
-   - The x86 user gate remains `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 tools/run-hello.py`.
+   - The small x86 user gate remains `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 tools/run-hello.py`.
+   - The x86 sel4test gate is `ARCH=x86_64 SMP=OFF NUM_NODES=1 tools/pack-image.py` then `tools/run-tests.py`.
 
 4. For environment handling:
    - Combine this with `$microkernel-dev-env`: run tools directly from the already-loaded direnv flake shell when available.

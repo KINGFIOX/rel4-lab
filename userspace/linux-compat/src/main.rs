@@ -276,7 +276,11 @@ type FrameMap = (u64, u64, bool, bool, u64);
 fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> u64 {
     let uart_ep = alloc.retype_one(OBJ_ENDPOINT, 0);
     let vfs_ep = alloc.retype_one(OBJ_ENDPOINT, 0);
-    let uart_mmio_frame = alloc.retype_device_4k_at(UART0_MMIO_FRAME_BASE);
+    let uart_mmio_frame = if UART0_MMIO_FRAME_BASE != 0 {
+        alloc.retype_device_4k_at(UART0_MMIO_FRAME_BASE)
+    } else {
+        0
+    };
     let mut shared_frames = [0u64; SHARED_BUFFER_PAGES];
     let mut page = 0usize;
     while page < SHARED_BUFFER_PAGES {
@@ -285,6 +289,12 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> u64 {
         page += 1;
     }
     let shared_maps = shared_frame_maps(&shared_frames);
+    let uart_maps = [(uart_mmio_frame, UART_MMIO_FRAME_VADDR, true, false, 0)];
+    let uart_maps: &[FrameMap] = if uart_mmio_frame == 0 {
+        &[]
+    } else {
+        &uart_maps
+    };
     spawn_service_server(
         alloc,
         UART_SERVER_PID,
@@ -299,7 +309,7 @@ fn spawn_service_servers(alloc: &mut Allocator, fault_ep: u64) -> u64 {
             cap_rights(false, false, false, true),
             IpcBadge::UartReply.raw(),
         )],
-        &[(uart_mmio_frame, UART_MMIO_FRAME_VADDR, true, false, 0)],
+        uart_maps,
         SERVICE_UNTYPED_BITS,
         0,
     );

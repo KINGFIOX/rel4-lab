@@ -75,6 +75,8 @@ pub enum CapTag {
     IrqHandler = 16,
     Zombie = 18,
     Domain = 20,
+    IoPortControl = 22,
+    IoPort = 23,
 }
 
 impl CapTag {
@@ -95,6 +97,8 @@ impl CapTag {
             16 => Self::IrqHandler,
             18 => Self::Zombie,
             20 => Self::Domain,
+            22 => Self::IoPortControl,
+            23 => Self::IoPort,
             _ => return None,
         })
     }
@@ -315,6 +319,39 @@ impl Cap {
     pub fn set_zombie_number(&mut self, number: u64) {
         let mask = low_mask(self.zombie_bits() + 1);
         self.words[1] = (self.words[1] & !mask) | (number & mask);
+    }
+
+    #[inline]
+    pub const fn new_io_port_control() -> Cap {
+        let mut c = Cap::null();
+        c.words[0] = (CapTag::IoPortControl as u64) << 59;
+        c
+    }
+
+    #[inline]
+    pub const fn new_io_port(first_port: u64, last_port: u64) -> Cap {
+        let mut c = Cap::null();
+        c.words[0] = ((CapTag::IoPort as u64) << 59) | (first_port & 0xffff);
+        c.words[1] = last_port & 0xffff;
+        c
+    }
+
+    #[inline]
+    pub const fn io_port_first(self) -> u16 {
+        (self.words[0] & 0xffff) as u16
+    }
+
+    #[inline]
+    pub const fn io_port_last(self) -> u16 {
+        (self.words[1] & 0xffff) as u16
+    }
+
+    #[inline]
+    pub const fn io_port_covers(self, port: u16, size: u16) -> bool {
+        let first = self.io_port_first();
+        let last = self.io_port_last();
+        let end = port.saturating_add(size.saturating_sub(1));
+        port >= first && end <= last && size > 0
     }
 
     #[inline]

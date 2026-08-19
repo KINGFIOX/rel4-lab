@@ -20,6 +20,7 @@ use crate::object::cap::CapTag;
 pub use crate::arch::x86_64::sel4_arch::same_object_as;
 
 const SYSCALL_CAUSE: u64 = 0x10000;
+const VEC_DEVICE_NOT_AVAILABLE: u64 = 7;
 const VEC_DOUBLE_FAULT: u64 = 8;
 const VEC_GENERAL_PROTECTION: u64 = 13;
 const VEC_PAGE_FAULT: u64 = 14;
@@ -63,6 +64,7 @@ struct DescriptorTablePtr {
 }
 
 #[repr(C, align(16))]
+#[derive(Copy, Clone)]
 struct Gdt {
     entries: [u64; 8],
 }
@@ -73,6 +75,7 @@ struct Idt {
 }
 
 #[repr(C, packed)]
+#[derive(Copy, Clone)]
 struct Tss {
     reserved0: u32,
     rsp0: u64,
@@ -85,9 +88,10 @@ struct Tss {
     iopb: u16,
 }
 
-static mut GDT: Gdt = Gdt { entries: [0; 8] };
+static mut GDTS: [Gdt; crate::kernel::smp::MAX_BOOT_CPUS] =
+    [Gdt { entries: [0; 8] }; crate::kernel::smp::MAX_BOOT_CPUS];
 static mut IDT: Idt = Idt { entries: [0; 256] };
-static mut TSS: Tss = Tss {
+static mut TSSES: [Tss; crate::kernel::smp::MAX_BOOT_CPUS] = [Tss {
     reserved0: 0,
     rsp0: 0,
     rsp1: 0,
@@ -97,7 +101,7 @@ static mut TSS: Tss = Tss {
     reserved2: 0,
     reserved3: 0,
     iopb: size_of::<Tss>() as u16,
-};
+}; crate::kernel::smp::MAX_BOOT_CPUS];
 
 fn tss_descriptor(base: u64, limit: u32) -> [u64; 2] {
     let low = u64::from(limit & 0xffff)
@@ -134,24 +138,25 @@ fn reload_kernel_cs() {
 }
 
 pub fn install_trap_vector() {
-    let tss_base = core::ptr::addr_of!(TSS) as u64;
+    let core = crate::kernel::smp::current_core_id().min(crate::kernel::smp::MAX_BOOT_CPUS - 1);
+    let tss_base = unsafe { core::ptr::addr_of!(TSSES[core]) as u64 };
     let tss_desc = tss_descriptor(tss_base, (size_of::<Tss>() - 1) as u32);
     unsafe {
-        GDT.entries[0] = 0;
-        GDT.entries[1] = 0x00af_9a00_0000_ffff;
-        GDT.entries[2] = 0x00cf_9200_0000_ffff;
-        GDT.entries[3] = 0x00cf_f200_0000_ffff;
-        GDT.entries[4] = 0x00af_fa00_0000_ffff;
-        GDT.entries[5] = tss_desc[0];
-        GDT.entries[6] = tss_desc[1];
+        GDTS[core].entries[0] = 0;
+        GDTS[core].entries[1] = 0x00af_9a00_0000_ffff;
+        GDTS[core].entries[2] = 0x00cf_9200_0000_ffff;
+        GDTS[core].entries[3] = 0x00cf_f200_0000_ffff;
+        GDTS[core].entries[4] = 0x00af_fa00_0000_ffff;
+        GDTS[core].entries[5] = tss_desc[0];
+        GDTS[core].entries[6] = tss_desc[1];
         let scratch = crate::arch::x86_64::machine::current_scratch()
             as *mut crate::arch::x86_64::kernel::TrapScratch;
         if !scratch.is_null() {
-            TSS.rsp0 = (*scratch).kernel_stack_top as u64;
+            TSSES[core].rsp0 = (*scratch).kernel_stack_top as u64;
         }
         let gdtr = DescriptorTablePtr {
             limit: (size_of::<Gdt>() - 1) as u16,
-            base: core::ptr::addr_of!(GDT) as u64,
+            base: core::ptr::addr_of!(GDTS[core]) as u64,
         };
         registers::lgdt(core::ptr::addr_of!(gdtr) as *const u8);
         reload_kernel_cs();
@@ -199,8 +204,17 @@ static KERNEL_IRQ_PANIC: AtomicBool = AtomicBool::new(false);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_kernel_irq_rust(vector: u64, rip: u64) {
+    if vector == u64::from(lapic::IPI_VECTOR) {
+        crate::arch::x86_64::smp::ipi::handle_ipi();
+        return;
+    }
     if vector == u64::from(lapic::TIMER_VECTOR) {
         handle_timer_interrupt();
+        return;
+    }
+    if let Some(irq) = crate::arch::x86_64::machine::ioapic::vector_to_irq(vector) {
+        let _kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
+        handle_user_irq(irq);
         return;
     }
     if KERNEL_IRQ_PANIC.swap(true, Ordering::SeqCst) {
@@ -217,6 +231,9 @@ pub extern "C" fn handle_kernel_irq_rust(vector: u64, rip: u64) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_trap_rust(uc: *mut UserContext, cause: u64) -> *mut UserContext {
+    if cause == u64::from(lapic::IPI_VECTOR) {
+        crate::arch::x86_64::smp::ipi::handle_ipi();
+    }
     let kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
     if kernel_lock.remote_stalled_current() {
         return kernel_exit_after_remote_stall(kernel_lock);
@@ -226,13 +243,32 @@ pub extern "C" fn handle_trap_rust(uc: *mut UserContext, cause: u64) -> *mut Use
     }
     let uc = unsafe { &mut *uc };
     uc.restart_pc = uc.pc;
+    crate::arch::x86_64::machine::fpu::clear_supervisor_access();
+
+    if cause == VEC_DEVICE_NOT_AVAILABLE {
+        if crate::arch::x86_64::machine::fpu::handle_device_not_available(
+            crate::object::tcb::current(),
+        ) {
+            return kernel_exit(uc, kernel_lock);
+        }
+    }
 
     if cause == SYSCALL_CAUSE {
+        // `syscall` writes RCX with the following instruction. Preempted
+        // seL4 invocations must resume at the 2-byte `syscall` itself.
+        uc.restart_pc = uc.pc.wrapping_sub(2);
         handle_syscall(uc);
+        return kernel_exit(uc, kernel_lock);
+    }
+    if cause == u64::from(lapic::IPI_VECTOR) {
         return kernel_exit(uc, kernel_lock);
     }
     if cause == u64::from(lapic::TIMER_VECTOR) {
         handle_timer_interrupt();
+        return kernel_exit(uc, kernel_lock);
+    }
+    if let Some(irq) = crate::arch::x86_64::machine::ioapic::vector_to_irq(cause) {
+        handle_user_irq(irq);
         return kernel_exit(uc, kernel_lock);
     }
 
@@ -250,8 +286,12 @@ pub extern "C" fn handle_trap_rust(uc: *mut UserContext, cause: u64) -> *mut Use
     kernel_exit(uc, kernel_lock)
 }
 
-fn fault_message(vector: u64, cr2: u64, uc: &UserContext) -> (u64, u64, [u64; 16]) {
-    let mut mrs = [0; 16];
+fn fault_message(
+    vector: u64,
+    cr2: u64,
+    uc: &UserContext,
+) -> (u64, u64, crate::object::tcb::FaultMrs) {
+    let mut mrs = [0; crate::object::tcb::FAULT_IPC_MRS];
     if vector == VEC_PAGE_FAULT {
         mrs[0] = uc.pc;
         mrs[1] = cr2;
@@ -272,7 +312,7 @@ unsafe fn write_fault_ipc_message(
     badge: u64,
     label: u64,
     len: u64,
-    mrs: &[u64; 16],
+    mrs: &[u64],
 ) {
     if receiver.is_null() {
         return;
@@ -380,7 +420,7 @@ fn send_fault_ipc(uc: &mut UserContext, vector: u64, cr2: u64) -> bool {
 }
 
 pub fn send_cap_fault_ipc(uc: &mut UserContext, addr: u64, in_recv_phase: bool) -> bool {
-    let mut mrs = [0; 16];
+    let mut mrs = [0; crate::object::tcb::FAULT_IPC_MRS];
     mrs[0] = uc.restart_pc;
     mrs[1] = addr;
     mrs[2] = in_recv_phase as u64;
@@ -390,22 +430,36 @@ pub fn send_cap_fault_ipc(uc: &mut UserContext, addr: u64, in_recv_phase: bool) 
 }
 
 fn send_unknown_syscall_fault(uc: &mut UserContext, sysno: isize) -> bool {
-    let mut mrs = [0; 16];
-    mrs[0] = uc.restart_pc;
-    mrs[1] = uc.stack_reg();
-    mrs[2] = uc.regs[UserRegister::Rax.index()];
-    mrs[3] = uc.cap_reg();
-    mrs[4] = uc.msg_info();
-    mrs[5] = uc.mr(0);
-    mrs[6] = uc.mr(1);
-    mrs[7] = uc.mr(2);
-    mrs[8] = uc.mr(3);
-    mrs[9] = uc.regs[UserRegister::R15.index()];
-    mrs[10] = sysno as u64;
-    send_synthetic_fault_ipc(FaultLabel::UnknownSyscall.raw(), 11, mrs)
+    use crate::arch::x86_64::sel4_arch::UNKNOWN_SYSCALL_LENGTH;
+
+    let mut mrs = [0; crate::object::tcb::FAULT_IPC_MRS];
+    mrs[0] = uc.regs[2];
+    mrs[1] = uc.regs[3];
+    mrs[2] = uc.regs[19];
+    mrs[3] = uc.regs[8];
+    mrs[4] = uc.regs[1];
+    mrs[5] = uc.regs[0];
+    mrs[6] = uc.regs[4];
+    mrs[7] = uc.regs[10];
+    mrs[8] = uc.regs[11];
+    mrs[9] = uc.regs[9];
+    mrs[10] = uc.regs[18];
+    mrs[11] = uc.regs[5];
+    mrs[12] = uc.regs[6];
+    mrs[13] = uc.regs[7];
+    mrs[14] = uc.regs[12];
+    mrs[15] = uc.pc;
+    mrs[16] = uc.stack_reg();
+    mrs[17] = uc.regs[13];
+    mrs[18] = sysno as u64;
+    send_synthetic_fault_ipc(
+        FaultLabel::UnknownSyscall.raw(),
+        UNKNOWN_SYSCALL_LENGTH,
+        mrs,
+    )
 }
 
-fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: [u64; 16]) -> bool {
+fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: crate::object::tcb::FaultMrs) -> bool {
     use crate::object::endpoint;
     use crate::object::tcb;
 
@@ -472,7 +526,7 @@ unsafe fn block_fault_sender_locked(
     can_grant_reply: bool,
     label: u64,
     len: u64,
-    mrs: [u64; 16],
+    mrs: crate::object::tcb::FaultMrs,
 ) {
     use crate::object::endpoint::{self, EpState};
     use crate::object::tcb;
@@ -497,10 +551,16 @@ unsafe fn block_fault_sender_locked(
 }
 
 fn handle_timer_interrupt() {
-    unsafe {
-        crate::object::irq::signal_irq(irq::KERNEL_TIMER_IRQ as u64);
-    }
+    handle_user_irq(irq::KERNEL_TIMER_IRQ as u64);
     lapic::eoi();
+}
+
+fn handle_user_irq(irq: u64) {
+    unsafe {
+        if !crate::object::irq::signal_irq(irq) {
+            irq::complete_external_irq(irq);
+        }
+    }
 }
 
 pub fn idle_scheduler_loop() -> ! {
@@ -700,7 +760,18 @@ fn handle_debug_name_thread(uc: &UserContext) {
 }
 
 fn handle_syscall(uc: &mut UserContext) {
-    let raw_sysno = uc.syscall_reg() as isize;
+    // Our sel4-user/linux-compat path puts the number in RAX. Upstream libsel4
+    // x86_64 uses RDX. Prefer a recognised seL4 number in either register, then
+    // fall back to RAX so positive Linux syscalls become UnknownSyscall.
+    let rax = uc.syscall_reg() as isize;
+    let rdx = uc.libsel4_syscall_reg() as isize;
+    let raw_sysno = if SyscallNumber::from_raw(rax).is_some() {
+        rax
+    } else if SyscallNumber::from_raw(rdx).is_some() {
+        rdx
+    } else {
+        rax
+    };
 
     match SyscallNumber::from_raw(raw_sysno) {
         Some(SyscallNumber::DebugPutChar) => {
@@ -720,13 +791,17 @@ fn handle_syscall(uc: &mut UserContext) {
                 Ok((cap, _)) => cap.tag_raw(),
                 Err(_) => 0,
             };
-            uc.set_return_reg(tag);
+            // libsel4 x86_64 reads the result from RDI (capRegister), not RAX.
+            uc.set_cap_reg(tag);
         }
         Some(SyscallNumber::DebugHalt) => {
             debug_halt("Debug halt syscall from user thread");
         }
         Some(SyscallNumber::DebugSendIpi) => {
             debug_halt("SysDebugSendIPI: not supported on this architecture");
+        }
+        Some(SyscallNumber::SetTLSBase) => {
+            uc.set_tls_reg(uc.cap_reg());
         }
         Some(SyscallNumber::DebugDumpScheduler | SyscallNumber::DebugSnapshot) => {}
         Some(SyscallNumber::Yield) => unsafe {

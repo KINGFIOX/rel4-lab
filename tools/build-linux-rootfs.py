@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from target_config import infer_toolprefix_for, target_from_env
 from tool_common import (
     ELF_TYPE_EXECUTABLE,
-    RISCV_ELF_MACHINE,
     ROOT_DIR,
     BuildLock,
     bare_metal_tool_env,
@@ -97,12 +96,9 @@ def compile_program(
 
 def main() -> int:
     target = target_from_env(PREFIX)
-    if target.name != "riscv64":
-        die(PREFIX, f"linux-compat rootfs is RISC-V only; ARCH={target.name}")
-
     prefix = infer_toolprefix_for(target)
     if prefix is None:
-        die(PREFIX, "no RISC-V gcc on PATH; activate the flake dev shell")
+        die(PREFIX, f"no {target.name} gcc on PATH; activate the flake dev shell")
     gcc = f"{prefix}gcc"
 
     out_dir = Path(getenv("OUT_DIR", str(default_linux_out_dir(target))))
@@ -111,12 +107,18 @@ def main() -> int:
     bin_dir.mkdir(parents=True, exist_ok=True)
 
     include = ROOTFS_SRC / "include"
-    linker = ROOTFS_SRC / "linker.ld"
+    if target.name == "x86_64":
+        linker = ROOTFS_SRC / "linker-x86_64.ld"
+        crt = str(ROOTFS_SRC / "src" / "crt0-x86_64.S")
+        code_model = None
+    else:
+        linker = ROOTFS_SRC / "linker.ld"
+        crt = str(ROOTFS_SRC / "src" / "crt0.S")
+        code_model = "medany"
     require_file(PREFIX, linker, f"missing linker script: {linker}")
     require_file(PREFIX, LTP_UNAME01, f"missing LTP uname01: {LTP_UNAME01}")
 
-    cflags = linux_user_cflags(include, target.linux_march, target.linux_mabi)
-    crt = str(ROOTFS_SRC / "src" / "crt0.S")
+    cflags = linux_user_cflags(include, target.linux_march, target.linux_mabi, code_model)
     libc = str(ROOTFS_SRC / "src" / "libc.c")
     wave1_lib = str(ROOTFS_SRC / "src" / "wave1_lib.c")
 
@@ -175,8 +177,6 @@ def main() -> int:
             data = elf.read_bytes()
             if int.from_bytes(data[16:18], "little") != ELF_TYPE_EXECUTABLE:
                 die(PREFIX, f"{elf} is not ET_EXEC")
-            if int.from_bytes(data[18:20], "little") != RISCV_ELF_MACHINE:
-                die(PREFIX, f"{elf} is not RISC-V")
 
         files = [(name, path, 0o100755) for name, path in programs]
         write_cpio(cpio_path, files, ["tmp", "dev"])

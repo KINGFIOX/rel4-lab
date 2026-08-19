@@ -45,7 +45,9 @@ use crate::api::cspace::{self, lookup_cap};
 use crate::api::invocation::derive_cap_for_copy;
 use crate::api::thread;
 use crate::arch::current::api::UserContext;
-use crate::arch::current::sel4_arch::{UNKNOWN_SYSCALL_REPLY_REGS, USER_EXCEPTION_SP_REG};
+use crate::arch::current::sel4_arch::{
+    UNKNOWN_SYSCALL_FAULT_IP_MR, UNKNOWN_SYSCALL_REPLY_REGS, USER_EXCEPTION_SP_REG,
+};
 use crate::object::cap::{Cap, CapTag};
 use crate::object::cnode::Cte;
 use crate::object::endpoint::{self, EpState};
@@ -987,16 +989,19 @@ unsafe fn apply_unknown_syscall_reply(
     caller: *mut tcb::Tcb,
     length: u64,
 ) {
-    const SYSCALL_REPLY_REGS: [usize; 10] = UNKNOWN_SYSCALL_REPLY_REGS;
-
-    let n = (length as usize).min(SYSCALL_REPLY_REGS.len());
+    let n = (length as usize).min(UNKNOWN_SYSCALL_REPLY_REGS.len());
     let mut pc = None;
-    let mut regs = [(0usize, 0u64); SYSCALL_REPLY_REGS.len() - 1];
+    let mut regs = [(0usize, 0u64); 24];
     let mut reg_count = 0;
     unsafe {
-        for (i, reg) in SYSCALL_REPLY_REGS.iter().copied().enumerate().take(n) {
+        for (i, reg) in UNKNOWN_SYSCALL_REPLY_REGS
+            .iter()
+            .copied()
+            .enumerate()
+            .take(n)
+        {
             let value = reply_mr(sender, uc, i);
-            if i == 0 {
+            if i == UNKNOWN_SYSCALL_FAULT_IP_MR {
                 pc = Some(value);
             } else if reg != 0 {
                 regs[reg_count] = (reg, value);

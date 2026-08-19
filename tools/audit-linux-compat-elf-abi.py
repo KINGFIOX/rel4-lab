@@ -12,6 +12,7 @@ from target_config import target_from_env
 from tool_common import (
     ELF_TYPE_EXECUTABLE,
     RISCV_ELF_MACHINE,
+    X86_64_ELF_MACHINE,
     ROOT_DIR,
     log,
 )
@@ -41,6 +42,12 @@ def audit_build_script(errors: list[str]) -> None:
     require_text(
         errors,
         path,
+        f"const X86_64_ELF_MACHINE: u16 = {X86_64_ELF_MACHINE};",
+        "x86_64 e_machine constant",
+    )
+    require_text(
+        errors,
+        path,
         f"const ELF_TYPE_EXECUTABLE: u16 = {ELF_TYPE_EXECUTABLE};",
         "ET_EXEC constant",
     )
@@ -64,13 +71,24 @@ def audit_build_script(errors: list[str]) -> None:
     )
 
 
-def audit_runtime_loader(errors: list[str]) -> None:
+def audit_runtime_loader(errors: list[str], target_name: str) -> None:
     path = ROOT_DIR / "userspace" / "linux-compat" / "src" / "child.rs"
+    arch_path = ROOT_DIR / "userspace" / "linux-compat" / "src" / "arch" / f"{target_name}.rs"
+    expected_machine = {
+        "riscv64": RISCV_ELF_MACHINE,
+        "x86_64": X86_64_ELF_MACHINE,
+    }[target_name]
+    require_text(
+        errors,
+        arch_path,
+        f"pub(crate) const EXPECTED_ELF_MACHINE: u16 = {expected_machine};",
+        f"{target_name} runtime e_machine constant",
+    )
     require_text(
         errors,
         path,
-        f"const EXPECTED_ELF_MACHINE: u16 = {RISCV_ELF_MACHINE};",
-        "RISC-V runtime e_machine constant",
+        "const EXPECTED_ELF_MACHINE: u16 = arch::EXPECTED_ELF_MACHINE;",
+        "arch-selected runtime e_machine constant",
     )
     require_regex(
         errors,
@@ -85,12 +103,12 @@ def audit_runtime_loader(errors: list[str]) -> None:
 
 def main() -> int:
     target = target_from_env(PREFIX)
-    if target.name != "riscv64":
+    if target.name not in ("riscv64", "x86_64"):
         print(f"PASS: {target.name} linux-compat ELF ABI checks skipped")
         return 0
     errors: list[str] = []
     audit_build_script(errors)
-    audit_runtime_loader(errors)
+    audit_runtime_loader(errors, target.name)
     if errors:
         for error in errors:
             log(PREFIX, f"FAIL: {error}")

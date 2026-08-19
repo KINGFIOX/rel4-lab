@@ -281,7 +281,7 @@ pub(crate) fn sys_uname(alloc: &mut Allocator, child: &TaskStruct, dest: u64) ->
     copy_cstr(&mut un.nodename, b"linux-compat");
     copy_cstr(&mut un.release, b"6.1.0-linux-compat");
     copy_cstr(&mut un.version, b"#1 SMP");
-    copy_cstr(&mut un.machine, b"riscv64");
+    copy_cstr(&mut un.machine, crate::arch::current::UTS_MACHINE);
     copy_cstr(&mut un.domainname, b"(none)");
     let bytes = unsafe {
         core::slice::from_raw_parts(

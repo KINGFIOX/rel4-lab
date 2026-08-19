@@ -144,11 +144,14 @@ struct RunqueueSnapshot {
     state: u8,
 }
 
+pub(crate) const FAULT_IPC_MRS: usize = 20;
+pub(crate) type FaultMrs = [u64; FAULT_IPC_MRS];
+
 #[derive(Copy, Clone)]
 pub(crate) struct FaultIpcMessage {
     pub label: u64,
     pub len: u64,
-    pub mrs: [u64; 16],
+    pub mrs: FaultMrs,
 }
 
 #[derive(Copy, Clone)]
@@ -762,7 +765,7 @@ unsafe fn clear_endpoint_ipc_state_locked(tcb: *mut Tcb) {
         (*tcb).sender_is_fault = 0;
         (*tcb).fault_label = 0;
         (*tcb).fault_len = 0;
-        (*tcb).fault_mrs = [0; 16];
+        (*tcb).fault_mrs = [0; FAULT_IPC_MRS];
     }
 }
 
@@ -920,7 +923,7 @@ pub(crate) unsafe fn write_fault_ipc_message_regs(
     tcb: *mut Tcb,
     badge: u64,
     info_word: u64,
-    mrs: &[u64; 16],
+    mrs: &[u64],
     length: u64,
 ) {
     if tcb.is_null() {
@@ -1070,11 +1073,10 @@ pub(crate) unsafe fn write_user_context(tcb: *mut Tcb, pc: Option<u64>, regs: &[
     unsafe {
         let _guard = lock_state(tcb);
         if let Some(pc) = pc {
-            (*tcb).context.pc = pc;
-            (*tcb).context.restart_pc = pc;
+            sel4_arch::apply_written_pc(&mut (*tcb).context, pc);
         }
         for &(idx, value) in regs {
-            if idx != 0 && idx < (*tcb).context.regs.len() {
+            if idx < (*tcb).context.regs.len() {
                 (*tcb).context.regs[idx] = value;
             }
         }
@@ -1094,10 +1096,9 @@ pub(crate) fn user_context_word_snapshot(
         let _guard = lock_state(tcb);
         match context_index {
             0 => (*tcb).context.restart_pc,
+            #[cfg(target_arch = "riscv64")]
             1 => (*tcb).context.return_reg(),
-            _ if reg_index != 0 && reg_index < (*tcb).context.regs.len() => {
-                (*tcb).context.regs[reg_index]
-            }
+            _ if reg_index < (*tcb).context.regs.len() => (*tcb).context.regs[reg_index],
             _ => 0,
         }
     }
@@ -1152,7 +1153,7 @@ pub(crate) fn fault_message_snapshot(tcb: *const Tcb) -> FaultIpcMessage {
         return FaultIpcMessage {
             label: 0,
             len: 0,
-            mrs: [0; 16],
+            mrs: [0; FAULT_IPC_MRS],
         };
     }
     unsafe {
@@ -1165,7 +1166,7 @@ pub(crate) fn fault_message_snapshot(tcb: *const Tcb) -> FaultIpcMessage {
     }
 }
 
-pub(crate) unsafe fn record_fault_message(tcb: *mut Tcb, label: u64, len: u64, mrs: [u64; 16]) {
+pub(crate) unsafe fn record_fault_message(tcb: *mut Tcb, label: u64, len: u64, mrs: FaultMrs) {
     if tcb.is_null() {
         return;
     }
@@ -1192,7 +1193,7 @@ pub(crate) unsafe fn finish_reply_state(
             (*tcb).sender_is_fault = 0;
             (*tcb).fault_label = 0;
             (*tcb).fault_len = 0;
-            (*tcb).fault_mrs = [0; 16];
+            (*tcb).fault_mrs = [0; FAULT_IPC_MRS];
         }
         (*tcb).waiting_on = 0;
         (*tcb).reply_object = 0;
@@ -1264,7 +1265,7 @@ pub(crate) unsafe fn set_blocked_fault_sender(
     can_grant_reply: bool,
     label: u64,
     len: u64,
-    mrs: [u64; 16],
+    mrs: FaultMrs,
 ) {
     if tcb.is_null() {
         return;
@@ -1705,7 +1706,7 @@ pub struct Tcb {
     pub sender_is_fault: u8,
     pub fault_label: u64,
     pub fault_len: u64,
-    pub fault_mrs: [u64; 16],
+    pub fault_mrs: FaultMrs,
 
     /// Debug name, populated by `seL4_DebugNameThread`. NUL-padded.
     pub name: [u8; TCB_NAME_LEN],
@@ -1752,7 +1753,7 @@ impl Tcb {
             sender_is_fault: 0,
             fault_label: 0,
             fault_len: 0,
-            fault_mrs: [0; 16],
+            fault_mrs: [0; FAULT_IPC_MRS],
             name: [0; TCB_NAME_LEN],
         }
     }

@@ -5,24 +5,35 @@
 
 use core::panic::PanicInfo;
 use core::ptr;
+#[cfg(target_arch = "riscv64")]
 use core::ptr::{read_volatile, write_volatile};
 
+#[cfg(target_arch = "riscv64")]
+use linux_abi::UART_MMIO_VADDR;
 use linux_abi::{
     IpcProtocol, IpcStatus, LINUX_ABI_VERSION, SERVER_RECV_REPLY_CPTR, SERVICE_ENDPOINT_CPTR,
-    UART_MMIO_VADDR, UART_REPLY_ENDPOINT_CPTR, UartOp,
+    UART_REPLY_ENDPOINT_CPTR, UartOp,
 };
 use sel4_user::{
     IpcMessage, error, halt_loop, info, init_ipc_buffer, init_logger, msg_info, msg_label,
     sel4_recv_with_reply, sel4_reply_recv_with_reply, sel4_send,
 };
 
+#[cfg(target_arch = "riscv64")]
 const RHR: usize = 0;
+#[cfg(target_arch = "riscv64")]
 const THR: usize = 0;
+#[cfg(target_arch = "riscv64")]
 const IER: usize = 1;
+#[cfg(target_arch = "riscv64")]
 const FCR: usize = 2;
+#[cfg(target_arch = "riscv64")]
 const LCR: usize = 3;
+#[cfg(target_arch = "riscv64")]
 const LSR: usize = 5;
+#[cfg(target_arch = "riscv64")]
 const LSR_DR: u8 = 1 << 0;
+#[cfg(target_arch = "riscv64")]
 const LSR_THRE: u8 = 1 << 5;
 
 #[unsafe(no_mangle)]
@@ -118,6 +129,7 @@ fn handle_async_request(msg: &IpcMessage) {
 }
 
 fn init_uart() {
+    #[cfg(target_arch = "riscv64")]
     unsafe {
         write_volatile(reg(IER), 0x00);
         write_volatile(reg(FCR), 0x01);
@@ -127,6 +139,11 @@ fn init_uart() {
 }
 
 fn putch(ch: u8) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        sel4_user::putchar(ch);
+    }
+    #[cfg(target_arch = "riscv64")]
     unsafe {
         while read_volatile(reg(LSR)) & LSR_THRE == 0 {}
         write_volatile(reg(THR), ch);
@@ -134,6 +151,11 @@ fn putch(ch: u8) {
 }
 
 fn getch() -> i32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        -1
+    }
+    #[cfg(target_arch = "riscv64")]
     unsafe {
         if read_volatile(reg(LSR)) & LSR_DR == 0 {
             -1
@@ -143,6 +165,7 @@ fn getch() -> i32 {
     }
 }
 
+#[cfg(target_arch = "riscv64")]
 #[inline]
 fn reg(offset: usize) -> *mut u8 {
     (UART_MMIO_VADDR as usize + offset) as *mut u8

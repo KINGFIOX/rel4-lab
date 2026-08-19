@@ -142,6 +142,7 @@ pub extern "C" fn x86_64_high_entry(multiboot_magic: usize, multiboot_info: usiz
         core::arch::asm!("mov rsp, {}", in(reg) &__stack_top as *const u8 as usize, options(nostack));
     }
     clear_bss();
+    crate::arch::x86_64::smp::trampoline::save_boot_cr3();
     let (multiboot_magic, multiboot_info) = unsafe {
         let _ = (multiboot_magic, multiboot_info);
         (
@@ -228,6 +229,7 @@ fn parse_multiboot_boot_args(
     }
     let user_ventry = elf64_entry(user_pstart);
     let pv_offset = elf64_pv_offset(user_pstart);
+    let user_pend = realize_elf_bss(user_pstart, user_pend, pv_offset);
     crate::kernel::boot::BootArgs {
         user_pstart,
         user_pend,
@@ -243,6 +245,48 @@ fn parse_multiboot_boot_args(
 fn elf64_entry(image_paddr: usize) -> usize {
     let hdr = elf64_header(image_paddr);
     unsafe { core::ptr::read_unaligned(hdr.add(24) as *const u64) as usize }
+}
+
+/// Multiboot loads the ELF file bytes only. seL4-style `pv_offset` mapping
+/// therefore misses `p_memsz - p_filesz` BSS. Zero that tail and extend the
+/// reported physical image so `bringup_rootserver` maps it. Extra pages stay
+/// below the 16 MiB FREE_RAM floor used for untypeds.
+fn realize_elf_bss(image_paddr: usize, module_end: usize, pv_offset: usize) -> usize {
+    let hdr = elf64_header(image_paddr);
+    let phoff = unsafe { core::ptr::read_unaligned(hdr.add(32) as *const u64) as usize };
+    let phentsize = unsafe { core::ptr::read_unaligned(hdr.add(54) as *const u16) as usize };
+    let phnum = unsafe { core::ptr::read_unaligned(hdr.add(56) as *const u16) as usize };
+    let page_size = crate::arch::x86_64::machine::paging::PAGE_SIZE;
+    let mut image_end = module_end;
+    let mut i = 0usize;
+    while i < phnum {
+        let phdr = unsafe { hdr.add(phoff + i * phentsize) };
+        let p_type = unsafe { core::ptr::read_unaligned(phdr as *const u32) };
+        if p_type == 1 {
+            let p_offset = unsafe { core::ptr::read_unaligned(phdr.add(8) as *const u64) as usize };
+            let p_filesz =
+                unsafe { core::ptr::read_unaligned(phdr.add(32) as *const u64) as usize };
+            let p_memsz = unsafe { core::ptr::read_unaligned(phdr.add(40) as *const u64) as usize };
+            let p_vaddr = unsafe { core::ptr::read_unaligned(phdr.add(16) as *const u64) as usize };
+            let file_end = image_paddr.wrapping_add(p_offset).wrapping_add(p_filesz);
+            let bss_end = image_paddr.wrapping_add(p_offset).wrapping_add(p_memsz);
+            let map_end = (p_vaddr.wrapping_add(p_memsz).wrapping_add(pv_offset) + page_size - 1)
+                & !(page_size - 1);
+            // Zero only this segment's BSS. Padding out to the next page would
+            // wipe a later PT_LOAD that shares the page (hello's .got after
+            // .rodata).
+            if p_memsz > p_filesz {
+                unsafe {
+                    core::ptr::write_bytes(file_end as *mut u8, 0, bss_end - file_end);
+                }
+            }
+            if map_end > image_end {
+                image_end = map_end;
+            }
+        }
+        i += 1;
+    }
+    image_end
 }
 
 fn elf64_pv_offset(image_paddr: usize) -> usize {

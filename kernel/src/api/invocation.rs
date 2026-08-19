@@ -9,13 +9,16 @@
 
 use core::ptr;
 
+#[cfg(target_arch = "x86_64")]
+use log_crate::debug;
+
 use crate::abi::types::MessageInfo;
 use crate::api::cspace;
 use crate::api::syscall::SyscallError;
 use crate::api::thread::Thread;
 use crate::arch::current::api::{
-    SEL4_TCB_FRAME_REGS, SEL4_TCB_GP_REGS, SEL4_USER_CONTEXT_REGS, SEL4_USER_CONTEXT_WORDS,
-    UserContext,
+    SEL4_TCB_FRAME_REGS, SEL4_TCB_GP_REGS, SEL4_USER_CONTEXT_ABI_WORDS, SEL4_USER_CONTEXT_REGS,
+    SEL4_USER_CONTEXT_WORDS, UserContext,
 };
 use crate::arch::current::machine::paging::{PAGE_SIZE, PageTable};
 use crate::arch::current::object::vspace;
@@ -91,6 +94,7 @@ pub fn success_reply_length(tag: Option<CapTag>, label_id: u64) -> u64 {
     match tag {
         Some(CapTag::Thread) if label_id == InvocationLabel::TcbSetFlags.raw() => 1,
         Some(CapTag::Frame) if label_id == arch_inv::PAGE_GET_ADDRESS => 1,
+        Some(CapTag::IoPort) => arch_inv::io_port_in_reply_length(label_id),
         _ => 0,
     }
 }
@@ -560,11 +564,9 @@ pub fn handle_page_table(
     length: u64,
     uc: &mut UserContext,
 ) -> Result<(), SyscallError> {
-    let page_table_map = arch_inv::PAGE_TABLE_MAP;
-    let page_table_unmap = arch_inv::PAGE_TABLE_UNMAP;
-
-    let is_map = label_id == page_table_map;
-    let is_unmap = label_id == page_table_unmap;
+    let expected_coverage = arch_inv::mapped_table_coverage_bits(label_id);
+    let is_map = expected_coverage.is_some();
+    let is_unmap = arch_inv::is_mapped_table_unmap(label_id);
 
     match () {
         _ if is_map => {
@@ -609,8 +611,9 @@ pub fn handle_page_table(
                     root_pt_kva as *mut PageTable,
                     vaddr as usize,
                     current_cap.page_table_base_ptr() as *mut PageTable,
+                    expected_coverage,
                 )
-                .map_err(user_map_error)?;
+                .map_err(|err| user_map_error_reply(uc, err))?;
                 let mapped_addr = prepared_map.mapped_addr();
                 (*slot).cap.set_page_table_mapping(asid, mapped_addr as u64);
                 vspace::commit_user_page_table_map(prepared_map);
@@ -799,28 +802,61 @@ pub fn handle_irq_control(
     length: u64,
     uc: &mut UserContext,
 ) -> Result<(), SyscallError> {
-    let (irq, index, depth) = match label_id {
-        id if invocation_label_matches(id, InvocationLabel::IrqIssueIrqHandler) => {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if label_id == arch_inv::IRQ_ISSUE_IRQ_HANDLER_IOAPIC {
+            return issue_ioapic_irq_handler(thread, src_slot, length, uc);
+        }
+        // seL4 `IRQIssueIRQHandler` is PIC-only. IOAPIC pins use GetIOAPIC;
+        // the LAPIC timer is not a pin and is issued with the generic Get.
+        if invocation_label_matches(label_id, InvocationLabel::IrqIssueIrqHandler) {
             if length < 3 {
                 return Err(SyscallError::TruncatedMessage);
             }
             require_extra_caps(uc, 1)?;
-            (uc.mr(0), uc.mr(1), uc.mr(2) & 0xff)
-        }
-        id if id == arch_inv::IRQ_ISSUE_IRQ_HANDLER_TRIGGER => {
-            if length < 4 {
-                return Err(SyscallError::TruncatedMessage);
+            let irq = uc.mr(0);
+            if irq != crate::object::irq::KERNEL_TIMER_IRQ as u64 {
+                return Err(SyscallError::IllegalOperation);
             }
-            require_extra_caps(uc, 1)?;
-            // seL4 only accepts this arch-specific invocation when the
-            // platform configures HAVE_SET_TRIGGER. QEMU RISC-V here does not
-            // model trigger programming, so the syscall must not issue a
-            // normal IRQHandler cap.
-            return Err(SyscallError::IllegalOperation);
+            return issue_irq_handler(thread, src_slot, irq, uc.mr(1), uc.mr(2) & 0xff, uc);
         }
-        _ => return Err(SyscallError::IllegalOperation),
-    };
+        return Err(SyscallError::IllegalOperation);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let (irq, index, depth) = match label_id {
+            id if invocation_label_matches(id, InvocationLabel::IrqIssueIrqHandler) => {
+                if length < 3 {
+                    return Err(SyscallError::TruncatedMessage);
+                }
+                require_extra_caps(uc, 1)?;
+                (uc.mr(0), uc.mr(1), uc.mr(2) & 0xff)
+            }
+            id if id == arch_inv::IRQ_ISSUE_IRQ_HANDLER_TRIGGER => {
+                if length < 4 {
+                    return Err(SyscallError::TruncatedMessage);
+                }
+                require_extra_caps(uc, 1)?;
+                // seL4 only accepts this arch-specific invocation when the
+                // platform configures HAVE_SET_TRIGGER. QEMU RISC-V here does
+                // not model trigger programming, so the syscall must not issue
+                // a normal IRQHandler cap.
+                return Err(SyscallError::IllegalOperation);
+            }
+            _ => return Err(SyscallError::IllegalOperation),
+        };
+        issue_irq_handler(thread, src_slot, irq, index, depth, uc)
+    }
+}
 
+fn issue_irq_handler(
+    thread: &Thread,
+    src_slot: *mut Cte,
+    irq: u64,
+    index: u64,
+    depth: u64,
+    uc: &mut UserContext,
+) -> Result<(), SyscallError> {
     if !crate::object::irq::valid_irq(irq) {
         uc.set_mr(0, 1);
         uc.set_mr(1, crate::object::irq::MAX_IRQ as u64);
@@ -859,6 +895,196 @@ pub fn handle_irq_control(
         );
     }
     Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+fn issue_ioapic_irq_handler(
+    thread: &Thread,
+    src_slot: *mut Cte,
+    length: u64,
+    uc: &mut UserContext,
+) -> Result<(), SyscallError> {
+    use crate::arch::x86_64::machine::ioapic;
+
+    if length < 7 {
+        return Err(SyscallError::TruncatedMessage);
+    }
+    require_extra_caps(uc, 1)?;
+
+    let index = uc.mr(0);
+    let depth = uc.mr(1);
+    let ioapic_id = uc.mr(2);
+    let pin = uc.mr(3);
+    let level = read_mr(thread, uc, 4);
+    let polarity = read_mr(thread, uc, 5);
+    let vector_arg = read_mr(thread, uc, 6);
+    let user_span = ioapic::IRQ_USER_MAX - ioapic::IRQ_USER_MIN;
+    if vector_arg > user_span {
+        uc.set_mr(0, 0);
+        uc.set_mr(1, user_span);
+        return Err(SyscallError::RangeError);
+    }
+    let irq = vector_arg + ioapic::IRQ_USER_MIN;
+    let vector = irq + ioapic::IRQ_INT_OFFSET;
+
+    if ioapic_id != 0 {
+        uc.set_mr(0, 0);
+        uc.set_mr(1, 0);
+        return Err(SyscallError::RangeError);
+    }
+    if pin >= ioapic::pin_count() as u64 {
+        uc.set_mr(0, 0);
+        uc.set_mr(1, ioapic::pin_count().saturating_sub(1) as u64);
+        return Err(SyscallError::RangeError);
+    }
+    if level > 1 {
+        uc.set_mr(0, 0);
+        uc.set_mr(1, 1);
+        return Err(SyscallError::RangeError);
+    }
+    if polarity > 1 {
+        uc.set_mr(0, 0);
+        uc.set_mr(1, 1);
+        return Err(SyscallError::RangeError);
+    }
+    if unsafe { crate::object::irq::is_active(irq) } {
+        return Err(SyscallError::RevokeFirst);
+    }
+
+    debug!(
+        "GetIOAPIC ioapic={} pin={} level={} polarity={} vec_arg={} irq={} vector={}",
+        ioapic_id, pin, level, polarity, vector_arg, irq, vector
+    );
+    ioapic::map_pin_to_irq(pin, irq, level != 0, polarity != 0, vector as u8);
+    issue_irq_handler(thread, src_slot, irq, index, depth, uc)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn handle_io_port_control(
+    thread: &Thread,
+    src_slot: *mut Cte,
+    _cap: Cap,
+    label_id: u64,
+    length: u64,
+    uc: &mut UserContext,
+) -> Result<(), SyscallError> {
+    if label_id != arch_inv::IO_PORT_CONTROL_ISSUE {
+        return Err(SyscallError::IllegalOperation);
+    }
+    if length < 4 {
+        return Err(SyscallError::TruncatedMessage);
+    }
+    require_extra_caps(uc, 1)?;
+
+    let first = (uc.mr(0) & 0xffff) as u16;
+    let last = (uc.mr(1) & 0xffff) as u16;
+    let index = uc.mr(2);
+    let depth = uc.mr(3);
+    if last < first {
+        debug!("IoPort Issue last < first {:#x}-{:#x}", first, last);
+        return Err(SyscallError::InvalidArgument);
+    }
+    if !crate::arch::x86_64::object::ioport::range_free(first, last) {
+        debug!("IoPort Issue range busy {:#x}-{:#x}", first, last);
+        return Err(SyscallError::RevokeFirst);
+    }
+
+    let root_cptr = read_extra_cap(thread, 0);
+    let (root_cap, _) =
+        cspace::lookup_cap(thread, root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
+    let dest = resolve_slot(root_cap, index, depth as u32)?;
+    unsafe {
+        let _cspace_guard = crate::object::cnode::lock_cspace();
+        if !(*dest).cap.is_null() {
+            return Err(SyscallError::DeleteFirst);
+        }
+    }
+
+    debug!(
+        "IoPort Issue {:#x}-{:#x} index={:#x} depth={}",
+        first, last, index, depth
+    );
+    crate::arch::x86_64::object::ioport::alloc_range(first, last);
+    unsafe {
+        let cspace_guard = crate::object::cnode::lock_cspace();
+        if !(*dest).cap.is_null() {
+            crate::arch::x86_64::object::ioport::free_range(first, last);
+            return Err(SyscallError::DeleteFirst);
+        }
+        crate::object::cnode::cte_insert_locked(
+            &cspace_guard,
+            Cap::new_io_port(u64::from(first), u64::from(last)),
+            src_slot,
+            dest,
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn handle_io_port(
+    _thread: &Thread,
+    cap: Cap,
+    label_id: u64,
+    length: u64,
+    uc: &mut UserContext,
+) -> Result<(), SyscallError> {
+    use crate::arch::x86_64::machine::ioport;
+
+    match label_id {
+        arch_inv::IO_PORT_IN8 | arch_inv::IO_PORT_IN16 | arch_inv::IO_PORT_IN32 => {
+            if length < 1 {
+                return Err(SyscallError::TruncatedMessage);
+            }
+            let port = (uc.mr(0) & 0xffff) as u16;
+            let size = match label_id {
+                arch_inv::IO_PORT_IN8 => 1,
+                arch_inv::IO_PORT_IN16 => 2,
+                _ => 4,
+            };
+            if !cap.io_port_covers(port, size) {
+                debug!(
+                    "IoPort In denied port={:#x} size={} cap={:#x}-{:#x}",
+                    port,
+                    size,
+                    cap.io_port_first(),
+                    cap.io_port_last()
+                );
+                return Err(SyscallError::IllegalOperation);
+            }
+            let value = match label_id {
+                arch_inv::IO_PORT_IN8 => u64::from(ioport::in8(port)),
+                arch_inv::IO_PORT_IN16 => u64::from(ioport::in16(port)),
+                _ => u64::from(ioport::in32(port)),
+            };
+            debug!("IoPort In{:#x} port={:#x} -> {:#x}", size, port, value);
+            write_reply_mr0(uc, value);
+            Ok(())
+        }
+        arch_inv::IO_PORT_OUT8 | arch_inv::IO_PORT_OUT16 | arch_inv::IO_PORT_OUT32 => {
+            if length < 2 {
+                return Err(SyscallError::TruncatedMessage);
+            }
+            let port = (uc.mr(0) & 0xffff) as u16;
+            let raw = uc.mr(1);
+            let (size, data) = match label_id {
+                arch_inv::IO_PORT_OUT8 => (1, raw & 0xff),
+                arch_inv::IO_PORT_OUT16 => (2, raw & 0xffff),
+                _ => (4, raw & 0xffff_ffff),
+            };
+            if !cap.io_port_covers(port, size) {
+                return Err(SyscallError::IllegalOperation);
+            }
+            debug!("IoPort Out{:#x} port={:#x} data={:#x}", size, port, data);
+            match label_id {
+                arch_inv::IO_PORT_OUT8 => ioport::out8(port, data as u8),
+                arch_inv::IO_PORT_OUT16 => ioport::out16(port, data as u16),
+                _ => ioport::out32(port, data as u32),
+            }
+            Ok(())
+        }
+        _ => Err(SyscallError::IllegalOperation),
+    }
 }
 
 pub fn handle_irq_handler(
@@ -1217,10 +1443,13 @@ fn handle_thread_inner(
                     // mr_i for i=4..mr_count holds frameRegister/gpRegister
                     // value at slot (i-2) of seL4_UserContext.
                     for i in 4..mr_count {
-                        let mr_val = crate::api::thread::current_ipc_buffer_word(1 + i);
                         let ctx_idx = i - 2;
+                        if ctx_idx >= SEL4_USER_CONTEXT_ABI_WORDS {
+                            break;
+                        }
+                        let mr_val = crate::api::thread::current_ipc_buffer_word(1 + i);
                         let target_idx = SEL4_USER_CONTEXT_REGS[ctx_idx];
-                        if target_idx != 0 {
+                        if target_idx < reg_updates.len() {
                             reg_updates[target_idx] = mr_val;
                             reg_update_valid[target_idx] = true;
                         }
@@ -1452,6 +1681,9 @@ fn snapshot_tcb_copy_registers(
 
     if transfer_integer {
         for &reg in &SEL4_TCB_GP_REGS {
+            if reg == 0 {
+                continue;
+            }
             copied.regs[copied.reg_count] =
                 (reg, tcb::user_context_word_snapshot(src, usize::MAX, reg));
             copied.reg_count += 1;
@@ -2031,7 +2263,9 @@ fn cnode_op_copy_or_mint(
 
 pub(crate) fn derive_cap_for_copy(slot: *mut Cte, mut cap: Cap) -> Result<Cap, SyscallError> {
     match cap.tag() {
-        Some(CapTag::Zombie) | Some(CapTag::IrqControl) => Ok(Cap::null()),
+        Some(CapTag::Zombie) | Some(CapTag::IrqControl) | Some(CapTag::IoPortControl) => {
+            Ok(Cap::null())
+        }
         Some(CapTag::Untyped) => {
             let cspace_guard = crate::object::cnode::lock_cspace();
             if unsafe { crate::object::cnode::mdb_has_children_locked(&cspace_guard, slot) } {
@@ -2673,7 +2907,10 @@ unsafe fn is_final_capability(_cspace_guard: &CspaceLockGuard, slot: *mut Cte) -
 /// caps, arch caps use their architecture-specific object identity, and other
 /// caps follow `sameRegionAs`.
 fn same_object_as(a: Cap, b: Cap) -> bool {
-    if matches!(a.tag(), Some(CapTag::Untyped | CapTag::IrqControl)) {
+    if matches!(
+        a.tag(),
+        Some(CapTag::Untyped | CapTag::IrqControl | CapTag::IoPortControl)
+    ) {
         return false;
     }
 
@@ -2689,6 +2926,9 @@ fn same_object_as(a: Cap, b: Cap) -> bool {
         (Some(CapTag::Reply), Some(CapTag::Reply)) => a.reply_object_ptr() == b.reply_object_ptr(),
         (Some(CapTag::IrqHandler), Some(CapTag::IrqHandler)) => {
             a.irq_handler_irq() == b.irq_handler_irq()
+        }
+        (Some(CapTag::IoPort), Some(CapTag::IoPort)) => {
+            a.io_port_first() == b.io_port_first() && a.io_port_last() == b.io_port_last()
         }
         (Some(CapTag::Domain), Some(CapTag::Domain)) => true,
         (Some(CapTag::AsidControl), Some(CapTag::AsidControl)) => true,
@@ -2891,6 +3131,15 @@ fn finalize_cap(
                     crate::object::irq::deleting_handler(cap.irq_handler_irq());
                 }
                 return Ok(FinaliseCapResult::with_cleanup(Cap::null(), cap));
+            }
+        }
+        Some(CapTag::IoPort) => {
+            if is_final {
+                #[cfg(target_arch = "x86_64")]
+                crate::arch::x86_64::object::ioport::free_range(
+                    cap.io_port_first(),
+                    cap.io_port_last(),
+                );
             }
         }
         _ => {}

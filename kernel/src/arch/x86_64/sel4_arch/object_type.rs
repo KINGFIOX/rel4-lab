@@ -7,7 +7,9 @@
 use crate::abi::constants::{
     SEL4_ENDPOINT_BITS, SEL4_NOTIFICATION_BITS, SEL4_REPLY_BITS, SEL4_SLOT_BITS, SEL4_TCB_BITS,
 };
-use crate::object::cap::{Cap, FRAME_RIGHTS_READ_WRITE, FRAME_SIZE_4K, FRAME_SIZE_MEGAPAGE};
+use crate::object::cap::{
+    Cap, FRAME_RIGHTS_READ_WRITE, FRAME_SIZE_4K, FRAME_SIZE_GIGAPAGE, FRAME_SIZE_MEGAPAGE,
+};
 
 #[repr(u64)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -19,11 +21,12 @@ pub enum ObjectType {
     CapTable = 4,
     Pdpt = 5,
     Pml4 = 6,
-    FourKPage = 7,
-    LargePage = 8,
-    PageTable = 9,
-    PageDirectory = 10,
-    Reply = 11,
+    HugePage = 7,
+    FourKPage = 8,
+    LargePage = 9,
+    PageTable = 10,
+    PageDirectory = 11,
+    Reply = 12,
 }
 
 impl ObjectType {
@@ -36,11 +39,12 @@ impl ObjectType {
             4 => Some(Self::CapTable),
             5 => Some(Self::Pdpt),
             6 => Some(Self::Pml4),
-            7 => Some(Self::FourKPage),
-            8 => Some(Self::LargePage),
-            9 => Some(Self::PageTable),
-            10 => Some(Self::PageDirectory),
-            11 => Some(Self::Reply),
+            7 => Some(Self::HugePage),
+            8 => Some(Self::FourKPage),
+            9 => Some(Self::LargePage),
+            10 => Some(Self::PageTable),
+            11 => Some(Self::PageDirectory),
+            12 => Some(Self::Reply),
             _ => None,
         }
     }
@@ -55,11 +59,15 @@ impl ObjectType {
             Self::Reply => SEL4_REPLY_BITS as u64,
             Self::FourKPage | Self::PageTable | Self::PageDirectory | Self::Pdpt | Self::Pml4 => 12,
             Self::LargePage => 21,
+            Self::HugePage => 30,
         }
     }
 
     pub fn device_retype_allowed(self) -> bool {
-        matches!(self, Self::Untyped | Self::FourKPage | Self::LargePage)
+        matches!(
+            self,
+            Self::Untyped | Self::FourKPage | Self::LargePage | Self::HugePage
+        )
     }
 
     pub fn create_cap(self, region_base: u64, user_size: u64, is_device: bool) -> Cap {
@@ -75,6 +83,12 @@ impl ObjectType {
             Self::LargePage => Cap::new_frame(
                 region_base,
                 FRAME_SIZE_MEGAPAGE,
+                FRAME_RIGHTS_READ_WRITE,
+                is_device,
+            ),
+            Self::HugePage => Cap::new_frame(
+                region_base,
+                FRAME_SIZE_GIGAPAGE,
                 FRAME_RIGHTS_READ_WRITE,
                 is_device,
             ),

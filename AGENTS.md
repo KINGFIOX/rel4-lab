@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository is a Rust workspace for an RV64 seL4-style microkernel with an x86_64 QEMU pc99 user bring-up and a user-space Linux RV64 compatibility stack (RISC-V). `kernel/` contains the kernel crate, with subsystem modules under `kernel/src/` such as `arch/`, `object/`, `api/`, `machine/`, and `abi/`. Architecture backends live under `kernel/src/arch/{riscv64,x86_64}` using a seL4-style compile-time `sel4_arch` / `machine` / `plat` split. `userspace/` contains no_std user libraries and servers: `sel4-user`, `uart-server`, `vfs-server`, `linux-compat`, and `linux-abi`. Build, QEMU, packing, and test helpers live in `tools/`. Current-state notes are in `docs/`. Vendored external code is under `third_party/`; avoid changing it unless the task explicitly concerns upstream LTP or seL4 lab material.
+This repository is a Rust workspace for an RV64 seL4-style microkernel with an x86_64 QEMU pc99 bring-up and a user-space Linux compatibility stack on both architectures. `kernel/` contains the kernel crate, with subsystem modules under `kernel/src/` such as `arch/`, `object/`, `api/`, `machine/`, and `abi/`. Architecture backends live under `kernel/src/arch/{riscv64,x86_64}` using a seL4-style compile-time `sel4_arch` / `machine` / `plat` split. `userspace/` contains no_std user libraries and servers: `sel4-user`, `uart-server`, `vfs-server`, `linux-compat`, and `linux-abi`. Build, QEMU, packing, and test helpers live in `tools/`. Current-state notes are in `docs/`. Vendored external code is under `third_party/`; avoid changing it unless the task explicitly concerns upstream LTP or seL4 lab material.
 
 ## Build, Test, and Development Commands
 
@@ -24,6 +24,11 @@ cargo build --release --target x86_64-unknown-none -p kernel
 ./tools/run-tests.py
 ./tools/build-linux-rootfs.py
 TIMEOUT=180 ARCH=riscv64 ./tools/run-ltp.py
+TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 ./tools/run-hello.py
+TIMEOUT=60 ARCH=x86_64 SMP=ON NUM_NODES=2 ./tools/run-hello.py
+ARCH=x86_64 SMP=OFF NUM_NODES=1 ./tools/pack-image.py
+TIMEOUT=90 ARCH=x86_64 SMP=OFF NUM_NODES=1 ./tools/run-tests.py
+TIMEOUT=180 ARCH=x86_64 ./tools/run-ltp.py
 ```
 
 `pack-image.py` inserts the Rust kernel into the seL4 test image. `simulate.py` boots QEMU interactively. `run-tests.py` runs the packed seL4 tests headlessly.
@@ -34,7 +39,7 @@ Follow standard Rust formatting with `cargo fmt`; the workspace uses the stable 
 
 ## Testing Guidelines
 
-There is no conventional `tests/` tree; validation is primarily through workspace checks, seL4 test images, and linux-compat LTP programs. Run `cargo check` for fast Rust validation, then choose the smallest QEMU test that covers the change. For seL4 regressions, use `SEL4TEST_REGEX='SCHED0003' ./tools/pack-image.py` followed by `./tools/run-tests.py`. For Linux syscall behavior, use `TIMEOUT=180 ARCH=riscv64 ./tools/run-ltp.py`. The x86 gate is `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 ./tools/run-hello.py`.
+There is no conventional `tests/` tree; validation is primarily through workspace checks, seL4 test images, and linux-compat LTP programs. Run `cargo check` for fast Rust validation, then choose the smallest QEMU test that covers the change. For seL4 regressions, use `SEL4TEST_REGEX='SCHED0003' ./tools/pack-image.py` followed by `./tools/run-tests.py`. For Linux syscall behavior, use `TIMEOUT=180 ARCH=riscv64 ./tools/run-ltp.py` or `TIMEOUT=180 ARCH=x86_64 ./tools/run-ltp.py`. x86 gates are hello-rootserver, a narrow unicore sel4test pack/run, and `ARCH=x86_64 run-ltp.py`.
 
 ## Commit & Pull Request Guidelines
 

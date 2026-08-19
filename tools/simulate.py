@@ -11,7 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tool_common import ROOT_DIR, getenv, qemu_smp_arg, require_target_executable_elf, run
 from target_config import (
     image_name_from_env,
+    platform_from_env,
     rust_target_from_env,
+    sel4_arch_from_env,
     sel4_build_dir_from_env,
     sel4_tree_dir_from_env,
     target_from_env,
@@ -56,12 +58,36 @@ def main(argv: list[str]) -> int:
             print("run tools/pack-image.py first", file=sys.stderr)
             return 1
         require_target_executable_elf("simulate", target, packed_image, "packed image")
-        cmd = [
-            *target.qemu_base_cmd(smp, "3072"),
-            "-kernel",
-            str(packed_image),
-            *argv,
-        ]
+        if target.name == "x86_64":
+            kernel_image = Path(
+                getenv(
+                    "KERNEL_IMAGE",
+                    str(
+                        ROOT_DIR
+                        / "images"
+                        / f"kernel-{sel4_arch_from_env(target)}-{platform_from_env(target)}"
+                    ),
+                )
+            )
+            if not kernel_image.is_file():
+                print(f"x86 kernel image not found at {kernel_image}", file=sys.stderr)
+                print("run tools/pack-image.py first", file=sys.stderr)
+                return 1
+            cmd = [
+                *target.qemu_base_cmd(smp, "512M"),
+                "-kernel",
+                str(kernel_image),
+                "-initrd",
+                str(packed_image),
+                *argv,
+            ]
+        else:
+            cmd = [
+                *target.qemu_base_cmd(smp, "3072"),
+                "-kernel",
+                str(packed_image),
+                *argv,
+            ]
     else:
         print(f"unknown MODE={mode}", file=sys.stderr)
         return 1

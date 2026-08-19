@@ -302,6 +302,7 @@ pub unsafe fn prepare_user_page_table_map(
     root: *mut PageTable,
     vaddr: usize,
     pt_kva: *mut PageTable,
+    expected_coverage: Option<usize>,
 ) -> Result<PreparedUserPageTableMap, UserMapError> {
     if root.is_null() || pt_kva.is_null() || vaddr >= USER_TOP {
         return Err(UserMapError::InvalidArgument);
@@ -311,7 +312,14 @@ pub unsafe fn prepare_user_page_table_map(
     let _guard = lock_vspace(root);
     let lookup = unsafe { lookup_pt_slot_user(root, vaddr)? };
     let entry = unsafe { *lookup.slot };
-    if lookup.bits_left == RISCV_PG_SHIFT || entry.is_valid() {
+    if let Some(bits) = expected_coverage.filter(|bits| *bits != 0) {
+        if lookup.bits_left != bits {
+            return Err(UserMapError::FailedLookup(lookup.bits_left));
+        }
+    } else if lookup.bits_left == RISCV_PG_SHIFT {
+        return Err(UserMapError::DeleteFirst);
+    }
+    if entry.is_valid() {
         return Err(UserMapError::DeleteFirst);
     }
 

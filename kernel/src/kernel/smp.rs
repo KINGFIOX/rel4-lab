@@ -225,7 +225,7 @@ pub extern "C" fn kernel_unlock_for_user_restore() {
 }
 
 #[inline]
-fn kernel_stack_top_for_core(core_id: usize) -> usize {
+pub fn kernel_stack_top_for_core(core_id: usize) -> usize {
     let stack_top = unsafe { &__stack_top as *const u8 as usize };
     stack_top - core_id * KERNEL_STACK_BYTES
 }
