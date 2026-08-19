@@ -32,7 +32,9 @@ target
 /third_party/sel4test/.sel4_cache/
 /third_party/sel4test/build-*/
 
-/.cursor
+# Cursor local state; project skills stay tracked under .cursor/skills.
+/.cursor/*
+!/.cursor/skills/
 /.vscode
 
 .DS_Store
