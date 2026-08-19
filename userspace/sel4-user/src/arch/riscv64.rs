@@ -1,7 +1,8 @@
 use core::arch::asm;
 
 use crate::{
-    SYS_CALL, SYS_DEBUG_HALT, SYS_DEBUG_PUT_CHAR, SYS_REPLY, SYS_REPLY_RECV, SYS_SEND, SYS_YIELD,
+    SYS_CALL, SYS_DEBUG_HALT, SYS_DEBUG_PUT_CHAR, SYS_REPLY, SYS_REPLY_RECV, SYS_SEND,
+    SYS_SET_TLS_BASE, SYS_YIELD, ThreadCtl,
 };
 
 pub(crate) const KERNEL_TIMER_IRQ: u64 = 96;
@@ -198,4 +199,26 @@ pub(crate) unsafe fn debug_halt() {
             options(nostack)
         );
     }
+}
+
+#[inline(always)]
+pub(crate) unsafe fn set_tls_base(tls_base: u64) {
+    unsafe {
+        asm!(
+            "ecall",
+            inlateout("a0") tls_base => _,
+            inlateout("a7") SYS_SET_TLS_BASE => _,
+            clobber_abi("C"),
+            options(nostack)
+        );
+    }
+}
+
+#[inline(always)]
+pub(crate) unsafe fn thread_ctl() -> *mut ThreadCtl {
+    let tp: u64;
+    unsafe {
+        asm!("mv {}, tp", out(reg) tp, options(nomem, nostack, preserves_flags));
+    }
+    tp as *mut ThreadCtl
 }

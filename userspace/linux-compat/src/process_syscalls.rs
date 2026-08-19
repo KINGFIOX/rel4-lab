@@ -6,9 +6,7 @@ use crate::child::{
     write_user_context,
 };
 use crate::consts::*;
-use crate::io_syscalls::{
-    clear_wait_block, drop_blocked_reply_caps, pump_vfs_waiters, save_blocked_reply,
-};
+use crate::io_syscalls::{clear_wait_block, drop_blocked_reply_caps, save_blocked_reply};
 use crate::memory_syscalls::{
     release_all_sparse_eager, reserve_sparse_eager, sparse_eager_can_clone,
 };
@@ -144,8 +142,11 @@ pub(crate) fn sys_wait4(
     options: u32,
     _rusage: u64,
     mrs: &[u64; 64],
+    reply_slot: u64,
 ) -> SyscallResult {
-    wait_common(alloc, procs, proc_idx, wait_pid, status_ptr, options, mrs)
+    wait_common(
+        alloc, procs, proc_idx, wait_pid, status_ptr, options, mrs, reply_slot,
+    )
 }
 
 pub(crate) fn sys_waitid(
@@ -157,13 +158,16 @@ pub(crate) fn sys_waitid(
     infop: u64,
     options: u32,
     mrs: &[u64; 64],
+    reply_slot: u64,
 ) -> SyscallResult {
     let wait_pid = match which {
         P_ALL => -1,
         P_PID => pid,
         _ => return SyscallResult::err(EINVAL),
     };
-    match wait_common(alloc, procs, proc_idx, wait_pid, 0, options, mrs) {
+    match wait_common(
+        alloc, procs, proc_idx, wait_pid, 0, options, mrs, reply_slot,
+    ) {
         SyscallResult::Reply(ret) if ret > 0 && infop != 0 => {
             let mut info = [0u8; 128];
             write_i32(&mut info, 0, SIGCHLD as i32);
@@ -186,6 +190,7 @@ fn wait_common(
     status_ptr: u64,
     options: u32,
     mrs: &[u64; 64],
+    reply_slot: u64,
 ) -> SyscallResult {
     let parent_pid = procs[proc_idx].pid;
     let mut has_child = false;
@@ -219,7 +224,7 @@ fn wait_common(
         return SyscallResult::Reply(0);
     }
 
-    let (reply_slot, reply_mrs) = save_blocked_reply(mrs);
+    let (reply_slot, reply_mrs) = save_blocked_reply(reply_slot, mrs);
     procs[proc_idx].state = PROC_WAITING;
     procs[proc_idx].wait_status_ptr = status_ptr;
     procs[proc_idx].wait_pid = wait_pid;
@@ -337,7 +342,6 @@ fn make_zombie_process(
     drop_blocked_reply_caps(&mut procs[proc_idx]);
     procs[proc_idx].state = PROC_ZOMBIE;
     procs[proc_idx].exit_status = status;
-    pump_vfs_waiters(alloc, procs);
     reparent_children(alloc, procs, pid);
     reply_waiting_parent(alloc, procs, proc_idx);
 }

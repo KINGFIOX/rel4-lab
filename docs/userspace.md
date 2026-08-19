@@ -17,7 +17,7 @@ labels, and uart-server `DebugPutChar` (no first-wave IoPort).
 | sel4-user | `userspace/sel4-user` | IPC wrappers, boot constants, `log` macros, `rt` |
 | hello-rootserver | `userspace/hello-rootserver` | Minimal rootserver: banner, Untyped_Retype Endpoint, NBRecv, `hello-rootserver: ok` |
 | linux-abi | `userspace/linux-abi` | Arch syscall numbers, errno, VFS/UART opcodes, platform MMIO |
-| linux-compat | `userspace/linux-compat` | Rootserver: fault loop, process table, Linux syscall dispatch |
+| linux-compat | `userspace/linux-compat` | Rootserver: async fault reactor, process table, Linux syscall dispatch |
 | vfs-server | `userspace/vfs-server` | ramfs, pipes, console routing, UART client |
 | uart-server | `userspace/uart-server` | 16550 MMIO on RISC-V; `DebugPutChar` on x86 |
 
@@ -28,7 +28,8 @@ a newc cpio by `tools/build-linux-rootfs.py`.
 
 `linux-compat/src/main.rs::run` allocates, creates a fault endpoint, embeds
 and starts uart-server and vfs-server, initializes ramfs, creates pid 1,
-loads `/ltp-wave1` from ramfs, then waits on the fault endpoint.
+loads `/ltp-wave1` from ramfs, then enters `sel4-user::rt::run`. The idle
+callback receives on the fault endpoint and `spawn`s one task per fault.
 
 Server spawn order (`spawn_service_servers`):
 
@@ -54,9 +55,10 @@ Wave-1 coverage includes `exit`/`exit_group`, `write`, `openat`/`close`,
 `clock_gettime`, `dup`/`dup3`, `pipe2`, plus musl-facing `brk`/`mmap`/
 `mprotect`/`set_tid_address`/`set_robust_list`/`prctl`.
 
-`pause`/`nanosleep` only `Yield`. They do not depend on timeslice
-preemption. On x86 the host binds the LAPIC timer with `IRQIssueIRQHandler`
-so `clock_gettime` can count ticks.
+`nanosleep` waits on the 10ms tick clock through `rt::time::sleep_until`.
+`pause` still only `Yield`. Neither depends on timeslice preemption. On x86
+the host binds the LAPIC timer with `IRQIssueIRQHandler` so `clock_gettime`
+and sleep can count ticks.
 
 ## Exec and ELF
 
@@ -81,12 +83,11 @@ Opcodes are `linux-abi` enums (`VfsOp`, `UartOp`) and `IpcProtocol` tags
 Concurrency limits in the sources:
 
 - Each server loop stages one reply cap (`reply_pending`).
-- Host VFS client: `VFS_ASYNC_REQUEST_CAP = 16` (`linux-compat/src/vfs.rs`).
-- Fork/exec/IO syscalls listed in `should_defer_vfs_syscall` wait while a
-  VFS async request is in flight.
-
-`sel4-user::rt` is used by vfs-server. uart-server and linux-compat use a
-synchronous receive loop.
+- Host VFS client serializes shared-buffer RPC with `rt::AsyncLock`.
+- `sel4-user::rt` provides task spawn, a yielding spinlock, `WaitCell`,
+  and optional worker threads (`NUM_WORKER_THREADS` in
+  `linux-compat/src/threads.rs`). vfs-server still uses `rt::block_on`.
+  uart-server keeps a synchronous receive loop.
 
 ## ramfs and console
 
@@ -103,5 +104,5 @@ console (QEMU pci-serial). On x86 both paths land on COM1.
 ## Not in the tree
 
 - complete LTP, networking, ptrace, `/proc`
-- tick-accurate `nanosleep`
+- sub-tick `nanosleep` resolution (sleep is 10ms tick based)
 - `println!` runtime logging (only Cargo `println!` in `build.rs`)

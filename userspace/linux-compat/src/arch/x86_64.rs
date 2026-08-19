@@ -30,6 +30,15 @@ const VM_FAULT_STATUS: usize = 3;
 
 const USER_RFLAGS: u64 = 0x202;
 
+pub(crate) fn new_worker_context(
+    entry: u64,
+    stack_pointer: u64,
+    arg0: u64,
+    _gp: u64,
+) -> [u64; USER_CONTEXT_WORDS] {
+    new_user_context(entry, stack_pointer, arg0, 0)
+}
+
 pub(crate) fn new_user_context(
     entry: u64,
     stack_pointer: u64,

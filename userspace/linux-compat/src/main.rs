@@ -14,11 +14,13 @@ mod child;
 mod consts;
 mod exec_syscalls;
 mod fs_syscalls;
+mod host;
 mod io_syscalls;
 mod linux;
 mod memory_syscalls;
 mod process_syscalls;
 mod reply_caps;
+mod threads;
 mod types;
 mod util;
 mod vfs;
@@ -44,14 +46,14 @@ use consts::{
 };
 use consts::{LABEL_TCB_BIND_NOTIFICATION, PAGE_SIZE, ROOT_CNODE_DEPTH};
 use consts::{
-    PROC_RUNNABLE, PROC_UNUSED, PROC_VFS_DEFERRED, ROOT_CNODE, SERVER_CNODE_CPTR,
-    SERVER_RECV_REPLY_CPTR, SERVICE_UNTYPED_BITS, VM_ATTR_UNCACHED,
+    PROC_RUNNABLE, PROC_WAITING, ROOT_CNODE, SERVER_CNODE_CPTR, SERVER_RECV_REPLY_CPTR,
+    SERVICE_UNTYPED_BITS, VM_ATTR_UNCACHED,
 };
 use exec_syscalls::load_init_program;
-use linux::{handle_linux_fault, handle_linux_syscall};
+use linux::handle_linux_syscall;
 use sel4_user::{
-    call_checked, cap_rights, cnode_cap_data, init_ipc_buffer, msg_info, msg_label, sel4_call,
-    sel4_recv_with_reply, sel4_reply_recv_with_reply,
+    call_checked, cap_rights, cnode_cap_data, init_ipc_buffer, msg_info, msg_label, rt, sel4_call,
+    sel4_recv_with_reply,
 };
 use types::{BootInfo, SyscallResult, TaskStruct};
 use util::{error, halt_loop, info, init_logger, warn};
@@ -62,7 +64,7 @@ struct ProcessTable {
     procs: UnsafeCell<[TaskStruct; MAX_PROCS]>,
 }
 
-// linux-compat mutates the process table from the single rootserver fault loop.
+// Process table mutation is serialized by `host::with_host`.
 unsafe impl Sync for ProcessTable {}
 
 impl ProcessTable {
@@ -77,7 +79,7 @@ impl ProcessTable {
     }
 }
 
-static PROCESS_TABLE: ProcessTable = ProcessTable::new();
+pub(crate) static PROCESS_TABLE: ProcessTable = ProcessTable::new();
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(bootinfo: usize) -> ! {
@@ -118,157 +120,99 @@ fn run(bi_ptr: *const BootInfo) -> ! {
     load_init_program(&mut alloc, &mut procs[0], INIT_PATH);
 
     info!("linux-compat: waiting for fault IPC");
-    let mut pending_reply: Option<(u64, [u64; host_arch::FAULT_REPLY_WORDS])> = None;
-    loop {
-        let msg = if let Some((reply_info, reply_mrs)) = pending_reply.take() {
-            let reply_slot = reply_caps::take_current();
-            let msg =
-                unsafe { sel4_reply_recv_with_reply(fault_ep, reply_info, &reply_mrs, reply_slot) };
-            reply_caps::set_current(reply_slot);
-            msg
-        } else {
-            let reply_slot = reply_caps::acquire();
-            let msg = unsafe { sel4_recv_with_reply(fault_ep, reply_slot) };
-            reply_caps::set_current(reply_slot);
-            msg
-        };
-
-        if (msg.badge & IpcBadge::VfsReply.raw()) != 0 {
-            if let Some(pump_waiters) = linux::complete_vfs_async_reply(&mut alloc, procs, &msg) {
-                reply_caps::release_current();
-                if pump_waiters {
-                    linux::pump_vfs_waiters(&mut alloc, procs);
-                }
-                linux::pump_sleep_waiters(procs);
-                pump_deferred_syscalls(&mut alloc, procs);
-                continue;
-            }
-        }
-
-        let label = msg_label(msg.info);
-        if label == 0 {
-            reply_caps::release_current();
-            linux::tick();
-            linux::pump_vfs_waiters(&mut alloc, procs);
-            linux::pump_sleep_waiters(procs);
-            continue;
-        }
-        let Some(proc_idx) = find_proc_by_pid(procs, msg.badge) else {
-            warn!("linux-compat: fault from unknown pid={}", msg.badge);
-            halt_loop();
-        };
-
-        if label == FAULT_UNKNOWN_SYSCALL
-            && linux::has_active_vfs_async_requests()
-            && linux::should_defer_vfs_syscall(&msg.mrs)
-        {
-            defer_vfs_syscall(&mut procs[proc_idx], &msg.mrs);
-            continue;
-        }
-
-        let result = if label == FAULT_UNKNOWN_SYSCALL {
-            if !SAW_FAULT_IPC.swap(true, Ordering::Relaxed) {
-                info!("linux-compat: UnknownSyscall fault IPC");
-            }
-            handle_linux_syscall(&mut alloc, procs, proc_idx, &msg.mrs)
-        } else {
-            if label != FAULT_VM_FAULT {
-                warn!("linux-compat: non-syscall fault label={}", label);
-            }
-            handle_linux_fault(&mut alloc, procs, proc_idx, label, &msg.mrs)
-        };
-        linux::pump_vfs_waiters(&mut alloc, procs);
-        linux::pump_sleep_waiters(procs);
-
-        match result {
-            SyscallResult::Reply(ret) => {
-                let mut reply_mrs = host_arch::syscall_reply_frame(&msg.mrs);
-                host_arch::set_syscall_return_value(&mut reply_mrs, ret as u64);
-                pending_reply = Some((
-                    msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64),
-                    reply_mrs,
-                ));
-            }
-            SyscallResult::ReplyFrame(frame) => {
-                pending_reply = Some((
-                    msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64),
-                    frame,
-                ));
-            }
-            SyscallResult::Block => {
-                if reply_caps::has_current() {
-                    warn!("linux-compat: blocked syscall did not save its reply cap");
-                    halt_loop();
-                }
-            }
-            SyscallResult::Stop => {
-                let reply_slot = reply_caps::take_current();
-                reply_caps::stop_and_release(reply_slot);
-            }
-        }
-        pump_deferred_syscalls(&mut alloc, procs);
-    }
+    let wake_ntfn = alloc.retype_one(OBJ_NOTIFICATION, 0);
+    threads::install_main_tls(bi.ipc_buffer);
+    threads::start_workers(&mut alloc, wake_ntfn, bi.init_thread_cnode_size_bits);
+    host::init(alloc);
+    rt::set_wake_notification(wake_ntfn);
+    rt::run(|| reactor_idle(fault_ep));
 }
 
-fn defer_vfs_syscall(child: &mut TaskStruct, mrs: &[u64; 64]) {
-    let reply_slot = reply_caps::take_current();
-    child.deferred_reply_slot = reply_slot;
-    child.deferred_mrs = *mrs;
-    child.state = PROC_VFS_DEFERRED;
-}
+fn reactor_idle(fault_ep: u64) {
+    let reply_slot = reply_caps::acquire();
+    let msg = unsafe { sel4_recv_with_reply(fault_ep, reply_slot) };
 
-fn pump_deferred_syscalls(alloc: &mut Allocator, procs: &mut [TaskStruct; MAX_PROCS]) {
-    if linux::has_active_vfs_async_requests() {
+    if (msg.badge & IpcBadge::VfsReply.raw()) != 0 {
+        let _ = linux::complete_vfs_async_reply(&msg);
+        reply_caps::release(reply_slot);
         return;
     }
-    let mut i = 0usize;
-    while i < MAX_PROCS {
-        if procs[i].state == PROC_VFS_DEFERRED && procs[i].deferred_reply_slot != 0 {
-            let reply_slot = procs[i].deferred_reply_slot;
-            let mrs = procs[i].deferred_mrs;
-            procs[i].deferred_reply_slot = 0;
-            procs[i].deferred_mrs = [0; 64];
-            procs[i].state = PROC_RUNNABLE;
-            linux::use_deferred_reply_slot(reply_slot);
-            let result = handle_linux_syscall(alloc, procs, i, &mrs);
-            match result {
-                SyscallResult::Reply(ret) => {
-                    linux::use_deferred_reply_slot(0);
-                    let mut reply_mrs = host_arch::syscall_reply_frame(&mrs);
-                    host_arch::set_syscall_return_value(&mut reply_mrs, ret as u64);
-                    reply_caps::send_and_release(
-                        reply_slot,
-                        msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64),
-                        &reply_mrs,
-                    );
-                }
-                SyscallResult::ReplyFrame(frame) => {
-                    linux::use_deferred_reply_slot(0);
-                    reply_caps::send_and_release(
-                        reply_slot,
-                        msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64),
-                        &frame,
-                    );
-                }
-                SyscallResult::Block => {}
-                SyscallResult::Stop => {
-                    linux::use_deferred_reply_slot(0);
-                    reply_caps::stop_and_release(reply_slot);
-                }
-            }
-            return;
+
+    let label = msg_label(msg.info);
+    if label == 0 {
+        reply_caps::release(reply_slot);
+        linux::tick();
+        rt::time::advance(linux::ticks_now());
+        return;
+    }
+
+    let pid = msg.badge;
+    let mrs = msg.mrs;
+    rt::spawn(async move {
+        process_fault(pid, label, mrs, reply_slot).await;
+    });
+}
+
+async fn process_fault(pid: u64, label: u64, mrs: [u64; 64], reply_slot: u64) {
+    if host::with_host(|_, procs| host::find_proc(procs, pid)).is_none() {
+        warn!("linux-compat: fault from unknown pid={}", pid);
+        halt_loop();
+    }
+
+    let result = if label == FAULT_UNKNOWN_SYSCALL {
+        if !SAW_FAULT_IPC.swap(true, Ordering::Relaxed) {
+            info!("linux-compat: UnknownSyscall fault IPC");
         }
-        i += 1;
+        handle_linux_syscall(pid, &mrs, reply_slot).await
+    } else {
+        if label != FAULT_VM_FAULT {
+            warn!("linux-compat: non-syscall fault label={}", label);
+        }
+        linux::handle_linux_fault(pid, label, &mrs).await
+    };
+
+    finish_syscall(pid, &mrs, reply_slot, result);
+}
+
+fn finish_syscall(pid: u64, mrs: &[u64; 64], reply_slot: u64, result: SyscallResult) {
+    match result {
+        SyscallResult::Reply(ret) => {
+            if !process_can_reply(pid) {
+                reply_caps::stop_and_release(reply_slot);
+                return;
+            }
+            let mut reply_mrs = host_arch::syscall_reply_frame(mrs);
+            host_arch::set_syscall_return_value(&mut reply_mrs, ret as u64);
+            reply_caps::send_and_release(
+                reply_slot,
+                msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64),
+                &reply_mrs,
+            );
+        }
+        SyscallResult::ReplyFrame(frame) => {
+            if !process_can_reply(pid) {
+                reply_caps::stop_and_release(reply_slot);
+                return;
+            }
+            reply_caps::send_and_release(
+                reply_slot,
+                msg_info(0, 0, 0, host_arch::FAULT_REPLY_WORDS as u64),
+                &frame,
+            );
+        }
+        SyscallResult::Block => {}
+        SyscallResult::Stop => {
+            reply_caps::stop_and_release(reply_slot);
+        }
     }
 }
 
-fn find_proc_by_pid(procs: &[TaskStruct; MAX_PROCS], pid: u64) -> Option<usize> {
-    for i in 0..MAX_PROCS {
-        if procs[i].pid == pid && procs[i].state != PROC_UNUSED {
-            return Some(i);
-        }
-    }
-    None
+fn process_can_reply(pid: u64) -> bool {
+    host::with_host(|_, procs| {
+        host::find_proc(procs, pid)
+            .map(|idx| procs[idx].state == PROC_RUNNABLE || procs[idx].state == PROC_WAITING)
+            .unwrap_or(false)
+    })
 }
 
 type FrameMap = (u64, u64, bool, bool, u64);

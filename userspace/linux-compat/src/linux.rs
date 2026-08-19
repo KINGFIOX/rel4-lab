@@ -1,6 +1,5 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::allocator::Allocator;
 use crate::arch::current as arch;
 use crate::consts::*;
 use crate::exec_syscalls::sys_execve;
@@ -8,48 +7,20 @@ use crate::fs_syscalls::{
     sys_chdir, sys_close, sys_dup, sys_dup3, sys_fstat, sys_getcwd, sys_lseek, sys_mkdirat,
     sys_openat, sys_pipe2, sys_unlinkat,
 };
+use crate::host::{find_proc, with_host};
 use crate::io_syscalls::{
-    self, sys_clock_getres, sys_clock_gettime, sys_gettimeofday, sys_nanosleep, sys_read,
-    sys_write, sys_writev,
+    sys_clock_getres, sys_clock_gettime, sys_gettimeofday, sys_nanosleep, sys_read, sys_write,
+    sys_writev,
 };
 use crate::memory_syscalls::{handle_lazy_page_fault, sys_brk, sys_mmap, sys_mprotect, sys_munmap};
 use crate::process_syscalls::{
     fault_kill, sys_clone, sys_exit, sys_getpid, sys_getppid, sys_gettid, sys_kill,
     sys_set_tid_address, sys_uname, sys_wait4, sys_waitid,
 };
-use crate::types::{SyscallResult, TaskStruct};
+use crate::types::SyscallResult;
+use crate::vfs::{acquire_vfs, fd_file};
 
-pub(crate) use crate::io_syscalls::pump_vfs_waiters;
-pub(crate) use crate::vfs::{
-    complete_vfs_async_reply, has_active_vfs_async_requests, init_vfs_client, init_vfs_process,
-    use_deferred_reply_slot,
-};
-
-pub(crate) fn should_defer_vfs_syscall(mrs: &[u64; 64]) -> bool {
-    matches!(
-        arch::syscall_number(mrs),
-        SYS_CLONE
-            | SYS_EXIT
-            | SYS_EXIT_GROUP
-            | SYS_KILL
-            | SYS_READ
-            | SYS_WRITE
-            | SYS_READV
-            | SYS_WRITEV
-            | SYS_OPENAT
-            | SYS_CLOSE
-            | SYS_DUP
-            | SYS_DUP3
-            | SYS_FSTAT
-            | SYS_CHDIR
-            | SYS_PIPE2
-            | SYS_UNLINKAT
-            | SYS_MKDIRAT
-            | SYS_EXECVE
-            | SYS_GETCWD
-            | SYS_LSEEK
-    )
-}
+pub(crate) use crate::vfs::{complete_vfs_async_reply, init_vfs_client, init_vfs_process};
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
@@ -61,15 +32,10 @@ pub(crate) fn ticks_now() -> u64 {
     TICKS.load(Ordering::Relaxed)
 }
 
-pub(crate) fn pump_sleep_waiters(procs: &mut [TaskStruct; MAX_PROCS]) {
-    io_syscalls::pump_sleep_waiters(procs, ticks_now());
-}
-
-pub(crate) fn handle_linux_syscall(
-    alloc: &mut Allocator,
-    procs: &mut [TaskStruct; MAX_PROCS],
-    proc_idx: usize,
+pub(crate) async fn handle_linux_syscall(
+    pid: u64,
     mrs: &[u64; 64],
+    reply_slot: u64,
 ) -> SyscallResult {
     let sysno = arch::syscall_number(mrs);
     let a0 = arch::syscall_arg(mrs, 0);
@@ -80,80 +46,51 @@ pub(crate) fn handle_linux_syscall(
     let a5 = arch::syscall_arg(mrs, 5);
 
     match sysno {
-        SYS_GETCWD => sys_getcwd(alloc, &mut procs[proc_idx], a0, a1, mrs),
-        SYS_DUP => sys_dup(alloc, &mut procs[proc_idx], a0 as usize, mrs),
-        SYS_DUP3 => sys_dup3(
-            alloc,
-            &mut procs[proc_idx],
-            a0 as usize,
-            a1 as usize,
-            a2 as u32,
-            mrs,
-        ),
-        SYS_IOCTL => sys_ioctl(&procs[proc_idx], a0 as usize, a1),
-        SYS_MKDIRAT => sys_mkdirat(alloc, &mut procs[proc_idx], a0 as i32, a1, a2 as u32, mrs),
-        SYS_UNLINKAT => sys_unlinkat(alloc, &mut procs[proc_idx], a0 as i32, a1, a2 as u32, mrs),
-        SYS_CHDIR => sys_chdir(alloc, &mut procs[proc_idx], a0, mrs),
-        SYS_OPENAT => sys_openat(
-            alloc,
-            &mut procs[proc_idx],
-            a0 as i32,
-            a1,
-            a2 as u32,
-            a3 as u32,
-            mrs,
-        ),
-        SYS_CLOSE => sys_close(alloc, &mut procs[proc_idx], a0 as usize, mrs),
-        SYS_PIPE2 => sys_pipe2(alloc, &mut procs[proc_idx], a0, a1 as u32, mrs),
-        SYS_LSEEK => sys_lseek(alloc, &mut procs[proc_idx], a0 as usize, a1 as i64, a2, mrs),
-        SYS_READ => {
-            let result = sys_read(
-                alloc,
-                &mut procs[proc_idx],
-                a0 as usize,
-                a1,
-                a2 as usize,
-                mrs,
-            );
-            pump_vfs_waiters(alloc, procs);
-            result
+        SYS_GETCWD => sys_getcwd(pid, a0, a1),
+        SYS_DUP => sys_dup(pid, a0 as usize).await,
+        SYS_DUP3 => sys_dup3(pid, a0 as usize, a1 as usize, a2 as u32).await,
+        SYS_IOCTL => with_host(|_, procs| {
+            let Some(idx) = find_proc(procs, pid) else {
+                return SyscallResult::err(ESRCH);
+            };
+            sys_ioctl(&procs[idx], a0 as usize)
+        }),
+        SYS_MKDIRAT => sys_mkdirat(pid, a0 as i32, a1, a2 as u32).await,
+        SYS_UNLINKAT => sys_unlinkat(pid, a0 as i32, a1, a2 as u32).await,
+        SYS_CHDIR => sys_chdir(pid, a0).await,
+        SYS_OPENAT => sys_openat(pid, a0 as i32, a1, a2 as u32, a3 as u32).await,
+        SYS_CLOSE => sys_close(pid, a0 as usize).await,
+        SYS_PIPE2 => sys_pipe2(pid, a0, a1 as u32).await,
+        SYS_LSEEK => sys_lseek(pid, a0 as usize, a1 as i64, a2).await,
+        SYS_READ | SYS_READV => sys_read(pid, a0 as usize, a1, a2 as usize).await,
+        SYS_WRITE => sys_write(pid, a0 as usize, a1, a2 as usize).await,
+        SYS_WRITEV => sys_writev(pid, a0 as usize, a1, a2 as usize).await,
+        SYS_FSTAT => sys_fstat(pid, a0 as usize, a1).await,
+        SYS_EXIT | SYS_EXIT_GROUP => {
+            let _permit = acquire_vfs().await;
+            with_host(|alloc, procs| {
+                let Some(idx) = find_proc(procs, pid) else {
+                    return SyscallResult::err(ESRCH);
+                };
+                sys_exit(alloc, procs, idx, a0 as i32)
+            })
         }
-        SYS_WRITE => {
-            let result = sys_write(
-                alloc,
-                &mut procs[proc_idx],
-                a0 as usize,
-                a1,
-                a2 as usize,
-                mrs,
-            );
-            pump_vfs_waiters(alloc, procs);
-            result
-        }
-        SYS_WRITEV => sys_writev(
-            alloc,
-            &mut procs[proc_idx],
-            a0 as usize,
-            a1,
-            a2 as usize,
-            mrs,
-        ),
-        SYS_READV => sys_read(
-            alloc,
-            &mut procs[proc_idx],
-            a0 as usize,
-            a1,
-            a2 as usize,
-            mrs,
-        ),
-        SYS_FSTAT => sys_fstat(alloc, &mut procs[proc_idx], a0 as usize, a1, mrs),
-        SYS_EXIT | SYS_EXIT_GROUP => sys_exit(alloc, procs, proc_idx, a0 as i32),
-        SYS_WAITID => sys_waitid(
-            alloc, procs, proc_idx, a0 as u32, a1 as i64, a2, a3 as u32, mrs,
-        ),
-        SYS_SET_TID_ADDRESS => SyscallResult::Reply(sys_set_tid_address(&mut procs[proc_idx], a0)),
+        SYS_WAITID => with_host(|alloc, procs| {
+            let Some(idx) = find_proc(procs, pid) else {
+                return SyscallResult::err(ESRCH);
+            };
+            sys_waitid(
+                alloc, procs, idx, a0 as u32, a1 as i64, a2, a3 as u32, mrs, reply_slot,
+            )
+        }),
+        SYS_SET_TID_ADDRESS => with_host(|_, procs| {
+            let Some(idx) = find_proc(procs, pid) else {
+                return SyscallResult::err(ESRCH);
+            };
+            SyscallResult::Reply(sys_set_tid_address(&mut procs[idx], a0))
+        }),
         SYS_SET_ROBUST_LIST | SYS_GET_ROBUST_LIST => SyscallResult::Reply(0),
-        SYS_NANOSLEEP => sys_nanosleep(a0, a1),
+        SYS_NANOSLEEP => sys_nanosleep(pid, a0, a1).await,
         #[cfg(target_arch = "x86_64")]
         SYS_PAUSE => {
             unsafe {
@@ -161,41 +98,112 @@ pub(crate) fn handle_linux_syscall(
             }
             SyscallResult::Reply(0)
         }
-        SYS_CLOCK_GETTIME => sys_clock_gettime(alloc, &procs[proc_idx], a0, a1),
-        SYS_CLOCK_GETRES => sys_clock_getres(alloc, &procs[proc_idx], a0, a1),
-        SYS_CLOCK_NANOSLEEP => sys_nanosleep(a2, a3),
+        SYS_CLOCK_GETTIME => sys_clock_gettime(pid, a0, a1),
+        SYS_CLOCK_GETRES => sys_clock_getres(pid, a0, a1),
+        SYS_CLOCK_NANOSLEEP => sys_nanosleep(pid, a2, a3).await,
         SYS_SCHED_YIELD => {
             unsafe {
                 sel4_user::sel4_yield();
             }
             SyscallResult::Reply(0)
         }
-        SYS_KILL => SyscallResult::Reply(sys_kill(alloc, procs, a0 as i64, a1)),
+        SYS_KILL => {
+            let _permit = acquire_vfs().await;
+            with_host(|alloc, procs| SyscallResult::Reply(sys_kill(alloc, procs, a0 as i64, a1)))
+        }
         SYS_RT_SIGACTION | SYS_RT_SIGPROCMASK | SYS_RT_SIGRETURN => SyscallResult::Reply(0),
-        SYS_UNAME => sys_uname(alloc, &procs[proc_idx], a0),
+        SYS_UNAME => with_host(|alloc, procs| {
+            let Some(idx) = find_proc(procs, pid) else {
+                return SyscallResult::err(ESRCH);
+            };
+            sys_uname(alloc, &procs[idx], a0)
+        }),
         SYS_PRCTL => SyscallResult::Reply(0),
-        SYS_GETTIMEOFDAY => sys_gettimeofday(alloc, &procs[proc_idx], a0, a1),
-        SYS_GETPID => SyscallResult::Reply(sys_getpid(&procs[proc_idx])),
-        SYS_GETPPID => SyscallResult::Reply(sys_getppid(&procs[proc_idx])),
+        SYS_GETTIMEOFDAY => sys_gettimeofday(pid, a0, a1),
+        SYS_GETPID => with_host(|_, procs| {
+            let Some(idx) = find_proc(procs, pid) else {
+                return SyscallResult::err(ESRCH);
+            };
+            SyscallResult::Reply(sys_getpid(&procs[idx]))
+        }),
+        SYS_GETPPID => with_host(|_, procs| {
+            let Some(idx) = find_proc(procs, pid) else {
+                return SyscallResult::err(ESRCH);
+            };
+            SyscallResult::Reply(sys_getppid(&procs[idx]))
+        }),
         SYS_GETUID | SYS_GETEUID | SYS_GETGID | SYS_GETEGID => SyscallResult::Reply(0),
-        SYS_GETTID => SyscallResult::Reply(sys_gettid(&procs[proc_idx])),
-        SYS_BRK => SyscallResult::Reply(sys_brk(alloc, &mut procs[proc_idx], a0)),
-        SYS_MUNMAP => SyscallResult::Reply(sys_munmap(alloc, &mut procs[proc_idx], a0, a1)),
-        SYS_CLONE => sys_clone(alloc, procs, proc_idx, a0, a1, a2, a3, a4, mrs),
-        SYS_EXECVE => sys_execve(alloc, &mut procs[proc_idx], a0, a1, a2),
-        SYS_MMAP => SyscallResult::Reply(sys_mmap(
-            alloc,
-            &mut procs[proc_idx],
-            a0,
-            a1,
-            a2 as u32,
-            a3 as u32,
-            a4 as i32,
-            a5,
-        )),
-        SYS_MPROTECT => SyscallResult::Reply(sys_mprotect(&procs[proc_idx], a0, a1, a2 as u32)),
-        SYS_WAIT4 => sys_wait4(alloc, procs, proc_idx, a0 as i64, a1, a2 as u32, a3, mrs),
-        SYS_GETRANDOM => sys_getrandom(alloc, &procs[proc_idx], a0, a1 as usize, a2),
+        SYS_GETTID => with_host(|_, procs| {
+            let Some(idx) = find_proc(procs, pid) else {
+                return SyscallResult::err(ESRCH);
+            };
+            SyscallResult::Reply(sys_gettid(&procs[idx]))
+        }),
+        SYS_BRK => with_host(|alloc, procs| {
+            let Some(idx) = find_proc(procs, pid) else {
+                return SyscallResult::err(ESRCH);
+            };
+            SyscallResult::Reply(sys_brk(alloc, &mut procs[idx], a0))
+        }),
+        SYS_MUNMAP => with_host(|alloc, procs| {
+            let Some(idx) = find_proc(procs, pid) else {
+                return SyscallResult::err(ESRCH);
+            };
+            SyscallResult::Reply(sys_munmap(alloc, &mut procs[idx], a0, a1))
+        }),
+        SYS_CLONE => {
+            let _permit = acquire_vfs().await;
+            with_host(|alloc, procs| {
+                let Some(idx) = find_proc(procs, pid) else {
+                    return SyscallResult::err(ESRCH);
+                };
+                sys_clone(alloc, procs, idx, a0, a1, a2, a3, a4, mrs)
+            })
+        }
+        SYS_EXECVE => {
+            let _permit = acquire_vfs().await;
+            with_host(|alloc, procs| {
+                let Some(idx) = find_proc(procs, pid) else {
+                    return SyscallResult::err(ESRCH);
+                };
+                sys_execve(alloc, &mut procs[idx], a0, a1, a2)
+            })
+        }
+        SYS_MMAP => with_host(|alloc, procs| {
+            let Some(idx) = find_proc(procs, pid) else {
+                return SyscallResult::err(ESRCH);
+            };
+            SyscallResult::Reply(sys_mmap(
+                alloc,
+                &mut procs[idx],
+                a0,
+                a1,
+                a2 as u32,
+                a3 as u32,
+                a4 as i32,
+                a5,
+            ))
+        }),
+        SYS_MPROTECT => with_host(|_, procs| {
+            let Some(idx) = find_proc(procs, pid) else {
+                return SyscallResult::err(ESRCH);
+            };
+            SyscallResult::Reply(sys_mprotect(&procs[idx], a0, a1, a2 as u32))
+        }),
+        SYS_WAIT4 => with_host(|alloc, procs| {
+            let Some(idx) = find_proc(procs, pid) else {
+                return SyscallResult::err(ESRCH);
+            };
+            sys_wait4(
+                alloc, procs, idx, a0 as i64, a1, a2 as u32, a3, mrs, reply_slot,
+            )
+        }),
+        SYS_GETRANDOM => with_host(|alloc, procs| {
+            let Some(idx) = find_proc(procs, pid) else {
+                return SyscallResult::err(ESRCH);
+            };
+            sys_getrandom(alloc, &procs[idx], a0, a1 as usize, a2)
+        }),
         SYS_UMASK => SyscallResult::Reply(0o022),
         SYS_FCNTL | SYS_GETDENTS64 | SYS_NEWFSTATAT | SYS_STATX | SYS_LINKAT | SYS_MKNODAT
         | SYS_FACCESSAT | SYS_READLINKAT | SYS_PPOLL | SYS_FUTEX | SYS_CLONE3 | SYS_SOCKET
@@ -205,29 +213,42 @@ pub(crate) fn handle_linux_syscall(
     }
 }
 
-pub(crate) fn handle_linux_fault(
-    alloc: &mut Allocator,
-    procs: &mut [TaskStruct; MAX_PROCS],
-    proc_idx: usize,
-    label: u64,
-    mrs: &[u64; 64],
-) -> SyscallResult {
-    if label == FAULT_VM_FAULT {
-        let fault_addr = arch::vm_fault_addr(mrs);
-        let fsr = arch::vm_fault_status(mrs);
-        if handle_lazy_page_fault(alloc, &mut procs[proc_idx], fault_addr, fsr) {
-            return SyscallResult::ReplyFrame([0; arch::FAULT_REPLY_WORDS]);
+pub(crate) async fn handle_linux_fault(pid: u64, label: u64, mrs: &[u64; 64]) -> SyscallResult {
+    let handled = with_host(|alloc, procs| {
+        let Some(proc_idx) = find_proc(procs, pid) else {
+            return Some(SyscallResult::err(ESRCH));
+        };
+        if label == FAULT_VM_FAULT {
+            let fault_addr = arch::vm_fault_addr(mrs);
+            let fsr = arch::vm_fault_status(mrs);
+            if handle_lazy_page_fault(alloc, &mut procs[proc_idx], fault_addr, fsr) {
+                return Some(SyscallResult::ReplyFrame([0; arch::FAULT_REPLY_WORDS]));
+            }
+            warn!(
+                "linux-compat: unhandled VM fault pid={} addr={:#x} fsr={} heap_start={:#x} brk={:#x}",
+                procs[proc_idx].pid,
+                fault_addr,
+                fsr,
+                procs[proc_idx].heap_start,
+                procs[proc_idx].brk
+            );
         }
-        warn!(
-            "linux-compat: unhandled VM fault pid={} addr={:#x} fsr={} heap_start={:#x} brk={:#x}",
-            procs[proc_idx].pid, fault_addr, fsr, procs[proc_idx].heap_start, procs[proc_idx].brk
-        );
+        None
+    });
+    if let Some(result) = handled {
+        return result;
     }
-    fault_kill(alloc, procs, proc_idx, label)
+    let _permit = acquire_vfs().await;
+    with_host(|alloc, procs| {
+        let Some(proc_idx) = find_proc(procs, pid) else {
+            return SyscallResult::err(ESRCH);
+        };
+        fault_kill(alloc, procs, proc_idx, label)
+    })
 }
 
-fn sys_ioctl(child: &TaskStruct, fd: usize, _cmd: u64) -> SyscallResult {
-    if crate::vfs::fd_file(child, fd).is_none() {
+fn sys_ioctl(child: &crate::types::TaskStruct, fd: usize) -> SyscallResult {
+    if fd_file(child, fd).is_none() {
         return SyscallResult::err(EBADF);
     }
     if fd <= 2 {
@@ -237,8 +258,8 @@ fn sys_ioctl(child: &TaskStruct, fd: usize, _cmd: u64) -> SyscallResult {
 }
 
 fn sys_getrandom(
-    alloc: &mut Allocator,
-    child: &TaskStruct,
+    alloc: &mut crate::allocator::Allocator,
+    child: &crate::types::TaskStruct,
     buf: u64,
     len: usize,
     _flags: u64,

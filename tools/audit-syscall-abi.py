@@ -60,6 +60,7 @@ USER_TO_KERNEL_SYSCALLS = {
     "SYS_YIELD": "Yield",
     "SYS_DEBUG_PUT_CHAR": "DebugPutChar",
     "SYS_DEBUG_HALT": "DebugHalt",
+    "SYS_SET_TLS_BASE": "SetTLSBase",
 }
 
 ARCH_EXPECTATIONS = {

@@ -9,6 +9,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 mod arch;
 pub mod rt;
+pub mod sync;
 
 #[doc(hidden)]
 pub mod __log {
@@ -70,6 +71,7 @@ pub const SYS_NB_WAIT: isize = -8;
 pub const SYS_YIELD: isize = -7;
 pub const SYS_DEBUG_PUT_CHAR: isize = -9;
 pub const SYS_DEBUG_HALT: isize = -11;
+pub const SYS_SET_TLS_BASE: isize = -29;
 
 pub const LABEL_UNTYPED_RETYPE: u64 = 1;
 pub const LABEL_TCB_READ_REGISTERS: u64 = 2;
@@ -291,15 +293,54 @@ pub struct IpcMessage {
     pub mrs: [u64; 64],
 }
 
+/// Per-thread control block. The first field is a self-pointer so x86_64
+/// `fs:0` recovers the block after `SetTLSBase`.
+#[repr(C)]
+pub struct ThreadCtl {
+    pub self_ptr: *mut ThreadCtl,
+    pub ipc_buffer: *mut IpcBuffer,
+}
+
 static IPC_BUFFER: AtomicPtr<IpcBuffer> = AtomicPtr::new(ptr::null_mut());
+static TLS_IPC: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub fn init_ipc_buffer(addr: u64) {
     IPC_BUFFER.store(addr as *mut IpcBuffer, Ordering::Release);
 }
 
+/// Install `ctl` as the current thread's TLS base. Does not switch
+/// `ipc_buffer_ptr` to TLS mode until [`enable_tls_ipc`].
+pub unsafe fn install_thread_ctl(ctl: *mut ThreadCtl) {
+    unsafe {
+        arch::current::set_tls_base(ctl as u64);
+    }
+}
+
+pub fn enable_tls_ipc() {
+    TLS_IPC.store(true, Ordering::Release);
+}
+
+pub fn tls_ipc_enabled() -> bool {
+    TLS_IPC.load(Ordering::Acquire)
+}
+
 #[inline]
 fn ipc_buffer_ptr() -> *mut IpcBuffer {
-    IPC_BUFFER.load(Ordering::Acquire)
+    if TLS_IPC.load(Ordering::Acquire) {
+        let ctl = unsafe { arch::current::thread_ctl() };
+        if ctl.is_null() {
+            halt_loop();
+        }
+        unsafe { (*ctl).ipc_buffer }
+    } else {
+        IPC_BUFFER.load(Ordering::Acquire)
+    }
+}
+
+pub unsafe fn sel4_set_tls_base(tls_base: u64) {
+    unsafe {
+        arch::current::set_tls_base(tls_base);
+    }
 }
 
 pub unsafe fn sel4_call(service: u64, info: u64, mrs: &[u64]) -> IpcMessage {

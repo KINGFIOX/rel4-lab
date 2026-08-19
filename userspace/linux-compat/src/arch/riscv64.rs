@@ -26,6 +26,19 @@ const VM_FAULT_STATUS: usize = 3;
 
 const SYSCALL_INSTRUCTION_BYTES: u64 = 4;
 
+const USER_CONTEXT_GP: usize = 3;
+
+pub(crate) fn new_worker_context(
+    entry: u64,
+    stack_pointer: u64,
+    arg0: u64,
+    gp: u64,
+) -> [u64; USER_CONTEXT_WORDS] {
+    let mut ctx = new_user_context(entry, stack_pointer, arg0, 0);
+    ctx[USER_CONTEXT_GP] = gp;
+    ctx
+}
+
 pub(crate) fn new_user_context(
     entry: u64,
     stack_pointer: u64,
