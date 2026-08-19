@@ -19,8 +19,9 @@ is a simpler unprioritised round-robin model:
   the current runnable thread to the tail of its core runqueue and then takes
   the head, so any trap switches threads whenever another runnable thread is
   queued on the same core. See `kernel_exit` in
-  `kernel/src/arch/riscv64/kernel/trap.rs` and
-  `kernel/src/arch/loongarch64/kernel/trap.rs`.
+  `kernel/src/arch/riscv64/kernel/trap.rs`. Architecture backends now follow
+  the seL4-style `arch` + `sel4_arch` + `plat` split for `riscv64` and
+  `x86_64`; RISC-V is the runnable target, and x86 boot is the next phase.
 - Timer interrupts therefore do cause involuntary context switches. This is the
   same append-tail-and-reschedule mechanism as upstream non-MCS `timerTick` in
   `third_party/sel4test/kernel/src/kernel/thread.c`, with an effective
@@ -110,8 +111,6 @@ cargo check
   passed
 cargo build --release --target riscv64gc-unknown-none-elf -p kernel
   passed
-cargo build --release --target loongarch64-unknown-none -p kernel
-  passed
 
 SEL4TEST_REGEX='Test that there are tests' ARCH=riscv64 ./tools/pack-image.py
   image ready
@@ -134,7 +133,6 @@ The current preferred validation ladder is:
 cargo fmt --all --check
 cargo check
 cargo build --release --target riscv64gc-unknown-none-elf -p kernel
-cargo build --release --target loongarch64-unknown-none -p kernel
 TIMEOUT=90 ARCH=riscv64 ./tools/run-xv6-user.py echo hello
 ```
 

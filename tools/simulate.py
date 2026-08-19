@@ -18,10 +18,8 @@ from target_config import (
 )
 
 
-def default_mode_for(target_name: str, packed_image: Path) -> str:
+def default_mode_for(_target_name: str, packed_image: Path) -> str:
     if packed_image.is_file():
-        return "image"
-    if target_name == "loongarch64":
         return "image"
     return "standalone"
 

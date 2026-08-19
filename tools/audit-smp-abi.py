@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from kernel_arch_paths import arch_dir, ipi_rs, irq_rs, smp_mod_rs, trap_rs
+from kernel_arch_paths import arch_dir, ipi_rs, smp_mod_rs
 from target_config import target_from_env
 from tool_common import ROOT_DIR, log
 
@@ -106,125 +106,6 @@ def audit_riscv64(errors: list[str]) -> None:
     )
 
 
-def audit_loongarch64(errors: list[str]) -> None:
-    smp_rs = ROOT_DIR / "kernel" / "src" / "kernel" / "smp.rs"
-    loongarch_irq_rs = irq_rs("loongarch64")
-    mod_rs = arch_dir("loongarch64") / "mod.rs"
-    loongarch_smp_rs = smp_mod_rs("loongarch64")
-    loongarch_ipi_rs = ipi_rs("loongarch64")
-    loongarch_trap_rs = trap_rs("loongarch64")
-    require_text(errors, mod_rs, "pub mod smp;", "LoongArch SMP module")
-    require_text(errors, loongarch_smp_rs, "pub mod ipi;", "LoongArch IPI module")
-    require_text(errors, loongarch_ipi_rs, "pub const SUPPORTS_REMOTE_IPI: bool = true;", "IOCSR IPI")
-    require_text(
-        errors,
-        loongarch_ipi_rs,
-        "pub const SUPPORTS_REMOTE_TLB_FLUSH: bool = false;",
-        "no direct RFENCE backend on LoongArch",
-    )
-    require_text(errors, loongarch_ipi_rs, "IOCSR_IPI_SEND", "IOCSR IPI send register")
-    require_text(errors, loongarch_ipi_rs, "IPI_SEND_ACTION_RESCHEDULE", "IPI reschedule action")
-    require_regex(
-        errors,
-        loongarch_ipi_rs,
-        r"pub\s+fn\s+init_ipi\(\)\s*\{\s*"
-        r"csr::iocsr_write64\(IOCSR_IPI_CLEAR,\s*u64::MAX\);"
-        r"\s*csr::iocsr_write64\(IOCSR_IPI_EN,\s*u64::MAX\);"
-        r"\s*csr::dbar\(\);",
-        "LoongArch clears stale IPI state before enable",
-    )
-    require_regex(
-        errors,
-        loongarch_ipi_rs,
-        r"pub\s+fn\s+ack_ipi\(\)\s*->\s*bool\s*\{.*?"
-        r"csr::iocsr_write64\(IOCSR_IPI_CLEAR,\s*pending\);"
-        r"\s*csr::dbar\(\);",
-        "LoongArch IPI acknowledgement write barrier",
-    )
-    require_regex(
-        errors,
-        loongarch_ipi_rs,
-        r"pub\s+fn\s+send_ipi\([^)]*\)\s*->\s*IpiRet\s*\{.*?"
-        r"csr::iocsr_write64\(\s*IOCSR_IPI_SEND,.*?"
-        r"csr::dbar\(\);\s*OK",
-        "LoongArch IPI send write barrier",
-    )
-    require_regex(
-        errors,
-        smp_rs,
-        r"pub\s+fn\s+release_secondary_harts\(\)\s*\{\s*"
-        r"SECONDARY_BOOT_READY\.store\(SECONDARY_BOOT_READY_MAGIC,\s*Ordering::Release\);"
-        r"\s*crate::arch::current::machine::full_memory_barrier\(\);",
-        "architecture secondary-hart release write barrier facade",
-    )
-    require_regex(
-        errors,
-        smp_rs,
-        r"fn\s+remote_core_op\(core:\s*usize,\s*op:\s*usize,\s*target_value:\s*usize\)\s*\{.*?"
-        r"REMOTE_STALL_TARGET_VALUE\.store\(target_value,\s*Ordering::Release\);"
-        r"\s*REMOTE_STALL_OP\.store\(op,\s*Ordering::Release\);"
-        r"\s*REMOTE_STALL_DONE_MASK\.store\(0,\s*Ordering::Release\);"
-        r"\s*REMOTE_STALL_PENDING_MASK\.store\(bit,\s*Ordering::Release\);"
-        r"\s*crate::arch::current::machine::full_memory_barrier\(\);"
-        r"\s*wake_core\(core\);",
-        "architecture remote op publish barrier before IPI",
-    )
-    require_regex(
-        errors,
-        smp_rs,
-        r"REMOTE_OP_FLUSH_VMA_ALL\s*=>\s*\{\s*"
-        r"crate::arch::current::machine::tlb_flush_all\(\);",
-        "remote full TLB flush service",
-    )
-    require_regex(
-        errors,
-        smp_rs,
-        r"REMOTE_OP_FLUSH_VMA_ASID\s*=>\s*\{\s*"
-        r"crate::arch::current::machine::tlb_flush_asid\(target\);",
-        "remote ASID TLB flush service",
-    )
-    require_text(
-        errors,
-        loongarch_smp_rs,
-        "ipi::ack_ipi();",
-        "LoongArch remote op IPI acknowledgement facade",
-    )
-    require_regex(
-        errors,
-        smp_rs,
-        r"fn\s+complete_remote_core_op\(bit:\s*usize\)\s*\{\s*"
-        r"crate::arch::current::smp::complete_remote_call\(\);"
-        r"\s*crate::arch::current::machine::full_memory_barrier\(\);"
-        r"\s*REMOTE_STALL_DONE_MASK\.fetch_or\(bit,\s*Ordering::AcqRel\);",
-        "architecture remote op completion barrier before done bit",
-    )
-    require_regex(
-        errors,
-        loongarch_trap_rs,
-        r"if\s+ipi_pending\(estat\)\s*\{.*?"
-        r"service_pending_remote_core_op\(\).*?"
-        r"RemoteCoreOpResult::StalledCurrent",
-        "LoongArch trap IPI remote-op service",
-    )
-    require_regex(
-        errors,
-        loongarch_irq_rs,
-        r"pub\s+fn\s+local_irq_save\(\)\s*->\s*bool\s*\{.*?"
-        r"super::csr::set_crmd\(crmd\s*&\s*!CRMD_IE\);"
-        r"\s*super::csr::dbar\(\);",
-        "LoongArch local IRQ disable barrier",
-    )
-    require_regex(
-        errors,
-        loongarch_irq_rs,
-        r"pub\s+fn\s+local_irq_restore\(irq_was_enabled:\s*bool\)\s*\{.*?"
-        r"super::csr::set_crmd\(crmd\s*\|\s*CRMD_IE\);.*?"
-        r"super::csr::set_crmd\(crmd\s*&\s*!CRMD_IE\);.*?"
-        r"super::csr::dbar\(\);",
-        "LoongArch local IRQ restore barrier",
-    )
-
-
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Check SMP remote-operation source invariants.")
     parser.parse_args(argv)
@@ -232,9 +113,7 @@ def main(argv: list[str]) -> int:
     target = target_from_env(PREFIX)
     errors: list[str] = []
     audit_common_smp(errors)
-    if target.name == "loongarch64":
-        audit_loongarch64(errors)
-    elif target.name == "riscv64":
+    if target.name == "riscv64":
         audit_riscv64(errors)
     elif target.name == "x86_64":
         pass

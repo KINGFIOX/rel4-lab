@@ -1,7 +1,7 @@
 # microkernel
 
-`microkernel` is a Rust seL4-style kernel for RV64 `qemu-riscv-virt` and
-LoongArch64 build targets, plus a user-space xv6 compatibility stack built on
+`microkernel` is a Rust seL4-style kernel for RV64 `qemu-riscv-virt`, with a
+staged `x86_64` backend, plus a user-space xv6 compatibility stack built on
 top of a seL4-like capability ABI.
 
 The current rel4 scope intentionally keeps the scheduler simpler than upstream
@@ -177,22 +177,7 @@ Build the kernel package explicitly:
 
 ```sh
 cargo build --release --target riscv64gc-unknown-none-elf -p kernel
-cargo build --release --target loongarch64-unknown-none -p kernel
 ```
-
-Check whether a LoongArch64-capable sel4tests tree is available:
-
-```sh
-./tools/check-loongarch-sel4tests.py
-./tools/check-loongarch-sel4tests.py --manifest
-SEL4_TREE_DIR=/path/to/loongarch64-sel4test \
-  SEL4_BUILD_DIR=/path/to/loongarch64-sel4test/build-loongarch64 \
-  ARCH=loongarch64 ./tools/pack-image.py
-ARCH=loongarch64 ./tools/run-tests.py
-```
-
-See [docs/loongarch64-sel4tests.md](docs/loongarch64-sel4tests.md) for the
-external seL4/libsel4/elfloader port pieces required by `ARCH=loongarch64`.
 
 Current smoke path:
 

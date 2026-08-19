@@ -66,10 +66,6 @@ ARCH_EXPECTATIONS = {
         "instruction": '"ecall"',
         "register_prefix": "",
     },
-    "loongarch64": {
-        "instruction": '"syscall 0"',
-        "register_prefix": "$",
-    },
     "x86_64": {
         "instruction": '"syscall"',
         "register_prefix": "",
@@ -365,7 +361,7 @@ def audit_kernel_trap(errors: list[str], target_name: str) -> None:
         errors,
         path,
         r"None\s*=>\s*\{\s*if\s*!send_unknown_syscall_fault\(uc,\s*raw_sysno\)\s*\{\s*"
-        r"warn!\(.*?unknown\s+(?:loongarch64\s+)?syscall number.*?\);\s*"
+        r"warn!\(.*?unknown\s+syscall number.*?\);\s*"
         r"park_current_thread\(\);\s*\}\s*\}",
         "unknown syscall fallback",
     )

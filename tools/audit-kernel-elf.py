@@ -15,7 +15,6 @@ from kernel_arch_paths import boot_rs
 from target_config import rust_target_from_env, target_from_env
 from tool_common import (
     ELF_TYPE_EXECUTABLE,
-    LOONGARCH64_ELF_MACHINE,
     RISCV_ELF_MACHINE,
     ROOT_DIR,
     die,
@@ -167,15 +166,6 @@ EXPECTATIONS = {
         vaddr_paddr_delta=0xFFFF_FFFF_0000_0000,
         first_load_paddr=0x8020_0000,
     ),
-    "loongarch64": LayoutExpectation(
-        machine=LOONGARCH64_ELF_MACHINE,
-        entry=0x0020_0000,
-        vaddr_paddr_delta=0,
-        first_load_paddr=0x0020_0000,
-        # The in-tree LoongArch boot path reserves low memory below 32 MiB for
-        # kernel/rootserver/loader staging before high RAM untypeds begin.
-        max_load_end_paddr=0x0200_0000,
-    ),
     "x86_64": LayoutExpectation(
         machine=62,
         entry=0x0010_0010,
@@ -189,8 +179,6 @@ EXPECTATIONS = {
 def target_arch(target_name: str) -> str:
     if target_name == "riscv64":
         return "riscv64"
-    if target_name == "loongarch64":
-        return "loongarch64"
     if target_name == "x86_64":
         return "x86_64"
     die(PREFIX, f"unsupported ARCH={target_name}")
@@ -298,94 +286,6 @@ def validate_boot_handoff_source(arch: str) -> list[str]:
             errors.append(
                 f"{arch_boot.relative_to(ROOT_DIR)} does not call {name} from _start asm"
             )
-
-    return errors
-
-
-def require_source_regex(
-    errors: list[str], path: Path, text: str, pattern: str, description: str
-) -> None:
-    if re.search(pattern, text, re.S) is None:
-        errors.append(f"{path.relative_to(ROOT_DIR)} is missing {description}")
-
-
-def validate_arch_boot_source(arch: str) -> list[str]:
-    path = boot_rs(arch)
-    text = path.read_text()
-    errors: list[str] = []
-
-    if arch == "loongarch64":
-        require_source_regex(
-            errors,
-            path,
-            text,
-            r'"la\.local\s+\$t0,\s+__stack_top".*?'
-            r'"li\.d\s+\$t1,\s+\{kernel_stack_bytes\}".*?'
-            r'"mul\.d\s+\$t1,\s+\$a7,\s+\$t1".*?'
-            r'"sub\.d\s+\$sp,\s+\$t0,\s+\$t1".*?'
-            r"kernel_stack_bytes\s*=\s*const\s+crate::kernel::smp::KERNEL_STACK_BYTES",
-            "LoongArch per-core boot stack selected from handoff core_id",
-        )
-        require_source_regex(
-            errors,
-            path,
-            text,
-            r'"bnez\s+\$a7,\s+4f".*?'
-            r'"la\.local\s+\$t0,\s+__bss_start".*?'
-            r'"la\.local\s+\$t1,\s+__bss_end".*?'
-            r'"st\.d\s+\$zero,\s+\$t0,\s+0".*?'
-            r'"addi\.d\s+\$t0,\s+\$t0,\s+8".*?'
-            r'"la\.local\s+\$t0,\s+__stack_top".*?'
-            r'"move\s+\$sp,\s+\$t0".*?'
-            r'"bl\s+\{init_kernel\}"',
-            "LoongArch boot hart clears BSS before init_kernel handoff",
-        )
-        require_source_regex(
-            errors,
-            path,
-            text,
-            r'"csrwr\s+\$zero,\s+\{csr_ks0\}".*?'
-            r"csr_ks0\s*=\s*const\s+crate::arch::loongarch64::machine::csr::CSR_KS0",
-            "LoongArch KS0 scratch clear before Rust entry using CSR constant",
-        )
-        require_source_regex(
-            errors,
-            path,
-            text,
-            r'"csrrd\s+\$t0,\s+\{csr_euen\}".*?'
-            r'"li\.d\s+\$t1,\s+\{euen_fpu_state_clear_mask\}".*?'
-            r'"and\s+\$t0,\s+\$t0,\s+\$t1".*?'
-            r'"csrwr\s+\$t0,\s+\{csr_euen\}".*?'
-            r'"dbar\s+0".*?'
-            r"csr_euen\s*=\s*const\s+crate::arch::loongarch64::machine::csr::CSR_EUEN.*?"
-            r"euen_fpu_state_clear_mask\s*=\s*const\s+"
-            r"crate::arch::loongarch64::machine::fpu::EUEN_FPU_STATE_CLEAR_MASK",
-            "LoongArch early FPU/LSX/LASX disable barrier before Rust entry using CSR and mask constants",
-        )
-        require_source_regex(
-            errors,
-            path,
-            text,
-            r'"ld\.d\s+\$t1,\s+\$t0,\s+0".*?'
-            r'"bne\s+\$t1,\s+\$t2,\s+5b".*?'
-            r'"dbar\s+0".*?'
-            r'"bl\s+\{init_secondary_hart\}"',
-            "LoongArch secondary ready acquire barrier before Rust entry",
-        )
-        require_source_regex(
-            errors,
-            path,
-            text,
-            r"pub\s+extern\s+\"C\"\s+fn\s+init_secondary_hart\([^)]*\)\s*->\s*!\s*\{"
-            r".*?smp::init_current_hart\(hart_id,\s*core_id\);"
-            r".*?fpu::init_current_core\(\);"
-            r".*?vspace::switch_satp\(satp\)"
-            r".*?trap::install_trap_vector\(\);"
-            r".*?trap::init_timer\(\);"
-            r".*?irq::init_current_core\(\);"
-            r".*?trap::idle_scheduler_loop\(\)",
-            "LoongArch secondary hart arch initialisation sequence",
-        )
 
     return errors
 
@@ -673,7 +573,6 @@ def main(argv: list[str]) -> int:
         source_errors = [
             *validate_boot_stack_source(arch),
             *validate_boot_handoff_source(arch),
-            *validate_arch_boot_source(arch),
         ]
 
     errors = [

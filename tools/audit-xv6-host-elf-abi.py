@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from target_config import target_from_env
 from tool_common import (
     ELF_TYPE_EXECUTABLE,
-    LOONGARCH64_ELF_MACHINE,
     RISCV_ELF_MACHINE,
     ROOT_DIR,
     log,
@@ -38,12 +37,6 @@ def audit_build_script(errors: list[str]) -> None:
         path,
         f"const RISCV_ELF_MACHINE: u16 = {RISCV_ELF_MACHINE};",
         "RISC-V e_machine constant",
-    )
-    require_text(
-        errors,
-        path,
-        f"const LOONGARCH64_ELF_MACHINE: u16 = {LOONGARCH64_ELF_MACHINE};",
-        "LoongArch64 e_machine constant",
     )
     require_text(
         errors,
@@ -79,12 +72,6 @@ def audit_build_script(errors: list[str]) -> None:
 
 def audit_runtime_loader(errors: list[str]) -> None:
     path = ROOT_DIR / "userspace" / "xv6-host" / "src" / "child.rs"
-    require_text(
-        errors,
-        path,
-        f"const EXPECTED_ELF_MACHINE: u16 = {LOONGARCH64_ELF_MACHINE};",
-        "LoongArch64 runtime e_machine constant",
-    )
     require_text(
         errors,
         path,

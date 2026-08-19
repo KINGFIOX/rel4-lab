@@ -121,11 +121,6 @@ def require_symbol(symbols: dict[str, int], name: str, errors: list[str], contex
     return value
 
 
-def require_regex(errors: list[str], path: Path, pattern: str, description: str) -> None:
-    if re.search(pattern, path.read_text(), re.S) is None:
-        errors.append(f"{path.relative_to(ROOT_DIR)} is missing {description}")
-
-
 def expect_equal(errors: list[str], label: str, got: int, expected: int) -> None:
     if got != expected:
         errors.append(f"{label}=0x{got:x}, expected 0x{expected:x}")
@@ -134,32 +129,6 @@ def expect_equal(errors: list[str], label: str, got: int, expected: int) -> None
 def expect_page_aligned(errors: list[str], label: str, value: int) -> None:
     if value % PAGE_SIZE != 0:
         errors.append(f"{label}=0x{value:x} is not {PAGE_SIZE:#x}-aligned")
-
-
-def expect_regions_page_aligned(
-    errors: list[str], label: str, regions: list[tuple[int, int]]
-) -> None:
-    for start, end in regions:
-        expect_page_aligned(errors, f"{label} start", start)
-        expect_page_aligned(errors, f"{label} end", end)
-        if start >= end:
-            errors.append(f"{label} region [0x{start:x}, 0x{end:x}) is empty or inverted")
-
-
-def expect_regions_disjoint(
-    errors: list[str],
-    left_label: str,
-    left: list[tuple[int, int]],
-    right_label: str,
-    right: list[tuple[int, int]],
-) -> None:
-    for left_start, left_end in left:
-        for right_start, right_end in right:
-            if left_start < right_end and right_start < left_end:
-                errors.append(
-                    f"{left_label} [0x{left_start:x}, 0x{left_end:x}) overlaps "
-                    f"{right_label} [0x{right_start:x}, 0x{right_end:x})"
-                )
 
 
 def expect_covered(
@@ -202,202 +171,6 @@ def audit_common_device_window(
             require_symbol(platform_consts, "UART0_MMIO_SIZE", errors, target_name),
             kernel_consts["UART0_MMIO_SIZE"],
         )
-
-
-def audit_loongarch64(
-    kernel_consts: dict[str, int],
-    platform_consts: dict[str, int],
-    pci_consts: dict[str, int],
-    irq_consts: dict[str, int],
-    irq_rs: Path,
-    regions: list[tuple[int, int]],
-    free_regions: list[tuple[int, int]],
-) -> list[str]:
-    errors: list[str] = []
-    audit_common_device_window(errors, "loongarch64", kernel_consts, platform_consts, regions)
-    expect_regions_page_aligned(errors, "DEVICE_UNTYPED_REGIONS", regions)
-    expect_regions_page_aligned(errors, "FREE_RAM_REGIONS", free_regions)
-    expect_regions_disjoint(
-        errors, "DEVICE_UNTYPED_REGIONS", regions, "FREE_RAM_REGIONS", free_regions
-    )
-    expect_equal(errors, "LoongArch device-untyped base", regions[0][0], 0x1000_0000)
-    expect_equal(errors, "LoongArch device-untyped top", regions[-1][1], 0x8000_0000)
-    expect_equal(errors, "LoongArch free-RAM base", free_regions[0][0], 0x8200_0000)
-    expect_equal(errors, "LoongArch free-RAM top", free_regions[-1][1], 0x1_3000_0000)
-
-    io_base = require_symbol(kernel_consts, "PCI_IO_BASE_PA", errors, "kernel")
-    io_port = require_symbol(kernel_consts, "PCI_DEBUG_UART_PORT", errors, "kernel")
-    io_size = require_symbol(kernel_consts, "PCI_IO_SIZE", errors, "kernel")
-    userspace_io_base = require_symbol(
-        platform_consts, "LOONGARCH64_PCIE_IO_BASE", errors, "userspace"
-    )
-    userspace_io_size = require_symbol(
-        platform_consts, "LOONGARCH64_PCIE_IO_SIZE", errors, "userspace"
-    )
-    virtio_io_port_base = require_symbol(
-        pci_consts, "LOONGARCH64_PCIE_IO_PORT_BASE", errors, "virtio-disk-server"
-    )
-    expect_equal(errors, "LOONGARCH64_PCIE_IO_BASE", userspace_io_base, io_base + io_port)
-    expect_equal(errors, "LOONGARCH64_PCIE_IO_PORT_BASE", virtio_io_port_base, io_port)
-    expect_equal(errors, "LOONGARCH64_PCIE_IO_SIZE", userspace_io_size, io_size)
-
-    for kernel_name, userspace_name in (
-        ("PCI_ECAM_BASE_PA", "LOONGARCH64_PCIE_ECAM_BASE"),
-        ("PCI_MEM_BASE_PA", "LOONGARCH64_PCIE_MEM_BASE"),
-        ("PCI_MEM_SIZE", "LOONGARCH64_PCIE_MEM_SIZE"),
-        ("PCH_MSI_BASE_PA", "LOONGARCH64_PCH_MSI_BASE"),
-    ):
-        expect_equal(
-            errors,
-            userspace_name,
-            require_symbol(platform_consts, userspace_name, errors, "userspace"),
-            require_symbol(kernel_consts, kernel_name, errors, "kernel"),
-        )
-
-    mapped_windows = (
-        (
-            "UART frame",
-            require_symbol(platform_consts, "UART0_MMIO_FRAME_BASE", errors, "userspace"),
-            PAGE_SIZE,
-        ),
-        (
-            "PCI ECAM map",
-            require_symbol(platform_consts, "LOONGARCH64_PCIE_ECAM_BASE", errors, "userspace"),
-            require_symbol(platform_consts, "XV6_PCIE_ECAM_MAP_SIZE", errors, "userspace"),
-        ),
-        (
-            "PCI I/O map",
-            userspace_io_base,
-            require_symbol(platform_consts, "XV6_PCIE_IO_MAP_SIZE", errors, "userspace"),
-        ),
-        (
-            "PCI MEM map",
-            require_symbol(platform_consts, "LOONGARCH64_PCIE_MEM_BASE", errors, "userspace"),
-            require_symbol(platform_consts, "XV6_PCIE_MEM_MAP_SIZE", errors, "userspace"),
-        ),
-        (
-            "PCH MSI map",
-            require_symbol(platform_consts, "LOONGARCH64_PCH_MSI_BASE", errors, "userspace"),
-            require_symbol(platform_consts, "XV6_PCIE_MSI_MAP_SIZE", errors, "userspace"),
-        ),
-    )
-    for label, start, size in mapped_windows:
-        expect_page_aligned(errors, label, start)
-        expect_page_aligned(errors, f"{label} size", size)
-        expect_covered(errors, label, regions, start, size)
-
-    expect_equal(
-        errors,
-        "XV6_PCIE_IO_MAP_SIZE",
-        require_symbol(platform_consts, "XV6_PCIE_IO_MAP_SIZE", errors, "userspace"),
-        userspace_io_size,
-    )
-    if require_symbol(platform_consts, "XV6_PCIE_ECAM_MAP_SIZE", errors, "userspace") > require_symbol(
-        platform_consts, "LOONGARCH64_PCIE_ECAM_SIZE", errors, "userspace"
-    ):
-        errors.append("XV6_PCIE_ECAM_MAP_SIZE exceeds LOONGARCH64_PCIE_ECAM_SIZE")
-    if require_symbol(platform_consts, "XV6_PCIE_MEM_MAP_SIZE", errors, "userspace") > require_symbol(
-        platform_consts, "LOONGARCH64_PCIE_MEM_SIZE", errors, "userspace"
-    ):
-        errors.append("XV6_PCIE_MEM_MAP_SIZE exceeds LOONGARCH64_PCIE_MEM_SIZE")
-
-    legacy_irq_base = require_symbol(
-        platform_consts, "LOONGARCH64_PCIE_LEGACY_IRQ_BASE", errors, "userspace"
-    )
-    legacy_irq_count = require_symbol(
-        platform_consts, "LOONGARCH64_PCIE_LEGACY_IRQ_COUNT", errors, "userspace"
-    )
-    extioi_irqs = require_symbol(irq_consts, "EXTIOI_IRQS", errors, "kernel")
-    extioi_group_bits = require_symbol(irq_consts, "EXTIOI_GROUP_BITS", errors, "kernel")
-    extioi_groups = require_symbol(irq_consts, "EXTIOI_GROUPS", errors, "kernel")
-    expect_equal(errors, "EXTIOI_IRQS", extioi_irqs, 256)
-    expect_equal(errors, "EXTIOI_GROUP_BITS", extioi_group_bits, 32)
-    expected_extioi_groups = extioi_irqs // extioi_group_bits if extioi_group_bits != 0 else 0
-    expect_equal(errors, "EXTIOI_GROUPS", extioi_groups, expected_extioi_groups)
-    expect_equal(
-        errors,
-        "PCH_PIC_IRQ_NUM",
-        require_symbol(irq_consts, "PCH_PIC_IRQ_NUM", errors, "kernel"),
-        32,
-    )
-    if legacy_irq_base == 0 or legacy_irq_base + legacy_irq_count > extioi_irqs:
-        errors.append(
-            "LOONGARCH64_PCIE_LEGACY_IRQ range "
-            f"[{legacy_irq_base}, {legacy_irq_base + legacy_irq_count}) exceeds EXTIOI_IRQS={extioi_irqs}"
-        )
-    if legacy_irq_base < 1:
-        errors.append("LOONGARCH64_PCIE_LEGACY_IRQ_BASE must not use reserved EXTIOI IRQ 0")
-    msi_base_vector = require_symbol(
-        platform_consts, "LOONGARCH64_PCH_MSI_BASE_VECTOR", errors, "userspace"
-    )
-    msi_vectors = require_symbol(
-        platform_consts, "LOONGARCH64_PCH_MSI_NUM_VECTORS", errors, "userspace"
-    )
-    if msi_base_vector == 0 or msi_base_vector + msi_vectors > extioi_irqs:
-        errors.append(
-            "LOONGARCH64_PCH_MSI vector range "
-            f"[{msi_base_vector}, {msi_base_vector + msi_vectors}) exceeds EXTIOI_IRQS={extioi_irqs}"
-        )
-    if msi_base_vector < 1:
-        errors.append("LOONGARCH64_PCH_MSI_BASE_VECTOR must not use reserved EXTIOI IRQ 0")
-    require_regex(
-        errors,
-        irq_rs,
-        r"pub\s+fn\s+is_external_irq\(irq:\s*u64\)\s*->\s*bool\s*\{\s*"
-        r"irq\s*>\s*0\s*&&\s*irq\s*<\s*EXTIOI_IRQS\s+as\s+u64\s*\}",
-        "LoongArch reserves EXTIOI IRQ 0 from external IRQ allocation",
-    )
-    require_regex(
-        errors,
-        irq_rs,
-        r"pub\s+fn\s+claim\(\)\s*->\s*Option<u64>\s*\{.*?"
-        r"let\s+pending\s*=\s*if\s+group\s*==\s*0\s*\{\s*pending\s*&\s*!1\s*\}\s*else\s*\{\s*pending\s*\};",
-        "LoongArch claim path masks reserved EXTIOI IRQ 0",
-    )
-    require_regex(
-        errors,
-        irq_rs,
-        r"for\s+group\s+in\s+0\.\.EXTIOI_GROUPS\s*\{\s*"
-        r"let\s+offset\s*=\s*group\s*\*\s*4;\s*"
-        r"csr::iocsr_write32\(EXTIOI_ENABLE_START\s*\+\s*offset,\s*0\);\s*"
-        r"csr::iocsr_write32\(EXTIOI_COREISR_START\s*\+\s*offset,\s*u32::MAX\);",
-        "LoongArch EXTIOI disable-and-clear during init",
-    )
-    require_regex(
-        errors,
-        irq_rs,
-        r"pub\s+fn\s+enable_irq\(irq:\s*u64\)\s*\{.*?"
-        r"csr::iocsr_write32\(EXTIOI_COREISR_START\s*\+\s*group\s*\*\s*4,\s*mask\);.*?"
-        r"ptr::write_volatile\(pch_reg64\(PCH_PIC_INT_CLEAR\),\s*1u64\s*<<\s*irq\);.*?"
-        r"csr::iocsr_write32\(enable_addr,\s*csr::iocsr_read32\(enable_addr\)\s*\|\s*mask\);.*?"
-        r"csr::dbar\(\);",
-        "LoongArch stale IRQ clear before enable",
-    )
-    require_regex(
-        errors,
-        irq_rs,
-        r"pub\s+fn\s+init\(\)\s*\{.*?EXTIOI_COREMAP_START.*?csr::dbar\(\);",
-        "LoongArch IRQ controller init write barrier",
-    )
-    require_regex(
-        errors,
-        irq_rs,
-        r"pub\s+fn\s+disable_irq\(irq:\s*u64\)\s*\{.*?"
-        r"csr::iocsr_write32\(enable_addr,\s*csr::iocsr_read32\(enable_addr\)\s*&\s*!mask\);.*?"
-        r"csr::dbar\(\);",
-        "LoongArch IRQ disable write barrier",
-    )
-    require_regex(
-        errors,
-        irq_rs,
-        r"pub\s+fn\s+complete\(irq:\s*u64\)\s*\{.*?"
-        r"csr::iocsr_write32\(EXTIOI_COREISR_START\s*\+\s*group\s*\*\s*4,\s*mask\);.*?"
-        r"ptr::write_volatile\(pch_reg64\(PCH_PIC_INT_CLEAR\),\s*1u64\s*<<\s*irq\);.*?"
-        r"csr::dbar\(\);",
-        "LoongArch IRQ completion write barrier",
-    )
-
-    return errors
 
 
 def audit_riscv64(
@@ -444,7 +217,7 @@ def main(argv: list[str]) -> int:
         die(PREFIX, f"kernel platform source not found: {kernel_platform_rs}")
     if not userspace_platform_rs.is_file():
         if target.name == "x86_64":
-            print("PASS: x86_64 platform ABI audit skipped for staged backend")
+            print("PASS: x86_64 platform ABI audit skipped; backend is staged (no trap yet)")
             return 0
         die(PREFIX, f"xv6 platform source not found: {userspace_platform_rs}")
 
@@ -453,18 +226,11 @@ def main(argv: list[str]) -> int:
     platform_consts = parse_consts(userspace_platform_rs, shared_consts)
     regions = parse_regions(kernel_platform_rs, kernel_consts, "DEVICE_UNTYPED_REGIONS")
 
-    if target.name == "loongarch64":
-        free_regions = parse_regions(kernel_platform_rs, kernel_consts, "FREE_RAM_REGIONS")
-        pci_consts = parse_consts(
-            ROOT_DIR / "userspace" / "virtio-disk-server" / "src" / "device" / "pci.rs"
-        )
-        irq_rs = ROOT_DIR / "kernel" / "src" / "machine" / "loongarch_irq.rs"
-        irq_consts = parse_consts(irq_rs)
-        errors = audit_loongarch64(
-            kernel_consts, platform_consts, pci_consts, irq_consts, irq_rs, regions, free_regions
-        )
-    elif target.name == "riscv64":
+    if target.name == "riscv64":
         errors = audit_riscv64(kernel_consts, platform_consts, regions)
+    elif target.name == "x86_64":
+        print("PASS: x86_64 platform ABI audit skipped; backend is staged (no trap yet)")
+        return 0
     else:
         die(PREFIX, f"unsupported target {target.name}")
 
