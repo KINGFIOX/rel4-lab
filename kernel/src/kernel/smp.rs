@@ -306,8 +306,7 @@ pub fn current_core_of_tcb(tcb: *const Tcb) -> Option<usize> {
     let mut core = 0;
     while core < MAX_NUM_NODES && core < MAX_BOOT_CPUS {
         let cpu = &CPUS[core];
-        if cpu.online.load(Ordering::Acquire) && cpu.current_tcb.load(Ordering::Acquire) == target
-        {
+        if cpu.online.load(Ordering::Acquire) && cpu.current_tcb.load(Ordering::Acquire) == target {
             return Some(core);
         }
         core += 1;

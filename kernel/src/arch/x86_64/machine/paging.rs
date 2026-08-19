@@ -3,8 +3,8 @@ use crate::abi::constants::{PT_INDEX_BITS, SEL4_PAGE_BITS, SEL4_PAGE_TABLE_ENTRI
 pub const PAGE_SHIFT: usize = SEL4_PAGE_BITS;
 pub const PAGE_SIZE: usize = 1 << PAGE_SHIFT;
 pub const LEAF_LEVEL: usize = 0;
-pub const ROOT_LEVEL: usize = 2;
-pub const ROOT_CHILD_COVERAGE_BITS: usize = PAGE_SHIFT + PT_INDEX_BITS * 2;
+pub const ROOT_LEVEL: usize = 3;
+pub const ROOT_CHILD_COVERAGE_BITS: usize = PAGE_SHIFT + PT_INDEX_BITS * 3;
 pub const LEAF_PARENT_COVERAGE_BITS: usize = PAGE_SHIFT + PT_INDEX_BITS;
 
 pub const PTE_PRESENT: u64 = 1 << 0;

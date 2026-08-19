@@ -53,11 +53,7 @@ impl ObjectType {
             Self::Notification => SEL4_NOTIFICATION_BITS as u64,
             Self::CapTable => user_size + SEL4_SLOT_BITS as u64,
             Self::Reply => SEL4_REPLY_BITS as u64,
-            Self::FourKPage
-            | Self::PageTable
-            | Self::PageDirectory
-            | Self::Pdpt
-            | Self::Pml4 => 12,
+            Self::FourKPage | Self::PageTable | Self::PageDirectory | Self::Pdpt | Self::Pml4 => 12,
             Self::LargePage => 21,
         }
     }

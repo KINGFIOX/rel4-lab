@@ -6,7 +6,9 @@
 
 #![allow(dead_code)]
 
-use crate::abi::constants::{PT_INDEX_BITS, RISCV_PG_SHIFT, SEL4_PAGE_TABLE_ENTRIES};
+use crate::abi::constants::{PT_INDEX_BITS, SEL4_PAGE_TABLE_ENTRIES};
+
+pub const RISCV_PG_SHIFT: usize = 12;
 
 pub const PAGE_SHIFT: usize = RISCV_PG_SHIFT;
 pub const PAGE_SIZE: usize = 1 << RISCV_PG_SHIFT; // 4096

@@ -180,6 +180,10 @@ def main(argv: list[str]) -> int:
         run([sys.executable, "tools/audit-xv6-host-elf-abi.py"], cwd=ROOT_DIR, env=audit_env)
 
         log(PREFIX, f"building xv6-host rootserver {host_elf}")
+        cargo_env = os.environ.copy()
+        # The installer copies from the repository target directory below; ignore
+        # sandbox-specific target dirs so the build and install paths stay paired.
+        cargo_env.pop("CARGO_TARGET_DIR", None)
         run(
             [
                 "cargo",
@@ -197,10 +201,11 @@ def main(argv: list[str]) -> int:
                 "xv6fs-server",
                 "-p",
                 "virtio-disk-server",
-            ]
+            ],
+            env=cargo_env,
         )
 
-        env = os.environ.copy()
+        env = cargo_env.copy()
         env.update(
             {
                 "XV6_PAYLOAD_ELF": str(payload_elf),

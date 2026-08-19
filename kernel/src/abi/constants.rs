@@ -74,8 +74,7 @@ pub const SEL4_MAX_UNTYPED_BITS: usize = 38;
 
 // ---- IPC ------------------------------------------------------------------
 
-/// Number of IPC message registers transferred in physical registers
-/// (a2..a5 on RISC-V64). Anything past this lives in the IPC buffer.
+/// Number of IPC message registers transferred in physical registers. Anything past this lives in the IPC buffer.
 pub const N_MSG_REGISTERS: usize = 4;
 /// Total number of message registers usable per IPC.
 pub const N_TOTAL_MSG_REGISTERS: usize = 120;
@@ -83,8 +82,6 @@ pub const N_TOTAL_MSG_REGISTERS: usize = 120;
 // ---- Architecture ---------------------------------------------------------
 
 pub const PT_INDEX_BITS: usize = 9; // 512 entries per level
-pub const PT_LEVELS: usize = 3;
-pub const RISCV_PG_SHIFT: usize = 12;
 
 #[cfg(target_arch = "riscv64")]
 pub const PHYS_BASE_RAW: usize = 0x8020_0000;

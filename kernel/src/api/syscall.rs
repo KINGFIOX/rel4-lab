@@ -257,11 +257,7 @@ pub fn do_recv(uc: &mut UserContext, blocking: bool) {
 }
 
 pub fn do_recv_mcs(uc: &mut UserContext, blocking: bool, can_reply: bool) {
-    let reply_cptr = if can_reply {
-        uc.reply_reg()
-    } else {
-        0
-    };
+    let reply_cptr = if can_reply { uc.reply_reg() } else { 0 };
     do_recv_inner(uc, blocking, reply_cptr, can_reply)
 }
 
