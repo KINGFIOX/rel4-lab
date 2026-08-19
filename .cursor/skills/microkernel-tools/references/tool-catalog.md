@@ -51,7 +51,22 @@ Key behavior:
 - Fails on `Test suite failed`, rootserver abort, or kernel panic.
 - `--verbose` mirrors QEMU output live.
 
-Use after `tools/pack-image.py`.
+Use after `tools/pack-image.py`. Do not treat `ARCH=x86_64 ./tools/run-tests.py` as a gate.
+
+### `tools/run-hello.py`
+
+Purpose: x86_64 single-core QEMU `pc` user bring-up gate.
+
+Key behavior:
+
+- Builds `kernel`, `sel4-user`, and `hello-rootserver` for `x86_64-unknown-none`.
+- Runs the kernel ABI/ELF audits, then objcopies a Multiboot kernel.
+- Boots QEMU `-kernel`/`-initrd` with `SMP=OFF` / `NUM_NODES=1`.
+- Success is the console line `hello-rootserver: ok`.
+
+Use pattern:
+
+- Default x86 gate: `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 tools/run-hello.py`.
 
 ### `tools/simulate.py`
 
