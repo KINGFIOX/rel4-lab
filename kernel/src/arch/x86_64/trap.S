@@ -87,8 +87,16 @@ syscall_entry:
     .globl interrupt_common
 interrupt_common:
     testb   $3, 24(%rsp)
-    jz      kernel_interrupt
+    jnz     user_interrupt
+    // Ring 0. Kernel code other than idle runs with IF clear, so a vector
+    // >= 32 is an idle-thread IRQ. A ring-0 exception is a kernel bug.
+    cmpq    $32, (%rsp)
+    jb      kernel_trap_panic
+    jmp     save_interrupt_context
+
+user_interrupt:
     swapgs
+save_interrupt_context:
     movq    %rbx, %gs:TRAP_SCRATCH_SAVED_USER_T1
     movq    %gs:TRAP_SCRATCH_USER_CONTEXT, %rbx
     testq   %rbx, %rbx
@@ -134,37 +142,6 @@ interrupt_common:
     movq    %rax, %rdi
     jmp     restore_user_context_locked
 
-kernel_interrupt:
-    pushq   %rax
-    pushq   %rcx
-    pushq   %rdx
-    pushq   %rsi
-    pushq   %rdi
-    pushq   %r8
-    pushq   %r9
-    pushq   %r10
-    pushq   %r11
-    pushq   %rbp
-    movq    %rsp, %rbp
-    movq    80(%rbp), %rdi
-    movq    96(%rbp), %rsi
-    andq    $~15, %rsp
-    subq    $8, %rsp
-    call    handle_kernel_irq_rust
-    movq    %rbp, %rsp
-    popq    %rbp
-    popq    %r11
-    popq    %r10
-    popq    %r9
-    popq    %r8
-    popq    %rdi
-    popq    %rsi
-    popq    %rdx
-    popq    %rcx
-    popq    %rax
-    addq    $16, %rsp
-    iretq
-
     .globl restore_user_context_locked
 restore_user_context_locked:
     subq    $16, %rsp
@@ -209,9 +186,12 @@ restore_iret:
     movq    UC_R9(%r15), %r9
     movq    UC_RCX(%r15), %rcx
     movq    UC_R11(%r15), %r11
+    testb   $3, UC_CS(%r15)
     movq    UC_RDI(%r15), %rdi
     movq    UC_R15(%r15), %r15
+    jz      2f
     swapgs
+2:
     iretq
 
 restore_sysret:

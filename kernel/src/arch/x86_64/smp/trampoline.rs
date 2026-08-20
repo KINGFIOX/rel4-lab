@@ -222,6 +222,6 @@ pub extern "C" fn ap_long_entry() -> ! {
     crate::arch::x86_64::machine::fpu::init_current_core();
     crate::arch::x86_64::kernel::trap::install_trap_vector();
     crate::arch::x86_64::machine::irq::init_current_core();
-    crate::object::tcb::switch_to_idle_thread();
-    crate::arch::x86_64::kernel::trap::idle_scheduler_loop()
+    let kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
+    crate::arch::x86_64::kernel::trap::restore_scheduled_or_idle(kernel_lock)
 }

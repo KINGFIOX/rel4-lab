@@ -157,8 +157,8 @@ pub extern "C" fn init_secondary_hart(
     }
     crate::arch::riscv64::kernel::trap::install_trap_vector();
     crate::arch::riscv64::kernel::trap::init_timer();
-    crate::object::tcb::switch_to_idle_thread();
-    crate::arch::riscv64::kernel::trap::idle_scheduler_loop()
+    let kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
+    crate::arch::riscv64::kernel::trap::restore_scheduled_or_idle(kernel_lock)
 }
 
 /// Halt the calling hart: enter low-power wait-for-interrupt loop forever.

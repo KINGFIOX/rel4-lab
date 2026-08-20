@@ -138,7 +138,7 @@ pub fn init_rootserver_context(context: &mut UserContext, entry: u64, stack: u64
 
 /// Fill an idle TCB as seL4 `Arch_configureIdleThread` does: NextIP
 /// is `idle_thread`, S-mode with interrupts enabled on `sret`, SP is the
-/// kernel stack. The trap path does not restore this context today.
+/// kernel stack. `kernel_exit` restores this context through `sret`.
 pub fn configure_idle_context(context: &mut UserContext, kernel_sp: u64) {
     let pc = idle_thread as *const () as usize as u64;
     context.pc = pc;
@@ -147,17 +147,15 @@ pub fn configure_idle_context(context: &mut UserContext, kernel_sp: u64) {
     context.set_stack_reg(kernel_sp);
 }
 
-/// seL4 RISC-V `idle_thread`: wait for an interrupt. Stored as the idle
-/// TCB program counter; the current kernel waits in `idle_scheduler_loop`
-/// instead of `sret`ing here.
+/// seL4 RISC-V `idle_thread`: wait for an interrupt in S-mode.
+///
+/// Naked so the loop shares the kernel stack with trap handling without a
+/// Rust stack frame. Interrupts land in `trap.S` and are saved into this
+/// TCB's context.
 #[unsafe(no_mangle)]
+#[unsafe(naked)]
 pub extern "C" fn idle_thread() -> ! {
-    loop {
-        // SAFETY: waiting until the next interrupt.
-        unsafe {
-            core::arch::asm!("wfi", options(nomem, nostack));
-        }
-    }
+    core::arch::naked_asm!("1:", "wfi", "j 1b")
 }
 
 pub fn apply_written_pc(context: &mut UserContext, pc: u64) {

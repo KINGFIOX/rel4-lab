@@ -171,14 +171,14 @@ Every trap returns through `kernel_exit` in the arch `trap.rs`
    the runqueue head. On a different TCB, switch VSpace and restore that
    context.
 4. If the queue is empty and current is not runnable, switch `current` to
-   that core's idle TCB, install the kernel VSpace, drop the kernel lock,
-   and wait (`WFI` / `HLT`) until something is woken.
+   that core's idle TCB, install the kernel VSpace, and restore the idle
+   context through `sret`/`iretq`. Idle runs privileged with interrupts
+   enabled and waits (`WFI` / `HLT`) until something is woken.
 
 Each core has a static idle TCB created at boot (`create_idle_threads`),
 matching seL4 `ksIdleThread`. Idle is never enqueued. The idle TCB context
 is filled as upstream does (`idle_thread` PC, kernel privilege, FPU
-disabled) but is not restored through `sret`/`sysret`; the wait loop stays
-in kernel mode.
+disabled) and is restored through the ordinary trap-exit path.
 
 This is unprioritised timeslice round-robin. A still-runnable thread keeps
 the CPU across ordinary syscalls, faults, and IRQs until its slice hits

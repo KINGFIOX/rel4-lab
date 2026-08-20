@@ -307,9 +307,12 @@ pub fn init_rootserver_context(context: &mut UserContext, entry: u64, stack: u64
 }
 
 /// Fill an idle TCB as seL4 `Arch_configureIdleThread` does: kernel
-/// CS/SS, `FLAGS_USER_DEFAULT`, NextIP `idle_thread`, RSP 0. The trap path
-/// does not restore this context today.
-pub fn configure_idle_context(context: &mut UserContext, _kernel_sp: u64) {
+/// CS/SS, `FLAGS_USER_DEFAULT`, NextIP `idle_thread`. RSP is this core's
+/// kernel stack top rather than seL4 x86-64's 0: this kernel's IDT has no
+/// IST, so idle IRQs are distinguished by CS ring and the interrupt frame
+/// is pushed on the idle thread's own kernel stack. `kernel_exit` restores
+/// this context through `iretq`.
+pub fn configure_idle_context(context: &mut UserContext, kernel_sp: u64) {
     let pc = idle_thread as *const () as usize as u64;
     context.pc = pc;
     context.restart_pc = pc;
@@ -318,20 +321,18 @@ pub fn configure_idle_context(context: &mut UserContext, _kernel_sp: u64) {
     context.regs[FLAGS] = 0x202;
     context.regs[CS] = KERNEL_CS;
     context.regs[SS] = KERNEL_DS;
-    context.regs[RSP] = 0;
+    context.regs[RSP] = kernel_sp;
 }
 
-/// seL4 x86 `idle_thread`: halt until an interrupt. Stored as the idle TCB
-/// program counter; the current kernel waits in `idle_scheduler_loop`
-/// instead of `iret`ing here.
+/// seL4 x86 `idle_thread`: halt until an interrupt in kernel mode.
+///
+/// Naked so the loop shares the kernel stack with trap handling without a
+/// Rust stack frame. Interrupts land in `trap.S` and are saved into this
+/// TCB's context. `FLAGS` already has IF set, so no `sti` is needed.
 #[unsafe(no_mangle)]
+#[unsafe(naked)]
 pub extern "C" fn idle_thread() -> ! {
-    loop {
-        // SAFETY: halting until the next interrupt.
-        unsafe {
-            core::arch::asm!("hlt", options(nomem, nostack));
-        }
-    }
+    core::arch::naked_asm!("1:", "hlt", "jmp 1b")
 }
 
 pub fn set_fpu_context_enabled(_context: &mut UserContext, _enabled: bool) {}

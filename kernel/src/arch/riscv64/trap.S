@@ -39,13 +39,17 @@ trap_entry:
     and     t1, t1, t2
     beqz    t1, 1f
 
-    // From-kernel path: restore sscratch to the TrapScratch pointer and panic
-    // on the current kernel stack.
+    // S-mode trap. Kernel code other than idle runs with SIE clear, so the
+    // only legal S-mode interrupt is from the idle thread's WFI loop. Save
+    // that interrupt into the idle TCB context. An S-mode exception is a
+    // kernel bug.
+    csrr    t1, scause
+    bltz    t1, 1f
     csrw    sscratch, t0
     j       kernel_trap_panic
 
 1:
-    // User-mode trap. Load the current TCB's UserContext.
+    // User-mode trap or idle interrupt. Load the current TCB's UserContext.
     ld      sp, TRAP_SCRATCH_USER_CONTEXT(t0)
     bnez    sp, 2f
     csrw    sscratch, t0

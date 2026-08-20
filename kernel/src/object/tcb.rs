@@ -10,8 +10,9 @@
 //! and a per-TCB timeslice decides when a still-runnable thread is rotated.
 //! Each core also has a static idle TCB, matching seL4 `ksIdleThread`. Idle is
 //! never enqueued; an empty runqueue switches `current` to that core's idle
-//! TCB and waits in kernel mode. A temporary big kernel lock still serialises
-//! most shared kernel state while the SMP path matures.
+//! TCB and restores it into its privileged WFI/HLT loop. A temporary big
+//! kernel lock still serialises most shared kernel state while the SMP path
+//! matures.
 //!
 //! Layout-load: every field must fit comfortably inside the 2 KiB slab
 //! the C kernel allocates, so the future C/Rust ABI swap stays valid. A
@@ -143,9 +144,9 @@ pub fn is_idle_thread(tcb: TcbRef) -> bool {
     (0..MAX_NUM_NODES).any(|core| idle_thread_of(core) == Some(tcb))
 }
 
-/// Make this core's idle TCB current. Idle is never placed on a runqueue and
-/// must not be restored through `sret`/`sysret`; the trap path waits in
-/// kernel mode instead.
+/// Make this core's idle TCB current. Idle is never placed on a runqueue.
+/// The trap path restores its context through `sret`/`iretq` into the
+/// architecture `idle_thread` WFI/HLT loop.
 pub fn switch_to_idle_thread() -> TcbRef {
     let idle = idle_thread_of(crate::kernel::smp::current_core_id())
         .expect("idle thread missing for current core");

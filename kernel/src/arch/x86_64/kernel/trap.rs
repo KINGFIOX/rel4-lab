@@ -2,8 +2,6 @@
 
 use core::arch::global_asm;
 use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, Ordering};
-
 use log_crate::{error, warn};
 
 use crate::abi::constants::{N_TOTAL_MSG_REGISTERS, WORD_BYTES};
@@ -29,6 +27,8 @@ const VEC_DOUBLE_FAULT: u64 = 8;
 const VEC_GENERAL_PROTECTION: u64 = 13;
 const VEC_PAGE_FAULT: u64 = 14;
 const FAULT_MR_REG_COUNT: u64 = 4;
+/// `UserContext.regs` index of CS; matches `UC_CS` in `trap.S`.
+const UC_CS: usize = 20;
 
 const KERNEL_CS: u16 = 0x08;
 const KERNEL_DS: u16 = 0x10;
@@ -241,36 +241,6 @@ pub fn service_due_timer_interrupts() -> bool {
     true
 }
 
-static KERNEL_IRQ_PANIC: AtomicBool = AtomicBool::new(false);
-
-#[unsafe(no_mangle)]
-pub extern "C" fn handle_kernel_irq_rust(vector: u64, rip: u64) {
-    if vector == u64::from(lapic::IPI_VECTOR) {
-        crate::arch::x86_64::smp::ipi::handle_ipi();
-        return;
-    }
-    if vector == u64::from(lapic::TIMER_VECTOR) {
-        let _kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
-        handle_timer_interrupt();
-        return;
-    }
-    if let Some(irq) = crate::arch::x86_64::machine::ioapic::vector_to_irq(vector) {
-        let _kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
-        handle_user_irq(irq);
-        return;
-    }
-    if KERNEL_IRQ_PANIC.swap(true, Ordering::SeqCst) {
-        crate::arch::x86_64::kernel::boot::halt();
-    }
-    error!(
-        "kernel-mode interrupt vector={:#x} rip={:#x} cr2={:#x}",
-        vector,
-        rip,
-        registers::read_cr2()
-    );
-    panic!("kernel interrupt");
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_trap_rust(uc: *mut UserContext, cause: u64) -> *mut UserContext {
     if cause == u64::from(lapic::IPI_VECTOR) {
@@ -286,6 +256,11 @@ pub extern "C" fn handle_trap_rust(uc: *mut UserContext, cause: u64) -> *mut Use
     // SAFETY: trap entry assembly passes the address of the current thread's
     // saved context, which is live for the whole handler.
     let uc = unsafe { &mut *uc };
+    debug_assert!(
+        uc.regs[UC_CS] & 3 != 0
+            || crate::object::tcb::current().is_some_and(crate::object::tcb::is_idle_thread),
+        "ring-0 trap must come from the idle thread"
+    );
     uc.restart_pc = uc.pc;
     crate::arch::x86_64::machine::fpu::clear_supervisor_access();
 
@@ -531,35 +506,21 @@ fn handle_user_irq(irq: u64) {
     }
 }
 
-pub fn idle_scheduler_loop() -> ! {
-    loop {
-        let next_context = {
-            let kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
-            let _ = service_due_timer_interrupts();
-            match crate::object::tcb::schedule() {
-                None => {
-                    switch_to_idle_thread_if_needed();
-                    switch_to_kernel_vspace();
-                    None
-                }
-                Some(next) => {
-                    crate::object::tcb::set_current(Some(next));
-                    let ctx = next.prepare_for_user_restore();
-                    switch_to_tcb_vspace(next);
-                    Some((ctx, kernel_lock))
-                }
-            }
-        };
-        if let Some((ctx, kernel_lock)) = next_context {
-            kernel_lock.defer_unlock_for_user_restore();
-            // SAFETY: the context belongs to the thread just picked, and the kernel lock
-            // is handed to the restore path.
-            unsafe { restore_user_context_locked(ctx) };
-        }
-        unsafe {
-            core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
-        }
-    }
+/// Pick a runnable TCB or this core's idle thread and restore it. Used by
+/// AP bring-up after per-core init.
+pub fn restore_scheduled_or_idle(kernel_lock: crate::kernel::smp::KernelLockGuard) -> ! {
+    use crate::object::tcb;
+    let ctx = if let Some(next) = tcb::schedule() {
+        tcb::set_current(Some(next));
+        let ctx = next.prepare_for_user_restore();
+        switch_to_tcb_vspace(next);
+        ctx
+    } else {
+        restore_idle_context()
+    };
+    // SAFETY: `ctx` is the selected TCB's live register frame, and the kernel
+    // lock is handed to the restore path.
+    unsafe { restore_user_context_with_kernel_lock(ctx, kernel_lock) }
 }
 
 fn switch_to_kernel_vspace() {
@@ -608,59 +569,43 @@ fn kernel_exit(
     use crate::object::tcb;
     let cur = tcb::current();
 
-    loop {
-        if let Some(cur) = cur {
-            cur.enqueue_if_migrated_from_current_core();
-            if tcb::take_continue_current_once(Some(cur)) && cur.is_runnable_on_current_core() {
-                cur.prepare_for_user_restore();
-                return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
-            }
-            let rotate = tcb::take_reschedule_required();
-            if cur.is_runnable_on_current_core() && !rotate {
-                cur.prepare_for_user_restore();
-                return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
-            }
-            if cur.is_runnable_on_current_core() {
-                cur.enqueue();
-            }
-        }
-
-        if let Some(next) = tcb::schedule() {
-            if Some(next) != cur {
-                tcb::set_current(Some(next));
-                let ctx = next.prepare_for_user_restore();
-                switch_to_tcb_vspace(next);
-                return finish_kernel_exit(ctx, kernel_lock);
-            }
-            if next.is_runnable_on_current_core() {
-                next.prepare_for_user_restore();
-                return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
-            }
-            continue;
-        }
-
-        // schedule() found nothing. Safe to fall through *only* if current is
-        // still runnable — otherwise we'd resume a blocked TCB's user mode and
-        // break IPC semantics.
-        if cur.is_some_and(TcbRef::is_runnable_on_current_core) {
-            let cur = cur.expect("just checked");
+    if let Some(cur) = cur {
+        cur.enqueue_if_migrated_from_current_core();
+        if tcb::take_continue_current_once(Some(cur)) && cur.is_runnable_on_current_core() {
             cur.prepare_for_user_restore();
             return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
         }
-
-        switch_to_idle_thread_if_needed();
-        switch_to_kernel_vspace();
-        drop(kernel_lock);
-        idle_scheduler_loop();
+        let rotate = tcb::take_reschedule_required();
+        if cur.is_runnable_on_current_core() && !rotate {
+            cur.prepare_for_user_restore();
+            return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
+        }
+        if cur.is_runnable_on_current_core() {
+            cur.enqueue();
+        }
     }
-}
 
-/// Park this core on its idle thread unless it is already there.
-fn switch_to_idle_thread_if_needed() {
-    use crate::object::tcb;
-    if !tcb::current().is_some_and(tcb::is_idle_thread) {
-        tcb::switch_to_idle_thread();
+    if let Some(next) = tcb::schedule() {
+        if Some(next) != cur {
+            tcb::set_current(Some(next));
+            let ctx = next.prepare_for_user_restore();
+            switch_to_tcb_vspace(next);
+            return finish_kernel_exit(ctx, kernel_lock);
+        }
+        next.prepare_for_user_restore();
+        return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
     }
+
+    // schedule() found nothing. Safe to fall through *only* if current is
+    // still runnable — otherwise we'd resume a blocked TCB's user mode and
+    // break IPC semantics.
+    if cur.is_some_and(TcbRef::is_runnable_on_current_core) {
+        let cur = cur.expect("just checked");
+        cur.prepare_for_user_restore();
+        return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
+    }
+
+    finish_kernel_exit(restore_idle_context(), kernel_lock)
 }
 
 fn kernel_exit_after_remote_stall(
@@ -668,19 +613,20 @@ fn kernel_exit_after_remote_stall(
 ) -> *mut UserContext {
     use crate::object::tcb;
 
-    loop {
-        if let Some(next) = tcb::schedule() {
-            tcb::set_current(Some(next));
-            let ctx = next.prepare_for_user_restore();
-            switch_to_tcb_vspace(next);
-            return finish_kernel_exit(ctx, kernel_lock);
-        }
-
-        switch_to_idle_thread_if_needed();
-        switch_to_kernel_vspace();
-        drop(kernel_lock);
-        idle_scheduler_loop();
+    if let Some(next) = tcb::schedule() {
+        tcb::set_current(Some(next));
+        let ctx = next.prepare_for_user_restore();
+        switch_to_tcb_vspace(next);
+        return finish_kernel_exit(ctx, kernel_lock);
     }
+
+    finish_kernel_exit(restore_idle_context(), kernel_lock)
+}
+
+fn restore_idle_context() -> *mut UserContext {
+    let idle = crate::object::tcb::switch_to_idle_thread();
+    switch_to_kernel_vspace();
+    idle.prepare_for_user_restore()
 }
 
 #[inline]
