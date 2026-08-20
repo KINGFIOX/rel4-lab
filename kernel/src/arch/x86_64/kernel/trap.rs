@@ -345,17 +345,13 @@ unsafe fn finish_fault_ipc_receive(
         return;
     }
     unsafe {
-        let (reply_cptr, reply_kva, reply_can_grant) = tcb::start_receiver_rendezvous(receiver);
-        if crate::api::ipc::set_reply_object_for(
-            receiver,
-            reply_cptr,
-            reply_kva,
-            reply_can_grant,
-            fault_tcb,
-            handler_cap.endpoint_can_grant(),
-            false,
-        ) {
-            tcb::set_blocked_on_reply(fault_tcb, reply_kva);
+        let receiver_can_grant = tcb::start_receiver_rendezvous(receiver);
+        if handler_cap.endpoint_can_grant() || handler_cap.endpoint_can_grant_reply() {
+            tcb::dequeue(fault_tcb);
+            if !crate::object::reply::setup_caller_cap(fault_tcb, receiver, receiver_can_grant) {
+                tcb::set_inactive(fault_tcb);
+                tcb::clear_waiting_on(fault_tcb);
+            }
         } else {
             tcb::set_inactive(fault_tcb);
             tcb::clear_waiting_on(fault_tcb);
@@ -515,7 +511,7 @@ fn fault_handler_cap(tcb: *const crate::object::tcb::Tcb) -> crate::object::cap:
             return cap;
         }
     }
-    crate::object::tcb::fault_endpoint_snapshot(tcb)
+    crate::object::cap::Cap::null()
 }
 
 unsafe fn block_fault_sender_locked(

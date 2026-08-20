@@ -13,7 +13,7 @@ mod state;
 
 use core::panic::PanicInfo;
 
-use linux_abi::{SERVER_RECV_REPLY_CPTR, SERVICE_ENDPOINT_CPTR};
+use linux_abi::SERVICE_ENDPOINT_CPTR;
 use sel4_user::{error, halt_loop, info, init_ipc_buffer, init_logger, msg_info, rt};
 
 const ROOTFS_CPIO: &[u8] = include_bytes!(env!("LINUX_ROOTFS_CPIO"));
@@ -37,15 +37,9 @@ async fn server_loop() {
     let mut reply_mrs = [0u64; 4];
     loop {
         let msg = if reply_pending {
-            rt::reply_recv_with_reply(
-                SERVICE_ENDPOINT_CPTR,
-                msg_info(0, 0, 0, 4),
-                &reply_mrs,
-                SERVER_RECV_REPLY_CPTR,
-            )
-            .await
+            rt::reply_recv(SERVICE_ENDPOINT_CPTR, msg_info(0, 0, 0, 4), &reply_mrs).await
         } else {
-            rt::recv_with_reply(SERVICE_ENDPOINT_CPTR, SERVER_RECV_REPLY_CPTR).await
+            rt::recv(SERVICE_ENDPOINT_CPTR).await
         };
         match ops::handle_request(&msg).await {
             ops::RequestResult::Reply(mrs) => {

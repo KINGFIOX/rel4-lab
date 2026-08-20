@@ -1,7 +1,7 @@
 //! RISC-V seL4 object-type IDs for Untyped_Retype.
 
 use crate::abi::constants::{
-    SEL4_ENDPOINT_BITS, SEL4_NOTIFICATION_BITS, SEL4_REPLY_BITS, SEL4_SLOT_BITS, SEL4_TCB_BITS,
+    SEL4_ENDPOINT_BITS, SEL4_NOTIFICATION_BITS, SEL4_SLOT_BITS, SEL4_TCB_BITS,
 };
 use crate::object::cap::{
     Cap, FRAME_RIGHTS_READ_WRITE, FRAME_SIZE_4K, FRAME_SIZE_GIGAPAGE, FRAME_SIZE_MEGAPAGE,
@@ -19,7 +19,6 @@ pub enum ObjectType {
     FourKPage = 6,
     MegaPage = 7,
     PageTable = 8,
-    Reply = 9,
 }
 
 impl ObjectType {
@@ -34,7 +33,6 @@ impl ObjectType {
             6 => Some(Self::FourKPage),
             7 => Some(Self::MegaPage),
             8 => Some(Self::PageTable),
-            9 => Some(Self::Reply),
             _ => None,
         }
     }
@@ -46,7 +44,6 @@ impl ObjectType {
             Self::Endpoint => SEL4_ENDPOINT_BITS as u64,
             Self::Notification => SEL4_NOTIFICATION_BITS as u64,
             Self::CapTable => user_size + SEL4_SLOT_BITS as u64,
-            Self::Reply => SEL4_REPLY_BITS as u64,
             Self::FourKPage | Self::PageTable => 12,
             Self::MegaPage => 21,
             Self::GigaPage => 30,
@@ -86,7 +83,6 @@ impl ObjectType {
             Self::Endpoint => Cap::new_endpoint(region_base),
             Self::Notification => Cap::new_notification(region_base),
             Self::Tcb => Cap::new_thread(region_base),
-            Self::Reply => Cap::new_reply_object(region_base, true),
         }
     }
 }

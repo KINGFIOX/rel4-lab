@@ -10,7 +10,7 @@ use core::ptr;
 
 use crate::abi::constants::{
     SEL4_ASID_POOL_BITS, SEL4_ENDPOINT_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_NOTIFICATION_BITS,
-    SEL4_PAGE_TABLE_BITS, SEL4_REPLY_BITS, SEL4_SLOT_BITS, SEL4_TCB_BITS,
+    SEL4_PAGE_TABLE_BITS, SEL4_SLOT_BITS, SEL4_TCB_BITS,
 };
 use crate::kernel::smp::BklObjectGuard;
 use crate::object::cap::{Cap, CapTag};
@@ -343,9 +343,7 @@ unsafe fn is_mdb_parent_of(a: *mut Cte, b: *mut Cte) -> bool {
                 && cap_a.cnode_radix() == cap_b.cnode_radix()
         }
         CapTag::Thread => tag_b == CapTag::Thread && cap_a.thread_ptr() == cap_b.thread_ptr(),
-        CapTag::Reply => {
-            tag_b == CapTag::Reply && cap_a.reply_object_ptr() == cap_b.reply_object_ptr()
-        }
+        CapTag::Reply => tag_b == CapTag::Reply && cap_a.reply_tcb_ptr() == cap_b.reply_tcb_ptr(),
         CapTag::IrqControl => tag_b == CapTag::IrqControl || tag_b == CapTag::IrqHandler,
         CapTag::IrqHandler => {
             tag_b == CapTag::IrqHandler && cap_a.irq_handler_irq() == cap_b.irq_handler_irq()
@@ -400,7 +398,6 @@ fn physical_cap_region(cap: Cap) -> Option<(u64, u64)> {
         CapTag::CNode => Some((cap.cnode_ptr(), cap.cnode_radix() + SEL4_SLOT_BITS as u64)),
         CapTag::Thread => Some((cap.thread_ptr(), SEL4_TCB_BITS as u64)),
         CapTag::Zombie => Some((cap.zombie_ptr(), zombie_region_size_bits(cap))),
-        CapTag::Reply => Some((cap.reply_object_ptr(), SEL4_REPLY_BITS as u64)),
         CapTag::Frame => Some((cap.frame_base_ptr(), frame_size_bits(cap.frame_size())?)),
         CapTag::PageTable => Some((cap.page_table_base_ptr(), SEL4_PAGE_TABLE_BITS as u64)),
         CapTag::AsidPool => Some((cap.asid_pool_ptr(), SEL4_ASID_POOL_BITS as u64)),

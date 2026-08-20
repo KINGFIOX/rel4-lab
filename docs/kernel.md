@@ -54,9 +54,9 @@ There is no `SchedContext` or `SchedControl` tag.
 `Untyped_Retype` object IDs are arch-local:
 
 - RISC-V (`arch/riscv64/sel4_arch/object_type.rs`): Untyped, TCB, Endpoint,
-  Notification, CapTable, GigaPage, 4K, MegaPage, PageTable, Reply.
+  Notification, CapTable, GigaPage, 4K, MegaPage, PageTable.
 - x86_64 (`arch/x86_64/sel4_arch/object_type.rs`): same common objects, then
-  PDPT, PML4, 4K, large page, page table, page directory, Reply.
+  PDPT, PML4, 4K, large page, page table, page directory.
 
 CSpace operations live in `object/cnode.rs` and `object/mdb.rs` (insert, copy,
 mint, move, mutate, delete, revoke, zombie reduction). Invocation entry points
@@ -111,8 +111,10 @@ RV64 dispatch is in `arch/riscv64/kernel/trap.rs`. Handlers:
 - `DebugSendIpi` halts with “not supported”
 - `DebugDumpScheduler` and `DebugSnapshot` are success no-ops
 
-`do_recv_mcs` / `do_reply_recv_mcs` in `api/syscall.rs` are receive helpers
-that take an optional reply cap. They do not implement MCS budgets.
+Recv ignores the reply register. `seL4_Reply` and `seL4_ReplyRecv` use the
+current thread's `tcbCaller` slot. A reply cap is a non-retypable cap that
+points at a TCB (`tcbReply` master, `tcbCaller` derived), matching non-MCS
+seL4. `CNodeSaveCaller` moves the derived caller cap.
 
 `do_send` handles Notification, Endpoint, Reply, and Thread
 (`TcbSetFlags` only via `handle_thread_send`). Other cap tags are dropped
@@ -161,8 +163,8 @@ No `TcbSetAffinity` invocation is wired; boot sets affinity to
 
 ## IPC and faults
 
-Endpoint send/receive/call, notifications, reply objects, and selected cap
-transfer live in `api/ipc.rs` plus `object/{endpoint,notification,reply}.rs`.
+Endpoint send/receive/call, notifications, non-MCS reply caps, and selected
+cap transfer live in `api/ipc.rs` plus `object/{endpoint,notification,reply}.rs`.
 
 Fault labels (`abi/fault.rs`): CapFault=1, UnknownSyscall=2, UserException=3.
 `Timeout` and `VmFault` both encode as 5.

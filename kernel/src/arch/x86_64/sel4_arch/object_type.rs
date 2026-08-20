@@ -2,10 +2,10 @@
 //!
 //! Common objects keep seL4's non-arch numbers. Paging objects follow
 //! `libsel4` x86 / x86_64 `objecttype.h` (PDPT, PML4, 4K, large page,
-//! page table, page directory). Reply remains a local compatibility object.
+//! page table, page directory).
 
 use crate::abi::constants::{
-    SEL4_ENDPOINT_BITS, SEL4_NOTIFICATION_BITS, SEL4_REPLY_BITS, SEL4_SLOT_BITS, SEL4_TCB_BITS,
+    SEL4_ENDPOINT_BITS, SEL4_NOTIFICATION_BITS, SEL4_SLOT_BITS, SEL4_TCB_BITS,
 };
 use crate::object::cap::{
     Cap, FRAME_RIGHTS_READ_WRITE, FRAME_SIZE_4K, FRAME_SIZE_GIGAPAGE, FRAME_SIZE_MEGAPAGE,
@@ -26,7 +26,6 @@ pub enum ObjectType {
     LargePage = 9,
     PageTable = 10,
     PageDirectory = 11,
-    Reply = 12,
 }
 
 impl ObjectType {
@@ -44,7 +43,6 @@ impl ObjectType {
             9 => Some(Self::LargePage),
             10 => Some(Self::PageTable),
             11 => Some(Self::PageDirectory),
-            12 => Some(Self::Reply),
             _ => None,
         }
     }
@@ -56,7 +54,6 @@ impl ObjectType {
             Self::Endpoint => SEL4_ENDPOINT_BITS as u64,
             Self::Notification => SEL4_NOTIFICATION_BITS as u64,
             Self::CapTable => user_size + SEL4_SLOT_BITS as u64,
-            Self::Reply => SEL4_REPLY_BITS as u64,
             Self::FourKPage | Self::PageTable | Self::PageDirectory | Self::Pdpt | Self::Pml4 => 12,
             Self::LargePage => 21,
             Self::HugePage => 30,
@@ -98,7 +95,6 @@ impl ObjectType {
             Self::Endpoint => Cap::new_endpoint(region_base),
             Self::Notification => Cap::new_notification(region_base),
             Self::Tcb => Cap::new_thread(region_base),
-            Self::Reply => Cap::new_reply_object(region_base, true),
         }
     }
 }

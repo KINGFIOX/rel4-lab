@@ -189,8 +189,6 @@ pub const OBJ_PAGE_TABLE: u64 = 10;
 #[cfg(target_arch = "x86_64")]
 pub const OBJ_PAGE_DIRECTORY: u64 = 11;
 #[cfg(target_arch = "x86_64")]
-pub const OBJ_REPLY: u64 = 12;
-#[cfg(target_arch = "x86_64")]
 pub const OBJ_VSPACE: u64 = OBJ_PML4;
 #[cfg(not(target_arch = "x86_64"))]
 pub const OBJ_GIGA_PAGE: u64 = 5;
@@ -204,8 +202,6 @@ pub const OBJ_PAGE_TABLE: u64 = 8;
 pub const OBJ_PAGE_DIRECTORY: u64 = OBJ_PAGE_TABLE;
 #[cfg(not(target_arch = "x86_64"))]
 pub const OBJ_PDPT: u64 = OBJ_PAGE_TABLE;
-#[cfg(not(target_arch = "x86_64"))]
-pub const OBJ_REPLY: u64 = 9;
 #[cfg(not(target_arch = "x86_64"))]
 pub const OBJ_VSPACE: u64 = OBJ_PAGE_TABLE;
 
@@ -367,22 +363,16 @@ pub unsafe fn sel4_recv(ep: u64) -> IpcMessage {
     unsafe { sel4_wait(ep) }
 }
 
-pub unsafe fn sel4_recv_with_reply(ep: u64, reply: u64) -> IpcMessage {
-    unsafe {
-        let (a0, a1, a2, a3, a4, a5) = arch::current::recv_with_reply(ep, reply, SYS_RECV);
-        read_ipc_message(a0, a1, a2, a3, a4, a5)
-    }
+pub unsafe fn sel4_recv_with_reply(ep: u64, _reply: u64) -> IpcMessage {
+    unsafe { sel4_recv(ep) }
 }
 
 pub unsafe fn sel4_nb_recv(ep: u64) -> IpcMessage {
     unsafe { sel4_nb_wait(ep) }
 }
 
-pub unsafe fn sel4_nb_recv_with_reply(ep: u64, reply: u64) -> IpcMessage {
-    unsafe {
-        let (a0, a1, a2, a3, a4, a5) = arch::current::recv_with_reply(ep, reply, SYS_NB_RECV);
-        read_ipc_message(a0, a1, a2, a3, a4, a5)
-    }
+pub unsafe fn sel4_nb_recv_with_reply(ep: u64, _reply: u64) -> IpcMessage {
+    unsafe { sel4_nb_recv(ep) }
 }
 
 pub unsafe fn sel4_wait(ep: u64) -> IpcMessage {
@@ -400,16 +390,6 @@ pub unsafe fn sel4_nb_wait(ep: u64) -> IpcMessage {
 }
 
 pub unsafe fn sel4_reply_recv(ep: u64, info: u64, reply_mrs: &[u64]) -> IpcMessage {
-    let _ = (info, reply_mrs);
-    unsafe { sel4_wait(ep) }
-}
-
-pub unsafe fn sel4_reply_recv_with_reply(
-    ep: u64,
-    info: u64,
-    reply_mrs: &[u64],
-    reply: u64,
-) -> IpcMessage {
     unsafe {
         let ipc = &mut *ipc_buffer_ptr();
         let mut i = 4;
@@ -417,17 +397,34 @@ pub unsafe fn sel4_reply_recv_with_reply(
             ipc.msg[i] = reply_mrs[i];
             i += 1;
         }
-        let (a0, a1, a2, a3, a4, a5) = arch::current::reply_recv_with_reply(
+        let (a0, a1, a2, a3, a4, a5) = arch::current::reply_recv(
             ep,
             info,
             mr(reply_mrs, 0),
             mr(reply_mrs, 1),
             mr(reply_mrs, 2),
             mr(reply_mrs, 3),
-            reply,
         );
         read_ipc_message(a0, a1, a2, a3, a4, a5)
     }
+}
+
+pub unsafe fn sel4_reply_recv_with_reply(
+    ep: u64,
+    info: u64,
+    reply_mrs: &[u64],
+    _reply: u64,
+) -> IpcMessage {
+    unsafe { sel4_reply_recv(ep, info, reply_mrs) }
+}
+
+pub fn sel4_cnode_save_caller(dest_index: u64) {
+    call_checked(
+        ROOT_CNODE,
+        LABEL_CNODE_SAVE_CALLER,
+        &[],
+        &[dest_index, WORD_BITS],
+    );
 }
 
 pub unsafe fn sel4_send(dest: u64, info: u64, mrs: &[u64]) {

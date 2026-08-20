@@ -327,9 +327,7 @@ pub fn same_object_as(left: Cap, right: Cap) -> bool {
             left.cnode_ptr() == right.cnode_ptr() && left.cnode_radix() == right.cnode_radix()
         }
         (Some(CapTag::Thread), Some(CapTag::Thread)) => left.thread_ptr() == right.thread_ptr(),
-        (Some(CapTag::Reply), Some(CapTag::Reply)) => {
-            left.reply_object_ptr() == right.reply_object_ptr()
-        }
+        (Some(CapTag::Reply), Some(CapTag::Reply)) => left.reply_tcb_ptr() == right.reply_tcb_ptr(),
         (Some(CapTag::IrqHandler), Some(CapTag::IrqHandler)) => {
             left.irq_handler_irq() == right.irq_handler_irq()
         }

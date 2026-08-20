@@ -75,9 +75,9 @@ pub const TCB_CNODE_ENTRIES: usize = 1 << TCB_CNODE_RADIX;
 pub const TCB_ARCH_CNODE_ENTRIES: usize = TCB_CNODE_ENTRIES;
 pub const TCB_CTABLE_SLOT: usize = 0;
 pub const TCB_VTABLE_SLOT: usize = 1;
-pub const TCB_BUFFER_SLOT: usize = 2;
-pub const TCB_FAULT_HANDLER_SLOT: usize = 3;
-pub const TCB_TIMEOUT_HANDLER_SLOT: usize = 4;
+pub const TCB_REPLY: usize = 2;
+pub const TCB_CALLER: usize = 3;
+pub const TCB_BUFFER_SLOT: usize = 4;
 pub(crate) const TCB_SENDER_EXTRA_CAPS: usize = 3;
 pub const TCB_FLAG_FPU_DISABLED: u64 = 0x1;
 pub const TCB_FLAG_MASK: u64 = TCB_FLAG_FPU_DISABLED;
@@ -205,17 +205,6 @@ pub(crate) fn yield_authority_snapshot(tcb: *const Tcb) -> (usize, u64, usize) {
 }
 
 #[inline]
-pub(crate) fn fault_endpoint_snapshot(tcb: *const Tcb) -> Cap {
-    if tcb.is_null() {
-        return Cap::null();
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        cap_slot_snapshot_locked(tcb, TCB_FAULT_HANDLER_SLOT)
-    }
-}
-
-#[inline]
 pub(crate) fn fault_endpoint_cptr_snapshot(tcb: *const Tcb) -> u64 {
     if tcb.is_null() {
         return 0;
@@ -294,17 +283,6 @@ pub(crate) fn thread_view_snapshot(tcb: *const Tcb) -> ThreadViewSnapshot {
 }
 
 #[inline]
-pub(crate) fn timeout_endpoint_snapshot(tcb: *const Tcb) -> Cap {
-    if tcb.is_null() {
-        return Cap::null();
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        cap_slot_snapshot_locked(tcb, TCB_TIMEOUT_HANDLER_SLOT)
-    }
-}
-
-#[inline]
 pub(crate) fn runnable_snapshot(tcb: *const Tcb) -> bool {
     if tcb.is_null() {
         return false;
@@ -326,77 +304,13 @@ fn with_tcb_pair_guard<R>(first: *const Tcb, second: *const Tcb, f: impl FnOnce(
 }
 
 #[inline]
-pub(crate) fn reply_slot_snapshot(tcb: *const Tcb) -> u64 {
+pub(crate) fn receiver_can_grant_snapshot(tcb: *const Tcb) -> bool {
     if tcb.is_null() {
-        return 0;
+        return false;
     }
     unsafe {
         let _guard = lock_state(tcb);
-        (*tcb).reply_slot
-    }
-}
-
-#[inline]
-pub(crate) fn reply_object_snapshot(tcb: *const Tcb) -> u64 {
-    if tcb.is_null() {
-        return 0;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        (*tcb).reply_object
-    }
-}
-
-#[inline]
-pub(crate) unsafe fn set_caller_reply(tcb: *mut Tcb, reply_object: u64, can_grant: bool) {
-    if tcb.is_null() {
-        return;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        (*tcb).caller_reply_object = reply_object;
-        (*tcb).caller_can_grant = can_grant as u8;
-    }
-}
-
-#[inline]
-pub(crate) unsafe fn take_caller_reply(tcb: *mut Tcb) -> (u64, bool) {
-    if tcb.is_null() {
-        return (0, false);
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        let reply_object = (*tcb).caller_reply_object;
-        let can_grant = (*tcb).caller_can_grant != 0;
-        (*tcb).caller_reply_object = 0;
-        (*tcb).caller_can_grant = 0;
-        (reply_object, can_grant)
-    }
-}
-
-#[inline]
-pub(crate) fn receive_reply_object_snapshot(tcb: *const Tcb) -> u64 {
-    if tcb.is_null() {
-        return 0;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        (*tcb).receive_reply_object
-    }
-}
-
-#[inline]
-pub(crate) fn receive_reply_snapshot(tcb: *const Tcb) -> (u64, u64, bool) {
-    if tcb.is_null() {
-        return (0, 0, false);
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        (
-            (*tcb).receive_reply_cptr,
-            (*tcb).receive_reply_object,
-            (*tcb).receive_reply_can_grant != 0,
-        )
+        (*tcb).receiver_can_grant != 0
     }
 }
 
@@ -565,52 +479,6 @@ pub(crate) unsafe fn clear_queue_links(tcb: *mut Tcb) {
     unsafe { clear_wait_queue_links(tcb) };
 }
 
-pub(crate) unsafe fn set_reply_slot_and_object(tcb: *mut Tcb, slot: u64, reply_object: u64) {
-    if tcb.is_null() {
-        return;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        (*tcb).reply_slot = slot;
-        (*tcb).reply_object = reply_object;
-    }
-}
-
-pub(crate) unsafe fn clear_reply_slot_if(tcb: *mut Tcb, slot: u64) -> bool {
-    if tcb.is_null() {
-        return false;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        if (*tcb).reply_slot != slot {
-            return false;
-        }
-        (*tcb).reply_slot = 0;
-        if slot != 0 {
-            (*tcb).reply_object = 0;
-        }
-        true
-    }
-}
-
-pub(crate) unsafe fn clear_reply_binding_if(tcb: *mut Tcb, reply_object: u64) {
-    if tcb.is_null() || reply_object == 0 {
-        return;
-    }
-    unsafe {
-        let _guard = lock_state(tcb);
-        if (*tcb).reply_object == reply_object {
-            (*tcb).reply_object = 0;
-            (*tcb).reply_slot = 0;
-        }
-        if (*tcb).receive_reply_object == reply_object {
-            (*tcb).receive_reply_object = 0;
-            (*tcb).receive_reply_cptr = 0;
-            (*tcb).receive_reply_can_grant = 0;
-        }
-    }
-}
-
 pub(crate) unsafe fn set_inactive(tcb: *mut Tcb) {
     if tcb.is_null() {
         return;
@@ -643,17 +511,28 @@ pub(crate) unsafe fn clear_blocked_receive_state(tcb: *mut Tcb) {
     }
 }
 
-pub(crate) unsafe fn set_blocked_on_reply(tcb: *mut Tcb, reply_object: u64) -> u64 {
+pub(crate) unsafe fn set_blocked_on_reply(tcb: *mut Tcb) {
     if tcb.is_null() {
-        return 0;
+        return;
     }
     unsafe {
         let _guard = lock_state(tcb);
         (*tcb).waiting_on = 0;
         clear_endpoint_ipc_state_locked_preserving_fault(tcb);
         (*tcb).state = ThreadState::BlockedOnReply as u8;
-        (*tcb).reply_object = reply_object;
-        0
+    }
+}
+
+pub(crate) unsafe fn clear_fault_message(tcb: *mut Tcb) {
+    if tcb.is_null() {
+        return;
+    }
+    unsafe {
+        let _guard = lock_state(tcb);
+        (*tcb).sender_is_fault = 0;
+        (*tcb).fault_label = 0;
+        (*tcb).fault_len = 0;
+        (*tcb).fault_mrs = [0; FAULT_IPC_MRS];
     }
 }
 
@@ -725,9 +604,6 @@ pub(crate) unsafe fn complete_bound_endpoint_notification_wait(tcb: *mut Tcb, ba
         return;
     }
     unsafe {
-        crate::object::reply::unbind_receiver(tcb);
-    }
-    unsafe {
         let _guard = lock_state(tcb);
         (*tcb).waiting_on = 0;
         clear_endpoint_ipc_state_locked(tcb);
@@ -754,9 +630,6 @@ pub(crate) unsafe fn restart_endpoint_waiter(tcb: *mut Tcb) -> *mut Tcb {
 unsafe fn clear_endpoint_ipc_state_locked(tcb: *mut Tcb) {
     unsafe {
         (*tcb).receiver_can_grant = 0;
-        (*tcb).receive_reply_cptr = 0;
-        (*tcb).receive_reply_object = 0;
-        (*tcb).receive_reply_can_grant = 0;
         (*tcb).sender_badge = 0;
         (*tcb).sender_can_grant = 0;
         (*tcb).sender_can_grant_reply = 0;
@@ -792,6 +665,12 @@ pub(crate) unsafe fn cancel_ipc(tcb: *mut Tcb) {
     if tcb.is_null() {
         return;
     }
+    let blocked_on_reply = blocked_on_reply_snapshot(tcb);
+    if blocked_on_reply {
+        unsafe {
+            crate::object::reply::cancel_blocked_on_reply(tcb);
+        }
+    }
     unsafe {
         let _guard = lock_state(tcb);
         (*tcb).waiting_on = 0;
@@ -808,15 +687,6 @@ pub(crate) unsafe fn cancel_endpoint_waiter(
 ) -> (*mut Tcb, bool) {
     if tcb.is_null() {
         return (core::ptr::null_mut(), false);
-    }
-    let state = unsafe {
-        let _guard = lock_state(tcb);
-        (*tcb).state
-    };
-    if state == ThreadState::BlockedOnReceive as u8 {
-        unsafe {
-            crate::object::reply::unbind_receiver(tcb);
-        }
     }
     unsafe {
         let _guard = lock_state(tcb);
@@ -1196,8 +1066,6 @@ pub(crate) unsafe fn finish_reply_state(
             (*tcb).fault_mrs = [0; FAULT_IPC_MRS];
         }
         (*tcb).waiting_on = 0;
-        (*tcb).reply_object = 0;
-        (*tcb).reply_slot = 0;
         if wake {
             (*tcb).state = ThreadState::Running as u8;
             0
@@ -1234,14 +1102,7 @@ pub(crate) unsafe fn set_blocked_sender(
     }
 }
 
-pub(crate) unsafe fn set_blocked_receiver(
-    tcb: *mut Tcb,
-    endpoint: u64,
-    can_grant: bool,
-    reply_cptr: u64,
-    reply_object: u64,
-    reply_can_grant: bool,
-) {
+pub(crate) unsafe fn set_blocked_receiver(tcb: *mut Tcb, endpoint: u64, can_grant: bool) {
     if tcb.is_null() {
         return;
     }
@@ -1251,9 +1112,6 @@ pub(crate) unsafe fn set_blocked_receiver(
         (*tcb).state = ThreadState::BlockedOnReceive as u8;
         (*tcb).waiting_on = endpoint;
         (*tcb).receiver_can_grant = if can_grant { 1 } else { 0 };
-        (*tcb).receive_reply_cptr = reply_cptr;
-        (*tcb).receive_reply_object = reply_object;
-        (*tcb).receive_reply_can_grant = if reply_can_grant { 1 } else { 0 };
     }
 }
 
@@ -1287,27 +1145,20 @@ pub(crate) unsafe fn set_blocked_fault_sender(
     }
 }
 
-pub(crate) unsafe fn start_receiver_rendezvous(tcb: *mut Tcb) -> (u64, u64, bool) {
+pub(crate) unsafe fn start_receiver_rendezvous(tcb: *mut Tcb) -> bool {
     if tcb.is_null() {
-        return (0, 0, false);
+        return false;
     }
     unsafe {
         let _guard = lock_state(tcb);
         (*tcb).waiting_on = 0;
-        (
-            (*tcb).receive_reply_cptr,
-            (*tcb).receive_reply_object,
-            (*tcb).receive_reply_can_grant != 0,
-        )
+        (*tcb).receiver_can_grant != 0
     }
 }
 
 pub(crate) unsafe fn wake_blocked_receiver_after_send(tcb: *mut Tcb) {
     if tcb.is_null() {
         return;
-    }
-    unsafe {
-        crate::object::reply::unbind_receiver(tcb);
     }
     unsafe {
         let _guard = lock_state(tcb);
@@ -1367,7 +1218,8 @@ pub(crate) unsafe fn finish_call_sender_after_rendezvous(tcb: *mut Tcb, blocked_
             (*tcb).state = ThreadState::Inactive as u8;
         }
         (*tcb).waiting_on = 0;
-        (*tcb).sender_is_fault = 0;
+        // Keep `sender_is_fault`. Fault Call senders still need it when the
+        // matching reply runs `doReplyTransfer`.
     }
 }
 
@@ -1636,9 +1488,9 @@ pub enum ThreadState {
 
 #[repr(C, align(32))]
 pub struct Tcb {
-    /// seL4-style CTEs embedded in the TCB object. Slots 0..4 are used for
-    /// CSpace, VSpace, IPC buffer, fault handler, and timeout handler; the
-    /// remaining slots exist because ZombieTCB uses radix 4.
+    /// seL4-style CTEs embedded in the TCB object. Slots 0..4 are CSpace,
+    /// VSpace, master Reply, Caller, and IPC buffer. The remaining slots
+    /// exist because ZombieTCB uses radix 4.
     pub ctes: [Cte; TCB_CNODE_ENTRIES],
 
     /// Saved user-mode register state. The trap path restores this on
@@ -1676,15 +1528,6 @@ pub struct Tcb {
     /// KVA), if any. Used to dequeue on cancel / destroy.
     pub waiting_on: u64,
     pub receiver_can_grant: u8,
-    pub receive_reply_cptr: u64,
-    pub receive_reply_object: u64,
-    pub receive_reply_can_grant: u8,
-
-    /// Slot holding the reply cap that parked this TCB on a reply object.
-    pub reply_slot: u64,
-    pub reply_object: u64,
-    pub caller_reply_object: u64,
-    pub caller_can_grant: u8,
 
     /// Badge from the cap used to Send / Call. Stashed when a sender
     /// blocks on an Endpoint so the eventual receiver can read it back
@@ -1738,13 +1581,6 @@ impl Tcb {
             queue_prev: 0,
             waiting_on: 0,
             receiver_can_grant: 0,
-            receive_reply_cptr: 0,
-            receive_reply_object: 0,
-            receive_reply_can_grant: 0,
-            reply_slot: 0,
-            reply_object: 0,
-            caller_reply_object: 0,
-            caller_can_grant: 0,
             sender_badge: 0,
             sender_extra_cap_slots: [0; TCB_SENDER_EXTRA_CAPS],
             sender_can_grant: 0,
@@ -1782,6 +1618,9 @@ pub unsafe fn init(tcb_kva: u64) {
         (*t).affinity = crate::kernel::smp::current_core_id() as u8;
         sel4_arch::init_user_context(&mut (*t).context);
     }
+    unsafe {
+        crate::object::reply::setup_reply_master(t);
+    }
 }
 
 /// Detach `tcb` from any Endpoint or Notification wait list it might be
@@ -1791,8 +1630,8 @@ pub unsafe fn init(tcb_kva: u64) {
 ///
 /// Dispatch on `tcb.state` so we route to the right object:
 /// BlockedOn{Receive,Send} → Endpoint; BlockedOnNotification → Notification.
-/// BlockedOnReply has no endpoint wait object; `suspend` handles the reply
-/// stack through `reply::remove_tcb`.
+/// BlockedOnReply has no endpoint wait object; `suspend` deletes the
+/// derived caller cap through `reply::cancel_blocked_on_reply`.
 unsafe fn unlink_from_wait_object(tcb: *mut Tcb) {
     if tcb.is_null() {
         return;
@@ -1805,9 +1644,6 @@ unsafe fn unlink_from_wait_object(tcb: *mut Tcb) {
         return;
     }
     unsafe {
-        if st == ThreadState::BlockedOnReceive as u8 {
-            crate::object::reply::unbind_receiver(tcb);
-        }
         if st == ThreadState::BlockedOnNotification as u8 {
             let ntfn = obj as *mut crate::object::notification::Notification;
             crate::object::notification::remove_waiter(ntfn, tcb);
@@ -1835,7 +1671,7 @@ pub unsafe fn suspend(tcb: *mut Tcb) {
         // backing slab might be reused.
         unlink_from_wait_object(tcb);
         dequeue(tcb);
-        crate::object::reply::remove_tcb(tcb);
+        crate::object::reply::cancel_blocked_on_reply(tcb);
         {
             let _guard = lock_state(tcb);
             (*tcb).state = ThreadState::Inactive as u8;
@@ -1862,7 +1698,8 @@ pub unsafe fn resume(tcb: *mut Tcb) {
     }
     unsafe {
         unlink_from_wait_object(tcb);
-        crate::object::reply::remove_tcb(tcb);
+        crate::object::reply::cancel_blocked_on_reply(tcb);
+        crate::object::reply::setup_reply_master(tcb);
         {
             let _guard = lock_state(tcb);
             (*tcb).state = ThreadState::Restart as u8;
@@ -2073,8 +1910,6 @@ unsafe fn clear_finalized_state(tcb: *mut Tcb) {
         (*tcb).queue_next = 0;
         (*tcb).queue_prev = 0;
         (*tcb).waiting_on = 0;
-        (*tcb).reply_slot = 0;
-        (*tcb).reply_object = 0;
         clear_endpoint_ipc_state_locked(tcb);
         (*tcb).flags = 0;
         (*tcb).bound_notification = 0;

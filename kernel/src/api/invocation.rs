@@ -302,7 +302,6 @@ pub fn handle_untyped(
                 ObjectType::Tcb => unsafe { crate::object::tcb::init(obj_base) },
                 ObjectType::Endpoint => unsafe { crate::object::endpoint::init(obj_base) },
                 ObjectType::Notification => unsafe { crate::object::notification::init(obj_base) },
-                ObjectType::Reply => unsafe { crate::object::reply::init(obj_base) },
                 _ => {}
             }
             let dst = &mut dest_cnode[(node_offset + i) as usize];
@@ -1256,13 +1255,6 @@ fn handle_thread_inner(
 
                 install_tcb_cap(slot, tcb_ptr, tcb::TCB_CTABLE_SLOT, cspace_cap, cspace_slot)?;
                 install_tcb_cap(slot, tcb_ptr, tcb::TCB_VTABLE_SLOT, vspace_cap, vspace_slot)?;
-                install_tcb_cap(
-                    slot,
-                    tcb_ptr,
-                    tcb::TCB_FAULT_HANDLER_SLOT,
-                    Cap::null(),
-                    ptr::null_mut(),
-                )?;
                 unsafe {
                     tcb::set_fault_endpoint_cptr(tcb_ptr, fault_ep);
                 }
@@ -1303,13 +1295,6 @@ fn handle_thread_inner(
                 let vspace_cap = derive_cap_for_copy(vspace_slot, vspace_cap)?;
                 require_tcb_vspace_root(vspace_cap)?;
 
-                install_tcb_cap(
-                    slot,
-                    tcb_ptr,
-                    tcb::TCB_FAULT_HANDLER_SLOT,
-                    Cap::null(),
-                    ptr::null_mut(),
-                )?;
                 unsafe {
                     tcb::set_fault_endpoint_cptr(tcb_ptr, fault_ep);
                 }
@@ -1974,13 +1959,19 @@ fn cnode_op_save_caller(
         if !(*dest).cap.is_null() || (*dest).mdb.prev() != 0 || (*dest).mdb.next() != 0 {
             return Err(SyscallError::DeleteFirst);
         }
-        let (reply_object, can_grant) = tcb::take_caller_reply(tcb::current());
-        if reply_object == 0 {
+        let src = tcb::cap_slot(tcb::current(), tcb::TCB_CALLER);
+        if src.is_null() {
             return Ok(());
         }
-        (*dest).cap = Cap::new_reply_object(reply_object, can_grant);
-        (*dest).mdb = MdbNode::NULL;
-        crate::object::reply::set_saved_reply_slot(reply_object, dest);
+        let cap = (*src).cap;
+        if cap.is_null() {
+        } else if cap.tag() == Some(CapTag::Reply) {
+            if !cap.reply_is_master() {
+                cnode_move_slot(src, dest, cap);
+            }
+        } else {
+            panic!("caller capability must be null or reply");
+        }
         let _ = cspace_guard;
     }
     Ok(())
@@ -2263,9 +2254,10 @@ fn cnode_op_copy_or_mint(
 
 pub(crate) fn derive_cap_for_copy(slot: *mut Cte, mut cap: Cap) -> Result<Cap, SyscallError> {
     match cap.tag() {
-        Some(CapTag::Zombie) | Some(CapTag::IrqControl) | Some(CapTag::IoPortControl) => {
-            Ok(Cap::null())
-        }
+        Some(CapTag::Zombie)
+        | Some(CapTag::IrqControl)
+        | Some(CapTag::IoPortControl)
+        | Some(CapTag::Reply) => Ok(Cap::null()),
         Some(CapTag::Untyped) => {
             let cspace_guard = crate::object::cnode::lock_cspace();
             if unsafe { crate::object::cnode::mdb_has_children_locked(&cspace_guard, slot) } {
@@ -2343,7 +2335,7 @@ fn mask_cap_rights(mut cap: Cap, rights: u64) -> Cap {
             }
         }
         Some(CapTag::Reply) => {
-            cap.set_reply_object_can_grant(cap.reply_object_can_grant() && allow_grant);
+            cap.set_reply_can_grant(cap.reply_can_grant() && allow_grant);
         }
         Some(CapTag::Frame) => {
             cap.set_frame_vm_rights(mask_frame_vm_rights(cap.frame_vm_rights(), rights));
@@ -2923,7 +2915,7 @@ fn same_object_as(a: Cap, b: Cap) -> bool {
             a.cnode_ptr() == b.cnode_ptr() && a.cnode_radix() == b.cnode_radix()
         }
         (Some(CapTag::Thread), Some(CapTag::Thread)) => a.thread_ptr() == b.thread_ptr(),
-        (Some(CapTag::Reply), Some(CapTag::Reply)) => a.reply_object_ptr() == b.reply_object_ptr(),
+        (Some(CapTag::Reply), Some(CapTag::Reply)) => a.reply_tcb_ptr() == b.reply_tcb_ptr(),
         (Some(CapTag::IrqHandler), Some(CapTag::IrqHandler)) => {
             a.irq_handler_irq() == b.irq_handler_irq()
         }
@@ -3061,17 +3053,7 @@ fn finalize_cap(
             }
             return Ok(FinaliseCapResult::null());
         }
-        Some(CapTag::Reply) => {
-            let reply = cap.reply_object_ptr();
-            if is_final {
-                if reply == 0 || !is_pspace_kva(reply) {
-                    debug_assert!(false, "final Reply cap must point at a reply object");
-                    panic!("final Reply cap must point at a reply object");
-                }
-                unsafe { crate::object::reply::finalize(reply) };
-            }
-            return Ok(FinaliseCapResult::null());
-        }
+        Some(CapTag::Reply) => return Ok(FinaliseCapResult::null()),
         Some(CapTag::Null | CapTag::Domain) => return Ok(FinaliseCapResult::null()),
         _ => {}
     }

@@ -42,6 +42,7 @@ pub(crate) unsafe fn call(
 }
 
 #[inline(always)]
+#[allow(dead_code)]
 pub(crate) unsafe fn recv_with_reply(
     ep: u64,
     reply: u64,
@@ -91,6 +92,40 @@ pub(crate) unsafe fn wait(ep: u64, syscall: isize) -> (u64, u64, u64, u64, u64, 
             inlateout("r9") r9,
             inlateout("r15") r15,
             inlateout("rax") syscall => _,
+            out("rcx") _,
+            out("r11") _,
+            clobber_abi("C"),
+            options(nostack)
+        );
+    }
+    (rdi, rsi, r10, r8, r9, r15)
+}
+
+#[inline(always)]
+pub(crate) unsafe fn reply_recv(
+    ep: u64,
+    info: u64,
+    mr0: u64,
+    mr1: u64,
+    mr2: u64,
+    mr3: u64,
+) -> (u64, u64, u64, u64, u64, u64) {
+    let mut rdi = ep;
+    let mut rsi = info;
+    let mut r10 = mr0;
+    let mut r8 = mr1;
+    let mut r9 = mr2;
+    let mut r15 = mr3;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rdi") rdi,
+            inlateout("rsi") rsi,
+            inlateout("r10") r10,
+            inlateout("r8") r8,
+            inlateout("r9") r9,
+            inlateout("r15") r15,
+            inlateout("rax") SYS_REPLY_RECV => _,
             out("rcx") _,
             out("r11") _,
             clobber_abi("C"),

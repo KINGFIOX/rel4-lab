@@ -11,12 +11,12 @@ use core::ptr::{read_volatile, write_volatile};
 #[cfg(target_arch = "riscv64")]
 use linux_abi::UART_MMIO_VADDR;
 use linux_abi::{
-    IpcProtocol, IpcStatus, LINUX_ABI_VERSION, SERVER_RECV_REPLY_CPTR, SERVICE_ENDPOINT_CPTR,
-    UART_REPLY_ENDPOINT_CPTR, UartOp,
+    IpcProtocol, IpcStatus, LINUX_ABI_VERSION, SERVICE_ENDPOINT_CPTR, UART_REPLY_ENDPOINT_CPTR,
+    UartOp,
 };
 use sel4_user::{
     IpcMessage, error, halt_loop, info, init_ipc_buffer, init_logger, msg_info, msg_label,
-    sel4_recv_with_reply, sel4_reply_recv_with_reply, sel4_send,
+    sel4_recv, sel4_reply_recv, sel4_send,
 };
 
 #[cfg(target_arch = "riscv64")]
@@ -49,16 +49,9 @@ pub extern "C" fn _start(ipc_buffer: usize) -> ! {
     let mut reply_mrs = [0u64; 4];
     loop {
         let msg = if reply_pending {
-            unsafe {
-                sel4_reply_recv_with_reply(
-                    SERVICE_ENDPOINT_CPTR,
-                    msg_info(0, 0, 0, 4),
-                    &reply_mrs,
-                    SERVER_RECV_REPLY_CPTR,
-                )
-            }
+            unsafe { sel4_reply_recv(SERVICE_ENDPOINT_CPTR, msg_info(0, 0, 0, 4), &reply_mrs) }
         } else {
-            unsafe { sel4_recv_with_reply(SERVICE_ENDPOINT_CPTR, SERVER_RECV_REPLY_CPTR) }
+            unsafe { sel4_recv(SERVICE_ENDPOINT_CPTR) }
         };
         if is_async_request(&msg) {
             handle_async_request(&msg);

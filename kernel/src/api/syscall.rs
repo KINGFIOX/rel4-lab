@@ -216,28 +216,7 @@ pub fn do_send(uc: &mut UserContext, nb: bool) {
             crate::api::ipc::send(uc, !nb, false);
         }
         Some(CapTag::Reply) => unsafe {
-            if cap.reply_is_object() {
-                let reply = cap.reply_object_ptr();
-                if reply == 0 {
-                    return;
-                }
-                let caller = if reply & 1 != 0 {
-                    (reply & !1) as *mut crate::object::tcb::Tcb
-                } else {
-                    crate::object::reply::tcb(reply)
-                };
-                if crate::object::tcb::blocked_on_reply_snapshot(caller) {
-                    if reply & 1 != 0 {
-                        (*slot).cap = crate::object::cap::Cap::null();
-                        (*slot).mdb = crate::object::mdb::MdbNode::NULL;
-                    }
-                    crate::api::ipc::reply_to_tcb(uc, caller);
-                    if reply & 1 == 0 {
-                        crate::object::reply::complete_reply(reply, caller);
-                    }
-                    crate::object::tcb::clear_reply_slot_if(caller, slot as u64);
-                }
-            }
+            crate::api::ipc::handle_reply_slot(uc, (cap, slot));
         },
         Some(CapTag::Thread) => unsafe {
             thread::with_current(|t| {
@@ -254,20 +233,13 @@ pub fn do_send(uc: &mut UserContext, nb: bool) {
 /// we walk the EP state machine in `api::ipc::recv`. Invalid receive caps
 /// raise a receive-phase CapFault, matching seL4 `handleRecv`.
 pub fn do_recv(uc: &mut UserContext, blocking: bool) {
-    let reply_cptr = uc.reply_reg();
-    if reply_cptr == 0 {
-        do_recv_inner(uc, blocking, 0, false)
-    } else {
-        do_recv_inner(uc, blocking, reply_cptr, true)
+    do_recv_inner(uc, blocking)
+}
+
+fn do_recv_inner(uc: &mut UserContext, blocking: bool) {
+    unsafe {
+        crate::object::reply::delete_caller_cap(crate::object::tcb::current());
     }
-}
-
-pub fn do_recv_mcs(uc: &mut UserContext, blocking: bool, can_reply: bool) {
-    let reply_cptr = if can_reply { uc.reply_reg() } else { 0 };
-    do_recv_inner(uc, blocking, reply_cptr, can_reply)
-}
-
-fn do_recv_inner(uc: &mut UserContext, blocking: bool, reply_cptr: u64, can_reply: bool) {
     let cptr = uc.cap_reg();
     let cap = match unsafe { thread::with_current(|t| lookup_cap(t, cptr)) } {
         Ok((cap, _slot)) => cap,
@@ -279,15 +251,7 @@ fn do_recv_inner(uc: &mut UserContext, blocking: bool, reply_cptr: u64, can_repl
 
     match cap.tag() {
         Some(CapTag::Endpoint) => {
-            if can_reply {
-                if !valid_reply_cap_for_recv(reply_cptr) {
-                    write_recv_cap_fault_or_empty(uc, reply_cptr);
-                    return;
-                }
-                crate::api::ipc::recv_mcs(uc, blocking, reply_cptr);
-            } else {
-                crate::api::ipc::recv(uc, blocking);
-            }
+            crate::api::ipc::recv(uc, blocking);
         }
         Some(CapTag::Notification) => {
             let ntfn_ptr = cap.notification_ptr() as *mut crate::object::notification::Notification;
@@ -316,68 +280,6 @@ fn do_recv_inner(uc: &mut UserContext, blocking: bool, reply_cptr: u64, can_repl
         }
         _ => write_recv_cap_fault_or_empty(uc, cptr),
     }
-}
-
-fn valid_reply_cap_for_recv(reply_cptr: u64) -> bool {
-    let cap = match unsafe { thread::with_current(|t| lookup_cap(t, reply_cptr)) } {
-        Ok((cap, _slot)) => cap,
-        Err(_) => return false,
-    };
-    cap.tag() == Some(CapTag::Reply) && cap.reply_is_object()
-}
-
-pub fn do_reply_recv_mcs(uc: &mut UserContext) {
-    let reply_cptr = uc.reply_reg();
-    if reply_cptr != 0 {
-        let saved_cptr = uc.cap_reg();
-        uc.set_cap_reg(reply_cptr);
-        do_send(uc, false);
-        uc.set_cap_reg(saved_cptr);
-    } else {
-        crate::api::ipc::reply(uc);
-    }
-    do_recv_inner(uc, true, reply_cptr, true);
-}
-
-pub fn do_nbsend_recv_mcs(uc: &mut UserContext, wait: bool) {
-    let src = uc.cap_reg();
-    let reply_or_dest = uc.reply_reg();
-    let send_dest = if wait { reply_or_dest } else { read_t0(uc) };
-    let saved_src = src;
-    if send_dest != 0 {
-        uc.set_cap_reg(send_dest);
-        do_send_with_reply_rights(uc, true);
-    }
-    uc.set_cap_reg(saved_src);
-    do_recv_inner(uc, true, if wait { 0 } else { reply_or_dest }, !wait);
-}
-
-fn do_send_with_reply_rights(uc: &mut UserContext, nb: bool) {
-    let cptr = uc.cap_reg();
-    let (cap, _slot) = match unsafe { thread::with_current(|t| lookup_cap(t, cptr)) } {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-
-    match cap.tag() {
-        Some(CapTag::Endpoint) => {
-            crate::api::ipc::send(uc, !nb, true);
-        }
-        Some(CapTag::Notification) => {
-            if cap.notification_can_send() {
-                let ntfn_ptr =
-                    cap.notification_ptr() as *mut crate::object::notification::Notification;
-                unsafe {
-                    crate::object::notification::signal(ntfn_ptr, cap.notification_badge());
-                }
-            }
-        }
-        _ => do_send(uc, nb),
-    }
-}
-
-fn read_t0(uc: &UserContext) -> u64 {
-    uc.scratch_reg()
 }
 
 fn write_recv_cap_fault_or_empty(uc: &mut UserContext, cptr: u64) {

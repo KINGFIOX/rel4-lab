@@ -42,18 +42,18 @@ use consts::{
 };
 use consts::{
     INIT_TCB, INIT_VSPACE, IRQ_CONTROL, KERNEL_TIMER_IRQ, MAX_PROCS, OBJ_4K, OBJ_ENDPOINT,
-    OBJ_NOTIFICATION, OBJ_REPLY, OBJ_UNTYPED,
+    OBJ_NOTIFICATION, OBJ_UNTYPED,
 };
 use consts::{LABEL_TCB_BIND_NOTIFICATION, PAGE_SIZE, ROOT_CNODE_DEPTH};
 use consts::{
-    PROC_RUNNABLE, PROC_WAITING, ROOT_CNODE, SERVER_CNODE_CPTR, SERVER_RECV_REPLY_CPTR,
-    SERVICE_UNTYPED_BITS, VM_ATTR_UNCACHED,
+    PROC_RUNNABLE, PROC_WAITING, ROOT_CNODE, SERVER_CNODE_CPTR, SERVICE_UNTYPED_BITS,
+    VM_ATTR_UNCACHED,
 };
 use exec_syscalls::load_init_program;
 use linux::handle_linux_syscall;
 use sel4_user::{
     call_checked, cap_rights, cnode_cap_data, init_ipc_buffer, msg_info, msg_label, rt, sel4_call,
-    sel4_recv_with_reply,
+    sel4_recv,
 };
 use types::{BootInfo, SyscallResult, TaskStruct};
 use util::{error, halt_loop, info, init_logger, warn};
@@ -130,7 +130,8 @@ fn run(bi_ptr: *const BootInfo) -> ! {
 
 fn reactor_idle(fault_ep: u64) {
     let reply_slot = reply_caps::acquire();
-    let msg = unsafe { sel4_recv_with_reply(fault_ep, reply_slot) };
+    let msg = unsafe { sel4_recv(fault_ep) };
+    reply_caps::save_caller(reply_slot);
 
     if (msg.badge & IpcBadge::VfsReply.raw()) != 0 {
         let _ = linux::complete_vfs_async_reply(&msg);
@@ -362,14 +363,6 @@ fn spawn_service_server(
         service.cnode,
         cap_rights(true, true, true, true),
         cnode_cap_data(0, consts::WORD_BITS - consts::CHILD_CNODE_BITS),
-    );
-    let recv_reply = alloc.retype_one_from(service_untyped, OBJ_REPLY, 0);
-    mint_cap_to_child(
-        &service,
-        SERVER_RECV_REPLY_CPTR,
-        recv_reply,
-        cap_rights(true, true, true, true),
-        0,
     );
     for &(dst_cptr, src_cap, rights, badge) in extra_caps {
         mint_cap_to_child(&service, dst_cptr, src_cap, rights, badge);

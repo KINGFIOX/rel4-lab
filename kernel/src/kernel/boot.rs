@@ -447,6 +447,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
                     buffer_src,
                     tcb::cap_slot(rs_ptr, tcb::TCB_BUFFER_SLOT),
                 );
+                crate::object::reply::setup_reply_master(rs_ptr);
             });
         }
         let mut next_slot = RootCNodeCapSlot::NumInitialCaps.index();

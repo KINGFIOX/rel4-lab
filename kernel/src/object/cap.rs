@@ -562,10 +562,12 @@ impl Cap {
     }
 
     #[inline]
-    pub const fn new_reply_object(reply_ptr: u64, can_grant: bool) -> Cap {
+    pub const fn new_reply(tcb_ptr: u64, can_grant: bool, master: bool) -> Cap {
         let mut c = Cap::null();
-        c.words[0] = ((CapTag::Reply as u64) << 59) | (((can_grant as u64) & 0x1) << 58);
-        c.words[1] = reply_ptr;
+        c.words[0] = ((CapTag::Reply as u64) << 59)
+            | (((can_grant as u64) & 0x1) << 58)
+            | (((master as u64) & 0x1) << 57);
+        c.words[1] = tcb_ptr;
         c
     }
     #[inline]
@@ -603,19 +605,19 @@ impl Cap {
     }
 
     #[inline]
-    pub const fn reply_is_object(self) -> bool {
-        self.tag_raw() == CapTag::Reply as u64 && self.words[1] != 0
-    }
-    #[inline]
-    pub const fn reply_object_ptr(self) -> u64 {
+    pub const fn reply_tcb_ptr(self) -> u64 {
         self.words[1]
     }
     #[inline]
-    pub const fn reply_object_can_grant(self) -> bool {
+    pub const fn reply_can_grant(self) -> bool {
         (self.words[0] >> 58) & 1 != 0
     }
     #[inline]
-    pub fn set_reply_object_can_grant(&mut self, can_grant: bool) {
+    pub const fn reply_is_master(self) -> bool {
+        (self.words[0] >> 57) & 1 != 0
+    }
+    #[inline]
+    pub fn set_reply_can_grant(&mut self, can_grant: bool) {
         self.words[0] &= !(1u64 << 58);
         self.words[0] |= ((can_grant as u64) & 0x1) << 58;
     }

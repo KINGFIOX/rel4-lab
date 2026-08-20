@@ -2,23 +2,21 @@
 //! Reply / ReplyRecv state-machine glue that bridges `syscall::do_*`
 //! to `object::endpoint`.
 //!
-//! Design follows the explicit reply-cap IPC path:
+//! Design follows non-MCS seL4 IPC:
 //!
 //! * `seL4_Send` (blocking) and `seL4_Call` walk the EP. If a receiver
 //!   is already waiting → rendezvous, transfer message, wake the
-//!   receiver. `Call` additionally parks the sender on `BlockedOnReply`
-//!   only when the receiver supplied a valid reply object. If no receiver is
-//!   waiting, the sender is dequeued from the runqueue and queued on the EP
-//!   (`BlockedOnSend`).
+//!   receiver. `Call` parks the sender on `BlockedOnReply` and inserts a
+//!   derived reply cap into the receiver's `tcbCaller` slot. If no
+//!   receiver is waiting, the sender is queued on the EP (`BlockedOnSend`).
 //! * `seL4_NBSend` is the Send path minus the queueing fallback —
 //!   no receiver waiting means the message is dropped.
-//! * `seL4_Recv` (blocking) walks the EP for a queued sender, and if
-//!   one is found rendezvous + wake-or-park-the-sender (depending on
-//!   whether the queued sender was a Call). No sender → block on the
-//!   EP (`BlockedOnReceive`).
+//! * `seL4_Recv` (blocking) first deletes any leftover caller cap, then
+//!   walks the EP for a queued sender. No sender → block on the EP
+//!   (`BlockedOnReceive`).
 //! * `seL4_NBRecv` is Recv minus the blocking fallback.
-//! * Reply delivery comes through an explicit reply object.
-//! * `seL4_ReplyRecv` is Reply followed by Recv on a fresh cap/reply object.
+//! * `seL4_Reply` reads the current thread's `tcbCaller` slot.
+//! * `seL4_ReplyRecv` is Reply followed by Recv.
 //!
 //! Message-register transfer:
 //!   * MR[0..3] live in regs[A2..A5] — copied register-to-register.
@@ -388,130 +386,27 @@ unsafe fn block_sender_locked(
     }
 }
 
-/// Block the current TCB on `ep` as a receiver. No payload to stash.
-unsafe fn block_receiver(ep: *mut endpoint::Endpoint, can_grant: bool, reply_cptr: u64) {
-    if ep.is_null() {
-        return;
-    }
-    let cur = tcb::current();
-    if cur.is_null() {
-        return;
-    }
-    let _guard = unsafe { endpoint::lock_queue(ep) };
-    unsafe {
-        block_receiver_locked(ep, cur, can_grant, reply_cptr);
-    }
-}
-
-unsafe fn block_receiver_locked(
-    ep: *mut endpoint::Endpoint,
-    cur: *mut tcb::Tcb,
-    can_grant: bool,
-    reply_cptr: u64,
-) {
+unsafe fn block_receiver_locked(ep: *mut endpoint::Endpoint, cur: *mut tcb::Tcb, can_grant: bool) {
     if cur.is_null() || ep.is_null() {
         return;
     }
     unsafe {
-        let (bound_reply_cptr, bound_reply_kva, bound_reply_can_grant) = if reply_cptr != 0 {
-            match lookup_reply_object_for(cur, reply_cptr) {
-                Some((_slot, reply_kva, reply_can_grant))
-                    if crate::object::reply::prepare_receiver(reply_kva, cur) =>
-                {
-                    (reply_cptr, reply_kva, reply_can_grant)
-                }
-                _ => (0, 0, false),
-            }
-        } else {
-            (0, 0, false)
-        };
         tcb::dequeue(cur);
-        tcb::set_blocked_receiver(
-            cur,
-            ep as u64,
-            can_grant,
-            bound_reply_cptr,
-            bound_reply_kva,
-            bound_reply_can_grant,
-        );
-        if bound_reply_kva != 0 {
-            let bound = crate::object::reply::bind_blocked_receiver(bound_reply_kva, cur);
-            debug_assert!(bound, "valid receive reply object must bind");
-        }
+        tcb::set_blocked_receiver(cur, ep as u64, can_grant);
         endpoint::enqueue_waiter_locked(ep, cur, EpState::Receiving);
     }
 }
-unsafe fn lookup_reply_object_for(
-    owner: *mut tcb::Tcb,
-    reply_cptr: u64,
-) -> Option<(*mut Cte, u64, bool)> {
-    if owner.is_null() || reply_cptr == 0 {
-        return None;
-    }
-    let cspace_cap = tcb::cspace_cap_snapshot(owner);
-    if cspace_cap.tag() != Some(CapTag::CNode) {
-        return None;
-    }
-    let (reply_cap, slot) = match cspace::lookup_cap_in(cspace_cap, reply_cptr, cspace::WORD_BITS) {
-        Ok(v) => v,
-        _ => return None,
-    };
-    if reply_cap.tag() != Some(CapTag::Reply) || !reply_cap.reply_is_object() {
-        return None;
-    }
-    Some((
-        slot,
-        reply_cap.reply_object_ptr(),
-        reply_cap.reply_object_can_grant(),
-    ))
-}
 
-unsafe fn reply_object_for_receive(
-    receiver: *mut tcb::Tcb,
-    reply_cptr: u64,
-) -> Option<(u64, u64, bool)> {
-    let (bound_reply_cptr, bound_reply_kva, bound_reply_can_grant) =
-        tcb::receive_reply_snapshot(receiver);
-    if bound_reply_kva != 0 {
-        return Some((bound_reply_cptr, bound_reply_kva, bound_reply_can_grant));
-    }
-    let (_slot, reply_kva, reply_can_grant) =
-        unsafe { lookup_reply_object_for(receiver, reply_cptr)? };
+unsafe fn park_call_sender(sender: *mut tcb::Tcb, receiver: *mut tcb::Tcb, can_grant: bool) {
     unsafe {
-        crate::object::reply::cancel_owner_for_receive_if_needed(reply_kva, receiver);
-    }
-    Some((reply_cptr, reply_kva, reply_can_grant))
-}
-
-pub(crate) unsafe fn set_reply_object_for(
-    receiver: *mut tcb::Tcb,
-    reply_cptr: u64,
-    reply_kva: u64,
-    reply_can_grant: bool,
-    caller: *mut tcb::Tcb,
-    can_grant: bool,
-    _reply_rights: bool,
-) -> bool {
-    if receiver.is_null() || caller.is_null() || reply_kva == 0 {
-        return false;
-    }
-    unsafe {
-        if !matches!(
-            lookup_reply_object_for(receiver, reply_cptr),
-            Some((_slot, looked_up_reply_kva, _)) if looked_up_reply_kva == reply_kva
-        ) {
-            return false;
+        if crate::object::reply::setup_caller_cap(sender, receiver, can_grant) {
+            tcb::finish_call_sender_after_rendezvous(sender, true);
+        } else if tcb::sender_fault_snapshot(sender).0 {
+            tcb::set_inactive(sender);
+            tcb::clear_waiting_on(sender);
+        } else {
+            tcb::deactivate_queued_call_sender(sender);
         }
-        if !crate::object::reply::push(
-            caller,
-            receiver,
-            reply_kva,
-            false,
-            can_grant && reply_can_grant,
-        ) {
-            return false;
-        }
-        true
     }
 }
 unsafe fn consume_bound_notification_if_active(cur: *mut tcb::Tcb, uc: &mut UserContext) -> bool {
@@ -549,7 +444,7 @@ unsafe fn complete_receive_from_sender(
     cur: *mut tcb::Tcb,
     sender: *mut tcb::Tcb,
     ep: *mut endpoint::Endpoint,
-    reply_cptr: u64,
+    receiver_can_grant: bool,
 ) {
     if cur.is_null() || sender.is_null() {
         return;
@@ -557,12 +452,6 @@ unsafe fn complete_receive_from_sender(
     let sender_state = tcb::queued_sender_snapshot(sender);
     let info_in = MessageInfo(sender_state.info_word);
     unsafe {
-        let receive_reply =
-            if sender_state.is_call && (sender_state.can_grant || sender_state.can_grant_reply) {
-                reply_object_for_receive(cur, reply_cptr)
-            } else {
-                None
-            };
         if sender_state.is_fault {
             transfer_fault_message(sender, cur, sender_state.badge);
         } else {
@@ -578,39 +467,11 @@ unsafe fn complete_receive_from_sender(
         }
         if sender_state.is_call {
             if sender_state.can_grant || sender_state.can_grant_reply {
-                let (reply_set, reply_token, reply_can_grant) = match receive_reply {
-                    Some((reply_cptr, reply_kva, reply_can_grant)) => (
-                        set_reply_object_for(
-                            cur,
-                            reply_cptr,
-                            reply_kva,
-                            reply_can_grant,
-                            sender,
-                            sender_state.can_grant,
-                            false,
-                        ),
-                        reply_kva,
-                        sender_state.can_grant && reply_can_grant,
-                    ),
-                    None => {
-                        tcb::set_blocked_on_reply(sender, (sender as u64) | 1);
-                        (true, (sender as u64) | 1, false)
-                    }
-                };
-                if reply_set {
-                    tcb::set_caller_reply(cur, reply_token, reply_can_grant);
-                    // Caller is now parked on the reply object.
-                } else if sender_state.is_fault {
-                    tcb::set_inactive(sender);
-                    tcb::clear_waiting_on(sender);
-                } else {
-                    tcb::deactivate_queued_call_sender(sender);
-                };
+                park_call_sender(sender, cur, receiver_can_grant);
             } else {
                 tcb::deactivate_queued_call_sender(sender);
             }
         } else {
-            // Plain Send: wake the sender, drop its badge.
             tcb::wake_queued_sender(sender);
             tcb::enqueue(sender);
         }
@@ -682,13 +543,6 @@ pub fn send(uc: &mut UserContext, blocking: bool, _reply_rights: bool) {
 /// `seL4_Recv` on an Endpoint. Returns synthesised reply (badge=0,
 /// label=0, length=0) if no sender is waiting and `blocking=false`.
 pub fn recv(uc: &mut UserContext, blocking: bool) {
-    recv_with_reply(uc, blocking, 0)
-}
-pub fn recv_mcs(uc: &mut UserContext, blocking: bool, reply_cptr: u64) {
-    recv_with_reply(uc, blocking, reply_cptr)
-}
-
-fn recv_with_reply(uc: &mut UserContext, blocking: bool, reply_cptr: u64) {
     let cptr = uc.cap_reg();
 
     let (cap, ep, _) = match lookup_endpoint(cptr) {
@@ -710,12 +564,15 @@ fn recv_with_reply(uc: &mut UserContext, blocking: bool, reply_cptr: u64) {
         write_empty_reply(uc);
         return;
     }
+    unsafe {
+        crate::object::reply::delete_caller_cap(cur);
+    }
     let sender = unsafe {
         let _guard = endpoint::lock_queue(ep);
         endpoint::pop_sender_locked(ep)
     };
     if !sender.is_null() {
-        unsafe { complete_receive_from_sender(cur, sender, ep, reply_cptr) };
+        unsafe { complete_receive_from_sender(cur, sender, ep, cap.endpoint_can_grant()) };
         return;
     }
 
@@ -749,13 +606,13 @@ fn recv_with_reply(uc: &mut UserContext, blocking: bool, reply_cptr: u64) {
             {
                 RecvBlockAction::Notification(badge)
             } else {
-                block_receiver_locked(ep, cur, cap.endpoint_can_grant(), reply_cptr);
+                block_receiver_locked(ep, cur, cap.endpoint_can_grant());
                 RecvBlockAction::Blocked
             }
         };
         match action {
             RecvBlockAction::Sender(sender) => {
-                unsafe { complete_receive_from_sender(cur, sender, ep, reply_cptr) };
+                unsafe { complete_receive_from_sender(cur, sender, ep, cap.endpoint_can_grant()) };
             }
             RecvBlockAction::Notification(badge) => unsafe {
                 write_bound_notification_reply(cur, uc, badge);
@@ -767,12 +624,12 @@ fn recv_with_reply(uc: &mut UserContext, blocking: bool, reply_cptr: u64) {
             let _guard = endpoint::lock_queue(ep);
             let sender = endpoint::pop_sender_locked(ep);
             if sender.is_null() {
-                block_receiver_locked(ep, cur, cap.endpoint_can_grant(), reply_cptr);
+                block_receiver_locked(ep, cur, cap.endpoint_can_grant());
             }
             sender
         };
         if !sender.is_null() {
-            unsafe { complete_receive_from_sender(cur, sender, ep, reply_cptr) };
+            unsafe { complete_receive_from_sender(cur, sender, ep, cap.endpoint_can_grant()) };
         }
     }
 }
@@ -833,69 +690,50 @@ pub fn call(uc: &mut UserContext) {
             cap.endpoint_can_grant(),
             extra_cap_slots,
         );
-        let (receiver_reply_cptr, receiver_reply_kva, receiver_reply_can_grant) =
-            tcb::start_receiver_rendezvous(receiver);
+        let receiver_can_grant = tcb::start_receiver_rendezvous(receiver);
         tcb::dequeue(cur);
         let has_reply_rights = cap.endpoint_can_grant() || cap.endpoint_can_grant_reply();
-        let reply_token = if has_reply_rights {
-            if receiver_reply_kva != 0 {
-                let reply_set = set_reply_object_for(
-                    receiver,
-                    receiver_reply_cptr,
-                    receiver_reply_kva,
-                    receiver_reply_can_grant,
-                    cur,
-                    cap.endpoint_can_grant(),
-                    true,
-                );
-                if reply_set {
-                    receiver_reply_kva
-                } else {
-                    tcb::set_blocked_on_reply(cur, (cur as u64) | 1);
-                    (cur as u64) | 1
-                }
-            } else {
-                tcb::set_blocked_on_reply(cur, (cur as u64) | 1);
-                (cur as u64) | 1
-            }
+        if has_reply_rights {
+            park_call_sender(cur, receiver, receiver_can_grant);
         } else {
-            0
-        };
-        if reply_token != 0 {
-            tcb::set_caller_reply(
-                receiver,
-                reply_token,
-                cap.endpoint_can_grant() && receiver_reply_can_grant && receiver_reply_kva != 0,
-            );
+            tcb::finish_call_sender_after_rendezvous(cur, false);
         }
-        tcb::finish_call_sender_after_rendezvous(cur, reply_token != 0);
         tcb::finish_receiver_rendezvous(receiver);
         tcb::enqueue(receiver);
     }
 }
 
-/// Reply delivery is driven by Send on an explicit Reply cap, so this
-/// compatibility hook is a no-op.
+/// `seL4_Reply`: transfer to the TCB named by the current `tcbCaller` cap.
 pub fn reply(uc: &mut UserContext) {
     let cur = tcb::current();
     if cur.is_null() {
         return;
     }
-    let (reply_kva, _can_grant) = unsafe { tcb::take_caller_reply(cur) };
-    if reply_kva == 0 {
-        return;
-    }
-    let caller = if reply_kva & 1 != 0 {
-        (reply_kva & !1) as *mut tcb::Tcb
-    } else {
-        unsafe { crate::object::reply::tcb(reply_kva) }
-    };
     unsafe {
-        reply_to_tcb(uc, caller);
+        handle_reply_slot(uc, crate::object::reply::caller_reply_cap(cur));
     }
 }
 
-pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb) {
+pub unsafe fn handle_reply_slot(
+    uc: &mut UserContext,
+    (cap, slot): (Cap, *mut crate::object::cnode::Cte),
+) {
+    if cap.tag() != Some(CapTag::Reply) || cap.reply_is_master() {
+        return;
+    }
+    let caller = cap.reply_tcb_ptr() as *mut tcb::Tcb;
+    if caller.is_null() || caller == tcb::current() {
+        return;
+    }
+    unsafe {
+        reply_to_tcb(uc, caller, cap.reply_can_grant());
+        if !slot.is_null() {
+            crate::api::invocation::cte_delete_one(slot);
+        }
+    }
+}
+
+pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb, can_grant: bool) {
     if caller.is_null() {
         return;
     }
@@ -914,7 +752,7 @@ pub unsafe fn reply_to_tcb(uc: &mut UserContext, caller: *mut tcb::Tcb) {
                 info,
                 0,
                 core::ptr::null_mut(),
-                false,
+                can_grant,
                 [0; MSG_MAX_EXTRA_CAPS_USIZE],
             );
         } else {
@@ -1012,16 +850,10 @@ unsafe fn apply_unknown_syscall_reply(
     }
 }
 
-/// `seL4_ReplyRecv`: send on the explicit Reply cap selected by the syscall
-/// wrapper, then immediately Recv on the supplied EP cap.
+/// `seL4_ReplyRecv`: Reply from `tcbCaller`, then Recv on the EP cap.
 pub fn reply_recv(uc: &mut UserContext) {
-    let reply_cptr = uc.reply_reg();
-    if reply_cptr != 0 {
-        crate::api::syscall::do_reply_recv_mcs(uc);
-    } else {
-        reply(uc);
-        recv(uc, true);
-    }
+    reply(uc);
+    recv(uc, true);
 }
 
 /// "No sender, no payload" reply written into the syscall return

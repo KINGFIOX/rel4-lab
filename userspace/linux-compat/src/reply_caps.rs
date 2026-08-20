@@ -1,8 +1,8 @@
 use crate::allocator::Allocator;
-use crate::consts::{MAX_FAULT_REPLY_CAPS, OBJ_REPLY};
+use crate::consts::MAX_FAULT_REPLY_CAPS;
 use crate::util::{halt_loop, warn};
 use sel4_user::sync::SpinLock;
-use sel4_user::{msg_info, sel4_send};
+use sel4_user::{msg_info, sel4_cnode_save_caller, sel4_send};
 
 struct ReplyCapPool {
     all: [u64; MAX_FAULT_REPLY_CAPS],
@@ -25,7 +25,7 @@ pub(crate) fn init(alloc: &mut Allocator) {
     }
     let mut i = 0usize;
     while i < MAX_FAULT_REPLY_CAPS {
-        let slot = alloc.retype_one(OBJ_REPLY, 0);
+        let slot = alloc.alloc_slot();
         pool.all[i] = slot;
         pool.free[i] = slot;
         i += 1;
@@ -42,6 +42,10 @@ pub(crate) fn acquire() -> u64 {
     }
     pool.free_len -= 1;
     pool.free[pool.free_len]
+}
+
+pub(crate) fn save_caller(slot: u64) {
+    sel4_cnode_save_caller(slot);
 }
 
 pub(crate) fn release(slot: u64) {
