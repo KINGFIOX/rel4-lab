@@ -7,7 +7,6 @@ pub enum FaultLabel {
     CapFault,
     UnknownSyscall,
     UserException,
-    Timeout,
     VmFault,
 }
 
@@ -17,7 +16,6 @@ impl FaultLabel {
             Self::CapFault => 1,
             Self::UnknownSyscall => 2,
             Self::UserException => 3,
-            Self::Timeout => 5,
             Self::VmFault => 5,
         }
     }

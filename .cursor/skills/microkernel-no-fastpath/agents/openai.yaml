@@ -1,0 +1,4 @@
+interface:
+  display_name: "Microkernel Has No Fastpath"
+  short_description: "Do not add IPC fastpath or slowpath names to first-party sources"
+  default_prompt: "Use $microkernel-no-fastpath when changing this microkernel. The kernel has one IPC path; do not add a fastpath, a slowpath, or fastpath/slowpath names, comments, or stubs to first-party sources."

@@ -1,6 +1,6 @@
 # FPU
 
-Both backends implement lazy FPU ownership without MCS handoff. RISC-V lives
+Both backends implement lazy FPU ownership. RISC-V lives
 in `kernel/src/arch/riscv64/machine/fpu.rs` (`f0..f31` / `fcsr`). x86_64 lives
 in `kernel/src/arch/x86_64/machine/fpu.rs` (`#NM`, `CR0.TS`, `fxsave` /
 `fxrstor`). Shared TCB flags, trap restore, and SMP remote release call the
@@ -38,8 +38,7 @@ compiler treats the TCB FPU image as memory, and they run inside a
 Setting it releases a live owner. Re-enabling the current TCB calls
 `lazy_restore` before return.
 
-There is no MCS scheduling-context FPU handoff and no multi-domain
-`prepareSetDomain` path. `NUM_DOMAINS` is 1.
+There is no multi-domain `prepareSetDomain` path. `NUM_DOMAINS` is 1.
 
 ## Source checks
 

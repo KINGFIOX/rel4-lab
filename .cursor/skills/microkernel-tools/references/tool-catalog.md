@@ -25,8 +25,8 @@ Key behavior:
 - Uses `${SEL4_BUILD_DIR:-third_party/sel4-lab/sel4test/build-riscv64}`.
 - Infers `${SEL4_TREE_DIR}` from `SEL4_TREE_DIR`, `SEL4_ROOT`, or the default third-party path.
 - Reconfigures upstream CMake only when cache/source/env overrides differ.
-- Defaults CMake to `MCS=OFF`. RISC-V also defaults `SMP=ON`, `NUM_NODES=2`. x86 defaults `SMP=OFF`, `NUM_NODES=1`, `Sel4testHaveTimer=ON`, and a narrow POSIX regex (CNode, IPC, `TIMER0001`).
-- Honors `SEL4TEST_REGEX`, `SMP`, `NUM_NODES`, `MCS`, `SIMULATION`, `DOMAINS`, `ARM_HYP`, `RELEASE`, `VERIFICATION`, `BAMBOO`, and `QEMU_DTB`.
+- Pins vendored sel4test CMake `MCS=OFF`. RISC-V also defaults `SMP=ON`, `NUM_NODES=2`. x86 defaults `SMP=OFF`, `NUM_NODES=1`, `Sel4testHaveTimer=ON`, and a narrow POSIX regex (CNode, IPC, `TIMER0001`).
+- Honors `SEL4TEST_REGEX`, `SMP`, `NUM_NODES`, `SIMULATION`, `DOMAINS`, `ARM_HYP`, `RELEASE`, `VERIFICATION`, `BAMBOO`, and `QEMU_DTB`.
 - Supports custom rootservers through `ROOTSERVER_ELF`.
 - Writes `${OUT_IMAGE:-images/sel4test-driver-image-riscv-qemu-riscv-virt}`.
 

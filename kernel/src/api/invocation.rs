@@ -11,6 +11,7 @@ use core::ptr;
 
 #[cfg(target_arch = "x86_64")]
 use log_crate::debug;
+use log_crate::warn;
 
 use crate::abi::types::MessageInfo;
 use crate::api::cspace;
@@ -1119,6 +1120,10 @@ pub fn handle_domain(
     if crate::object::tcb::from_cap(tcb_cap).is_none() {
         return Err(SyscallError::InvalidCapability);
     }
+    warn!(
+        "DomainSet: domain={} accepted as a no-op; this kernel has one scheduling domain",
+        domain
+    );
     Ok(())
 }
 
@@ -1128,12 +1133,12 @@ pub fn handle_domain(
 /// `libsel4/include/sel4/invocation.h`:
 ///
 /// ```text
-///  2 TCBReadRegisters      8 TCBSetSchedParams      14 TCBBindNotification
-///  3 TCBWriteRegisters     9 TCBSetTimeoutEndpoint  15 TCBUnbindNotification
-///  4 TCBCopyRegisters     10 TCBSetIPCBuffer        16 TCBSetTLSBase
-///  5 TCBConfigure         11 TCBSetSpace            17 TCBSetFlags
-///  6 TCBSetPriority       12 TCBSuspend
-///  7 TCBSetMCPriority     13 TCBResume
+///  2 TCBReadRegisters      8 TCBSetSchedParams      14 TCBUnbindNotification
+///  3 TCBWriteRegisters     9 TCBSetIPCBuffer        15 TCBSetTLSBase
+///  4 TCBCopyRegisters     10 TCBSetSpace            16 TCBSetFlags
+///  5 TCBConfigure         11 TCBSuspend
+///  6 TCBSetPriority       12 TCBResume
+///  7 TCBSetMCPriority     13 TCBBindNotification
 /// ```
 ///
 /// We do *not* yet have a scheduler — so the handlers persist each
@@ -1186,7 +1191,7 @@ fn handle_thread_inner(
     match label_id {
         id if id == InvocationLabel::TcbConfigure.raw() => {
             {
-                // Non-MCS libsel4: tag = MessageInfo(TCBConfigure, 0, 3, 4)
+                // libsel4: tag = MessageInfo(TCBConfigure, 0, 3, 4)
                 //   extraCaps[0] = cspace_root
                 //   extraCaps[1] = vspace_root
                 //   extraCaps[2] = buffer_frame
@@ -1232,7 +1237,7 @@ fn handle_thread_inner(
 
         id if id == InvocationLabel::TcbSetSpace.raw() => {
             {
-                // Non-MCS libsel4: tag = MessageInfo(TCBSetSpace, 0, 2, 3)
+                // libsel4: tag = MessageInfo(TCBSetSpace, 0, 2, 3)
                 //   extraCaps[0] = cspace_root, [1] = vspace_root
                 //   mr0 = fault_ep, mr1 = cspace_data, mr2 = vspace_data
                 if length < 3 {
@@ -1298,6 +1303,10 @@ fn handle_thread_inner(
             if prio > 255 {
                 return Err(SyscallError::RangeError);
             }
+            warn!(
+                "TCBSetPriority: prio={} accepted as a no-op; priority does not affect dispatch",
+                prio
+            );
             Ok(())
         }
 
@@ -1315,6 +1324,10 @@ fn handle_thread_inner(
             if mcp > 255 {
                 return Err(SyscallError::RangeError);
             }
+            warn!(
+                "TCBSetMCPriority: mcp={} accepted as a no-op; MCP does not affect dispatch",
+                mcp
+            );
             Ok(())
         }
 
@@ -1333,7 +1346,10 @@ fn handle_thread_inner(
             if mcp > 255 || prio > 255 {
                 return Err(SyscallError::RangeError);
             }
-
+            warn!(
+                "TCBSetSchedParams: mcp={} prio={} accepted as a no-op; sched params do not affect dispatch",
+                mcp, prio
+            );
             Ok(())
         }
         id if id == InvocationLabel::TcbSuspend.raw() => {

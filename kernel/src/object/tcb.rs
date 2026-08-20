@@ -6,7 +6,8 @@
 //! pointer is a valid [`TcbRef`].
 //!
 //! The scheduler is deliberately small: runnable TCBs live in one FIFO
-//! round-robin queue per core, and affinity selects the queue a TCB can run on.
+//! round-robin queue per core, affinity selects the queue a TCB can run on,
+//! and a per-TCB timeslice decides when a still-runnable thread is rotated.
 //! Each core also has a static idle TCB, matching seL4 `ksIdleThread`. Idle is
 //! never enqueued; an empty runqueue switches `current` to that core's idle
 //! TCB and waits in kernel mode. A temporary big kernel lock still serialises
@@ -25,11 +26,11 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use log_crate::info;
 
-use crate::abi::constants::MAX_NUM_NODES;
+use crate::abi::constants::{MAX_NUM_NODES, TIME_SLICE_TICKS};
 use crate::arch::current::api::UserContext;
 use crate::arch::current::sel4_arch;
 use crate::kernel::smp::BklCell;
@@ -56,8 +57,16 @@ pub fn set_current(tcb: Option<TcbRef>) -> Option<TcbRef> {
     crate::kernel::smp::set_current_tcb(tcb)
 }
 
+const DEFAULT_TIME_SLICE: u8 = TIME_SLICE_TICKS as u8;
+
+const _: () = {
+    assert!(TIME_SLICE_TICKS > 0 && TIME_SLICE_TICKS <= u8::MAX as usize);
+};
+
 static CONTINUE_CURRENT_ONCE: [AtomicUsize; MAX_NUM_NODES] =
     [const { AtomicUsize::new(0) }; MAX_NUM_NODES];
+static RESCHEDULE_REQUIRED: [AtomicBool; MAX_NUM_NODES] =
+    [const { AtomicBool::new(false) }; MAX_NUM_NODES];
 
 pub(crate) fn continue_current_once(tcb: TcbRef) {
     let core = crate::kernel::smp::current_core_id();
@@ -72,6 +81,50 @@ pub(crate) fn take_continue_current_once(tcb: Option<TcbRef>) -> bool {
     CONTINUE_CURRENT_ONCE[core]
         .compare_exchange(tcb.kva() as usize, 0, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
+}
+
+fn request_reschedule() {
+    let core = crate::kernel::smp::current_core_id();
+    RESCHEDULE_REQUIRED[core].store(true, Ordering::Release);
+}
+
+/// Consume the per-core timeslice/Yield rotation request, if any.
+pub fn take_reschedule_required() -> bool {
+    let core = crate::kernel::smp::current_core_id();
+    RESCHEDULE_REQUIRED[core].swap(false, Ordering::AcqRel)
+}
+
+/// seL4-style `timerTick`: decrement the current thread's timeslice, and
+/// request a rotation only when it reaches zero.
+pub fn timer_tick(current: TcbRef) {
+    if is_idle_thread(current) {
+        return;
+    }
+    let expired = current.with_mut(|t| {
+        if t.state != ThreadState::Running {
+            return false;
+        }
+        if t.time_slice > 1 {
+            t.time_slice -= 1;
+            false
+        } else {
+            t.time_slice = DEFAULT_TIME_SLICE;
+            true
+        }
+    });
+    if expired {
+        request_reschedule();
+    }
+}
+
+/// Explicit `Yield`: put the caller on the runqueue tail and rotate at
+/// the next `kernel_exit`.
+pub fn yield_current(current: TcbRef) {
+    if is_idle_thread(current) {
+        return;
+    }
+    current.enqueue();
+    request_reschedule();
 }
 
 /// Per-core idle TCBs. Matches seL4 `ksIdleThreadTCB[CONFIG_MAX_NUM_NODES]`.
@@ -109,6 +162,7 @@ pub fn create_idle_threads() {
         idle.with_mut(|t| {
             t.state = ThreadState::Idle;
             t.affinity = core as u8;
+            t.time_slice = DEFAULT_TIME_SLICE;
             t.flags = TCB_FLAG_FPU_DISABLED;
             let name = b"idle_thread";
             t.name[..name.len()].copy_from_slice(name);
@@ -369,7 +423,7 @@ pub struct Tcb {
     /// Unprioritised round-robin scheduling state.
     state: ThreadState,
     affinity: u8,
-    _sched_pad: [u8; 6],
+    time_slice: u8,
 
     /// User-mode VA at which the IPC buffer is mapped.
     ipc_buffer_uva: UserVa,
@@ -377,8 +431,8 @@ pub struct Tcb {
     /// resolved; `None` means "not yet set up".
     ipc_buffer: Option<IpcBuffer>,
 
-    /// Non-MCS seL4 stores the fault handler as a CPtr resolved in the
-    /// target thread's current CSpace when a fault is delivered.
+    /// Fault handler CPtr, resolved in the target thread's current CSpace
+    /// when a fault is delivered.
     fault_endpoint_cptr: u64,
 
     /// seL4_TCBFlag bits. RISC-V currently uses bit 0 for fpuDisabled.
@@ -445,7 +499,7 @@ impl Tcb {
             context: UserContext::zero(),
             state: ThreadState::Inactive,
             affinity: 0,
-            _sched_pad: [0; 6],
+            time_slice: DEFAULT_TIME_SLICE,
             ipc_buffer_uva: UserVa::ZERO,
             ipc_buffer: None,
             fault_endpoint_cptr: 0,
@@ -1373,6 +1427,7 @@ pub unsafe fn init(tcb_kva: u64) {
     let tcb: TcbRef = unsafe { ObjRef::from_kva_unchecked(tcb_kva) };
     tcb.with_mut(|t| {
         t.affinity = crate::kernel::smp::current_core_id() as u8;
+        t.time_slice = DEFAULT_TIME_SLICE;
         sel4_arch::init_user_context(&mut t.context);
     });
     crate::object::reply::setup_reply_master(tcb);

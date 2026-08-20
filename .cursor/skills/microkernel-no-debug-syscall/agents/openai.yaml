@@ -1,0 +1,4 @@
+interface:
+  display_name: "Microkernel Has No Debug Syscalls"
+  short_description: "Do not implement seL4 debug dump, snapshot, SendIPI, or benchmark syscalls"
+  default_prompt: "Use $microkernel-no-debug-syscall when changing this microkernel. The kernel does not support seL4 debug syscalls; do not implement DumpScheduler, Snapshot, SendIPI, DebugRun, or benchmark syscalls, and do not treat the current no-ops or halt paths as gaps to fill."

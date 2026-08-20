@@ -1,9 +1,9 @@
 //! Binary-level ABI shared with seL4 userspace (`libsel4`).
 //!
 //! Every constant and `#[repr(C)]` struct in this module must byte-match the
-//! C definitions of the official seL4 kernel for our `qemu-riscv-virt` /
-//! MCS build configuration, otherwise the existing `sel4test-driver` binary
-//! that we boot in user mode will read garbage.
+//! C definitions of the official seL4 kernel for our `qemu-riscv-virt`
+//! configuration, otherwise the existing `sel4test-driver` binary that we
+//! boot in user mode will read garbage.
 //!
 //! Source of truth (do NOT silently diverge):
 //! - `kernel/libsel4/include/sel4/bootinfo_types.h`

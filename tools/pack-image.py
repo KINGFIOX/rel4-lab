@@ -47,7 +47,6 @@ PRESERVED_CMAKE_KEYS = (
     "SIMULATION",
     "SMP",
     "NUM_NODES",
-    "MCS",
     "DOMAINS",
     "ARM_HYP",
     "RELEASE",
@@ -160,7 +159,7 @@ def cache_env_overrides_differ(build_dir: Path, cache: dict[str, str], target) -
     for key in ("PLATFORM", "KernelSel4Arch"):
         if cache.get(key) != defaults[key]:
             return True
-    if "MCS" not in os.environ and cache.get("MCS") != defaults["MCS"]:
+    if cache.get("MCS") != defaults["MCS"]:
         return True
     for key in ("KernelRiscvExtD", "KernelRiscvExtF"):
         if key in defaults and cache.get(key) != defaults[key]:
@@ -179,7 +178,7 @@ def cache_env_overrides_differ(build_dir: Path, cache: dict[str, str], target) -
         expected_nodes = num_nodes_from_smp(os.environ["SMP"])
         if expected_nodes is not None and cache.get("NUM_NODES") != expected_nodes:
             return True
-    for key in ("SIMULATION", "MCS", "DOMAINS", "ARM_HYP", "RELEASE", "VERIFICATION", "BAMBOO"):
+    for key in ("SIMULATION", "DOMAINS", "ARM_HYP", "RELEASE", "VERIFICATION", "BAMBOO"):
         if key in os.environ and cache.get(key) != cmake_bool(os.environ[key]):
             return True
     if "NUM_NODES" in os.environ and cache.get("NUM_NODES") != os.environ["NUM_NODES"]:
@@ -213,8 +212,6 @@ def effective_cmake_values(build_dir: Path, cache: dict[str, str], target) -> di
     for key in PRESERVED_CMAKE_KEYS:
         if key in ("PLATFORM", "KernelSel4Arch"):
             continue
-        if key == "MCS" and "MCS" not in os.environ:
-            continue
         if key == "LibSel4TestPrinterRegex" and "SEL4TEST_REGEX" not in os.environ:
             continue
         value = cache.get(key)
@@ -227,7 +224,7 @@ def effective_cmake_values(build_dir: Path, cache: dict[str, str], target) -> di
             nodes = num_nodes_from_smp(os.environ["SMP"])
             if nodes is not None:
                 values["NUM_NODES"] = nodes
-    for key in ("SIMULATION", "MCS", "DOMAINS", "ARM_HYP", "RELEASE", "VERIFICATION", "BAMBOO"):
+    for key in ("SIMULATION", "DOMAINS", "ARM_HYP", "RELEASE", "VERIFICATION", "BAMBOO"):
         if key in os.environ:
             values[key] = cmake_bool(os.environ[key])
     if "NUM_NODES" in os.environ:

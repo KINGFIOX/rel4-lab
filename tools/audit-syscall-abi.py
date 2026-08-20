@@ -133,7 +133,6 @@ def audit_syscall_numbers(errors: list[str]) -> None:
     userspace_syscalls = parse_userspace_syscalls(
         ROOT_DIR / "userspace" / "sel4-user" / "src" / "lib.rs"
     )
-    kernel_source = kernel_path.read_text()
     for kernel_name, expected_value in KERNEL_SYSCALLS.items():
         kernel_value = kernel_syscalls.get(kernel_name)
         if kernel_value is None:
@@ -150,9 +149,7 @@ def audit_syscall_numbers(errors: list[str]) -> None:
         )
     extra_kernel_syscalls = set(kernel_syscalls) - set(KERNEL_SYSCALLS)
     for kernel_name in sorted(extra_kernel_syscalls):
-        errors.append(f"kernel SyscallNumber::{kernel_name} is not in audited seL4 non-MCS set")
-    if "non-MCS" not in kernel_source or "api-master" not in kernel_source:
-        errors.append("kernel syscall source no longer documents the seL4 non-MCS api-master ABI")
+        errors.append(f"kernel SyscallNumber::{kernel_name} is not in the audited seL4 syscall set")
 
     for user_name, kernel_name in USER_TO_KERNEL_SYSCALLS.items():
         kernel_value = kernel_syscalls.get(kernel_name)
@@ -386,7 +383,7 @@ def audit_kernel_trap(errors: list[str], target_name: str) -> None:
         path,
         r"Some\(SyscallNumber::Yield\)\s*=>\s*\{\s*"
         r"if\s+let\s+Some\(cur\)\s*=\s*crate::object::tcb::current\(\)\s*\{\s*"
-        r"cur\.rotate_to_tail\(\);\s*\}\s*\}",
+        r"crate::object::tcb::yield_current\(cur\);\s*\}\s*\}",
         "Yield syscall handler",
     )
     require_regex(

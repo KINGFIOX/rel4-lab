@@ -306,7 +306,7 @@ pub fn init_rootserver_context(context: &mut UserContext, entry: u64, stack: u64
     context.set_stack_reg(stack);
 }
 
-/// Fill an idle TCB as non-MCS seL4 `Arch_configureIdleThread` does: kernel
+/// Fill an idle TCB as seL4 `Arch_configureIdleThread` does: kernel
 /// CS/SS, `FLAGS_USER_DEFAULT`, NextIP `idle_thread`, RSP 0. The trap path
 /// does not restore this context today.
 pub fn configure_idle_context(context: &mut UserContext, _kernel_sp: u64) {

@@ -5,13 +5,13 @@ x86_64 QEMU `pc`, plus a user-space Linux compatibility stack built on a
 seL4-like capability ABI. x86 gates are hello-rootserver, a narrow unicore
 sel4test slice, and `ARCH=x86_64 ./tools/run-ltp.py`.
 
-There is no timeslice, quantum, or budget accounting, and no priority-driven
-preemption. Kernel exit does, however, perform an unconditional round-robin
-rotation for every trap cause, so a timer interrupt can involuntarily switch
-away from a running thread whenever another runnable thread is queued on the
-same core. The scheduler is therefore not cooperative. Repository user-space
-should neither depend on priority scheduling, multiple domains, or preemption
-for correctness, nor assume that a running thread executes uninterleaved.
+Scheduling is unprioritised timeslice round-robin: a still-runnable thread
+keeps the CPU until its timeslice expires or it Yields, blocks, or is
+suspended. Ordinary traps do not rotate the runqueue. There is no
+priority-driven preemption. Repository
+user-space should neither depend on priority scheduling or multiple
+domains for correctness, nor assume that a CPU-bound thread will be
+switched away before its slice ends.
 
 The repository has two main parts:
 

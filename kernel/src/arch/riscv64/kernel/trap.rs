@@ -376,11 +376,9 @@ pub fn service_due_timer_interrupts() -> bool {
 /// the next `sret`. The asm trampoline takes the return value (in a0)
 /// straight into `restore_user_context`.
 ///
-/// Every trap cause ends in `kernel_exit`, which rotates the core runqueue, so
-/// the trapping TCB is resumed only when no other runnable thread is queued on
-/// this core, when `TCBResume` asked to continue the caller, or when the
-/// trapping TCB comes back around as the queue head. A timer interrupt is
-/// therefore a preemption point.
+/// Every trap cause ends in `kernel_exit`. A still-runnable thread keeps the
+/// CPU unless its timeslice expired, it Yielded, or `TCBResume` did not ask
+/// to continue the caller. Blocking and suspend still pick another thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> *mut UserContext {
     let kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
@@ -629,7 +627,7 @@ fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: crate::object::tcb::Fault
 }
 
 /// The endpoint cap a thread nominated as its fault handler, resolved in its
-/// own CSpace as non-MCS seL4 does.
+/// own CSpace.
 fn fault_handler_cap(tcb: TcbRef) -> Cap {
     let cptr = tcb.fault_endpoint_cptr();
     if cptr == 0 {
@@ -640,12 +638,11 @@ fn fault_handler_cap(tcb: TcbRef) -> Cap {
         Err(_) => Cap::null(),
     }
 }
-pub(crate) fn send_timeout_fault_ipc_for(fault_tcb: TcbRef) -> bool {
-    let _ = fault_tcb;
-    false
-}
 
 fn handle_timer_interrupt() {
+    if let Some(cur) = crate::object::tcb::current() {
+        crate::object::tcb::timer_tick(cur);
+    }
     let now = csr::time() as u64;
     if should_signal_synthetic_timer_irq(now) {
         crate::object::irq::signal_irq(irq::KERNEL_TIMER_IRQ as u64);
@@ -754,17 +751,11 @@ fn switch_to_tcb_vspace(tcb: TcbRef) {
 
 /// Pick the next TCB to run and return the `UserContext*` to restore.
 ///
-/// Three paths:
-/// 1. Round-robin head differs from the trapping TCB → swap.
-/// 2. Round-robin head *is* the trapping TCB, or current is runnable and no
-///    peer exists → fall through to current.
-/// 3. Scheduler returns null AND the trapping TCB is no longer
-///    runnable (state != Running) — every thread is blocked. We
-///    cannot sret back into the blocked TCB (its caller saw the
-///    syscall complete and would resume past it as if it returned
-///    a no-op reply). Switch `current` to this core's idle TCB and
-///    wait in S-mode WFI until something becomes runnable. Idle
-///    context is not restored through `sret`.
+/// A still-runnable current thread keeps the CPU unless `TCBResume` asked
+/// to continue a different thread or timeslice/Yield set `reschedule_required`.
+/// Otherwise enqueue current if it is runnable and dequeue the runqueue head.
+/// An empty queue with a non-runnable current switches to this core's idle
+/// TCB and waits in S-mode WFI. Idle context is not restored through `sret`.
 #[inline]
 fn kernel_exit(
     uc: &mut UserContext,
@@ -777,6 +768,11 @@ fn kernel_exit(
         if let Some(cur) = cur {
             cur.enqueue_if_migrated_from_current_core();
             if tcb::take_continue_current_once(Some(cur)) && cur.is_runnable_on_current_core() {
+                cur.prepare_for_user_restore();
+                return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
+            }
+            let rotate = tcb::take_reschedule_required();
+            if cur.is_runnable_on_current_core() && !rotate {
                 cur.prepare_for_user_restore();
                 return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
             }
@@ -945,7 +941,7 @@ fn handle_syscall(uc: &mut UserContext) {
         }
         Some(SyscallNumber::Yield) => {
             if let Some(cur) = crate::object::tcb::current() {
-                cur.rotate_to_tail();
+                crate::object::tcb::yield_current(cur);
             }
         }
         Some(SyscallNumber::Call) => {

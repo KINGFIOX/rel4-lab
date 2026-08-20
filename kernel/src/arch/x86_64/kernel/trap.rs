@@ -250,6 +250,7 @@ pub extern "C" fn handle_kernel_irq_rust(vector: u64, rip: u64) {
         return;
     }
     if vector == u64::from(lapic::TIMER_VECTOR) {
+        let _kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
         handle_timer_interrupt();
         return;
     }
@@ -504,7 +505,7 @@ fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: crate::object::tcb::Fault
 }
 
 /// The endpoint cap a thread nominated as its fault handler, resolved in its
-/// own CSpace as non-MCS seL4 does.
+/// own CSpace.
 fn fault_handler_cap(tcb: TcbRef) -> Cap {
     let cptr = tcb.fault_endpoint_cptr();
     if cptr == 0 {
@@ -517,6 +518,9 @@ fn fault_handler_cap(tcb: TcbRef) -> Cap {
 }
 
 fn handle_timer_interrupt() {
+    if let Some(cur) = crate::object::tcb::current() {
+        crate::object::tcb::timer_tick(cur);
+    }
     handle_user_irq(irq::KERNEL_TIMER_IRQ as u64);
     lapic::eoi();
 }
@@ -608,6 +612,11 @@ fn kernel_exit(
         if let Some(cur) = cur {
             cur.enqueue_if_migrated_from_current_core();
             if tcb::take_continue_current_once(Some(cur)) && cur.is_runnable_on_current_core() {
+                cur.prepare_for_user_restore();
+                return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
+            }
+            let rotate = tcb::take_reschedule_required();
+            if cur.is_runnable_on_current_core() && !rotate {
                 cur.prepare_for_user_restore();
                 return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
             }
@@ -763,7 +772,7 @@ fn handle_syscall(uc: &mut UserContext) {
         Some(SyscallNumber::DebugDumpScheduler | SyscallNumber::DebugSnapshot) => {}
         Some(SyscallNumber::Yield) => {
             if let Some(cur) = crate::object::tcb::current() {
-                cur.rotate_to_tail();
+                crate::object::tcb::yield_current(cur);
             }
         }
         Some(SyscallNumber::Call) => {

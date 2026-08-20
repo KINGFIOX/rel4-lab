@@ -1,4 +1,4 @@
 interface:
-  display_name: "Microkernel No MCS"
-  short_description: "Keep MCS real-time scheduling out of scope"
-  default_prompt: "Use $microkernel-no-mcs when changing this microkernel so MCS real-time scheduling, sched-context budget enforcement, timeout-fault budget delivery, refill queues, and budget donation stay absent or kept out of scope unless explicitly requested."
+  display_name: "Microkernel Has No MCS"
+  short_description: "Do not add MCS names or stubs to first-party sources"
+  default_prompt: "Use $microkernel-no-mcs when changing this microkernel. The kernel has no MCS surface; do not add MCS names, constants, comments, stubs, or non-MCS contrasts to first-party sources."

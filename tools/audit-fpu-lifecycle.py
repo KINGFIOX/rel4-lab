@@ -1541,17 +1541,6 @@ CHECKS: tuple[Check, ...] = (
         forbidden_patterns=(r"const\s+X_INDEX",),
     ),
     Check(
-        name="timeout fault replies share centralized RISC-V seL4 ABI",
-        path="kernel/src/api/ipc.rs",
-        patterns=(
-            r"SEL4_USER_CONTEXT_REGS",
-            r"apply_timeout_reply",
-            r"SEL4_USER_CONTEXT_REGS\[i\]",
-        ),
-        ordered=True,
-        forbidden_patterns=(r"const\s+X_INDEX",),
-    ),
-    Check(
         name="sel4-user exposes RISC-V UserException fault ABI",
         path="userspace/sel4-user/src/lib.rs",
         patterns=(

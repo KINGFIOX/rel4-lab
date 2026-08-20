@@ -129,7 +129,7 @@ invocation coverage so a PT cannot be installed in a PDPT slot.
 
 ## Syscalls
 
-`abi/syscall.rs` (`SyscallNumber`, non-MCS api-master):
+`abi/syscall.rs` (`SyscallNumber`):
 
 `Call=-1`, `ReplyRecv=-2`, `Send=-3`, `NBSend=-4`, `Recv=-5`, `Reply=-6`,
 `Yield=-7`, `NBRecv=-8`, then debug `-9`…`-15`.
@@ -138,7 +138,7 @@ RV64 dispatch is in `arch/riscv64/kernel/trap.rs`. Handlers:
 
 - `Call` / `Send` / `NBSend` / `Recv` / `NBRecv` / `Reply` / `ReplyRecv` →
   `api/syscall.rs` and `api/ipc.rs`
-- `Yield` → `tcb::rotate_to_tail`
+- `Yield` → `tcb::yield_current`
 - `DebugPutChar` → `machine::console::putc`
 - `DebugNameThread` names a TCB
 - `DebugCapIdentify` returns the cap tag for a CPtr
@@ -148,8 +148,8 @@ RV64 dispatch is in `arch/riscv64/kernel/trap.rs`. Handlers:
 
 Recv ignores the reply register. `seL4_Reply` and `seL4_ReplyRecv` use the
 current thread's `tcbCaller` slot. A reply cap is a non-retypable cap that
-points at a TCB (`tcbReply` master, `tcbCaller` derived), matching non-MCS
-seL4. `CNodeSaveCaller` moves the derived caller cap.
+points at a TCB (`tcbReply` master, `tcbCaller` derived).
+`CNodeSaveCaller` moves the derived caller cap.
 
 `do_send` handles Notification, Endpoint, Reply, and Thread
 (`TcbSetFlags` only via `handle_thread_send`). Other cap tags are dropped
@@ -164,9 +164,12 @@ Every trap returns through `kernel_exit` in the arch `trap.rs`
 (`arch/riscv64` and `arch/x86_64` each have a copy):
 
 1. If `TCBResume` set `continue_current_once` on the current TCB, resume it.
-2. Otherwise enqueue the current TCB if it is still runnable.
-3. Dequeue the runqueue head. On a different TCB, switch VSpace and restore
-   that context.
+2. If current is still runnable and no rotation was requested, resume it.
+   Rotation is requested only by `Yield` or by a timer tick that exhausted
+   the current TCB's timeslice (`TIME_SLICE_TICKS`, default 5).
+3. Otherwise enqueue the current TCB if it is still runnable, then dequeue
+   the runqueue head. On a different TCB, switch VSpace and restore that
+   context.
 4. If the queue is empty and current is not runnable, switch `current` to
    that core's idle TCB, install the kernel VSpace, drop the kernel lock,
    and wait (`WFI` / `HLT`) until something is woken.
@@ -177,16 +180,16 @@ is filled as upstream does (`idle_thread` PC, kernel privilege, FPU
 disabled) but is not restored through `sret`/`sysret`; the wait loop stays
 in kernel mode.
 
-Timer interrupts therefore switch threads whenever another runnable TCB is
-queued on the same core. Non-blocking syscalls take the same path. This is
-not cooperative, and it is not priority preemption. There is no per-TCB
-timeslice counter.
+This is unprioritised timeslice round-robin. A still-runnable thread keeps
+the CPU across ordinary syscalls, faults, and IRQs until its slice hits
+zero or it Yields. Blocking and suspend still pick another thread. There
+is no priority-driven preemption: a newly runnable thread is appended and
+does not steal the CPU.
 
-`TIME_SLICE_TICKS` and the `SEL4_MIN_BUDGET_*` / refill constants in
-`abi/constants.rs` are unused by the scheduler. The RV64 timer in
-`arch/riscv64/kernel/trap.rs` uses `TIMER_INTERVAL_TICKS` (5000) and a
-synthetic IRQ interval (20000) only to reprogram the SBI timer and raise a
-trap; it does not decrement a quantum.
+The RV64 timer in `arch/riscv64/kernel/trap.rs` uses `TIMER_INTERVAL_TICKS`
+(5000) and a synthetic IRQ interval (20000) to reprogram the SBI timer and
+raise a trap. Each timer tick calls `tcb::timer_tick`, matching upstream
+non-MCS `timerTick`.
 
 ## Domain and priority
 
@@ -205,11 +208,11 @@ No `TcbSetAffinity` invocation is wired; boot sets affinity to
 
 ## IPC and faults
 
-Endpoint send/receive/call, notifications, non-MCS reply caps, and selected
+Endpoint send/receive/call, notifications, reply caps, and selected
 cap transfer live in `api/ipc.rs` plus `object/{endpoint,notification,reply}.rs`.
 
-Fault labels (`abi/fault.rs`): CapFault=1, UnknownSyscall=2, UserException=3.
-`Timeout` and `VmFault` both encode as 5.
+Fault labels (`abi/fault.rs`): CapFault=1, UnknownSyscall=2, UserException=3,
+VmFault=5.
 
 linux-compat user programs enter the host as `UnknownSyscall` fault IPC.
 

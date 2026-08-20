@@ -1,12 +1,11 @@
 //! seL4 syscall numbers (passed in `a7` on RV64 RVI `ecall`).
 //!
-//! Mirror of [`kernel/libsel4/include/api/syscall.xml`] for the non-MCS
-//! `api-master` configuration with `CONFIG_PRINTING` and `CONFIG_DEBUG_BUILD`
-//! enabled.
+//! Mirror of [`kernel/libsel4/include/api/syscall.xml`] with
+//! `CONFIG_PRINTING` and `CONFIG_DEBUG_BUILD` enabled.
 
 #![allow(dead_code)]
 
-/// seL4 syscall numbers (non-MCS, "api-master").
+/// seL4 syscall numbers.
 #[repr(isize)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SyscallNumber {

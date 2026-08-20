@@ -156,4 +156,4 @@ static int test_preempt_revoke(env_t env)
     test_assert(0);
 }
 DEFINE_TEST(PREEMPT_REVOKE, "Test preemption path in revoke", test_preempt_revoke,
-            config_set(CONFIG_HAVE_TIMER) && REL4_HAS_TIMER_PREEMPTION)
+            config_set(CONFIG_HAVE_TIMER) && REL4_HAS_PRIORITY_SCHEDULING)

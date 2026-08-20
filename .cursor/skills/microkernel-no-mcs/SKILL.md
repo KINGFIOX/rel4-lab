@@ -1,47 +1,34 @@
 ---
 name: microkernel-no-mcs
-description: Keep this Rust RV64/x86_64 seL4-style microkernel free of MCS real-time scheduling semantics. Use when reviewing, planning, or changing sched-context, sched-control, timeout-fault, budget accounting, budget donation, reply-consumed-time, refill queue, or MCS-specific IPC/scheduler behavior so those features stay absent or kept out of scope unless the user explicitly asks for real-time OS support.
+description: This kernel has no MCS surface. Use when reviewing or changing scheduler, TCB, reply, IPC, fault, ABI, or tool code so sched-context, timeout-fault, budget, and refill names stay out of first-party sources.
 ---
 
-# Microkernel No MCS
+# Microkernel Has No MCS
 
-## Intent
+This kernel does not implement seL4 MCS. Do not add MCS names, constants,
+comments, stubs, or "non-MCS" contrasts to first-party sources. Describe
+the existing syscall, reply-cap, and fault ABI as seL4, not as a subset
+defined against MCS.
 
-Use this skill to keep the kernel away from seL4 MCS real-time scheduling. The kernel should keep ordinary seL4-style IPC, capabilities, faults, and runnable/blocked TCB behavior, but not sched-context budget policy or timeout-fault budget enforcement.
+## Do not add
 
-## Avoid
+- `SchedContext` / `SchedControl` objects, timeout-fault labels, refill or
+  budget constants, or comments that mention MCS / `CONFIG_KERNEL_MCS`.
+- Compatibility shims that exist only to reject MCS invocations.
 
-Treat these as out of scope unless the user explicitly requests real-time OS support:
-
-- Sched-context capabilities as runtime budget objects, sched-control invocations, sporadic-server refill queues, and release queues.
-- Budget charging, consumed-time accounting, reply-consumed-time reporting, and timeout-fault delivery for budget exhaustion.
-- Budget donation through reply objects or call stacks.
-- MCS-only scheduler-action logic that exists to honor budget release, replenishment, or timeout handling.
+Vendored `third_party/sel4test` may still mention MCS. `tools/pack-image.py`
+pins that tree's CMake `MCS=OFF` so user-space is built against the same
+syscall ABI this kernel implements. Do not honor a `MCS` environment override.
 
 ## Preserve
 
-Keep these semantics intact while avoiding MCS:
-
-- Basic TCB runnable, blocked-on-send, blocked-on-receive, blocked-on-reply, and restart transitions.
-- Endpoint, notification, ordinary reply, CSpace, VSpace, IRQ, and non-timeout user fault behavior needed by sel4tests.
-- Architecture-neutral scheduler interfaces usable by both `riscv64` and `x86_64`.
-- linux-compat userspace paths that depend on ordinary IPC and IRQ delivery.
-
-## Workflow
-
-1. Inspect existing diffs before editing with `git status --short` and task-scoped `git diff`.
-2. Keep MCS policy out of shared modules, especially `kernel/src/object/reply.rs`, `kernel/src/object/tcb.rs`, and `kernel/src/kernel/smp.rs`; do not recreate `kernel/src/object/sched_context.rs` unless real-time support is explicitly requested.
-3. Replace MCS-dependent checks with simpler runnable/blocked checks only when needed for existing IPC correctness.
-4. Keep timeout faults for budget exhaustion absent; do not emulate them with compatibility shims.
-5. Apply matching architecture changes in both `kernel/src/arch/riscv64/` and `kernel/src/arch/x86_64/` when trap code references MCS behavior. The x86 backend already has trap/`kernel_exit`; keep MCS budget paths absent there too.
+- Ordinary TCB runnable/blocked/restart transitions.
+- Endpoint, notification, reply-cap, CSpace, VSpace, IRQ, and user fault
+  behavior needed by sel4tests.
+- Architecture-neutral scheduler interfaces for `riscv64` and `x86_64`.
 
 ## Validation
 
-Use the smallest useful validation stage:
-
 - Rust-only edits: `cargo fmt --all --check`, then `cargo check`.
-- Focused seL4 checks: `SEL4TEST_REGEX='<test>' ARCH=riscv64 tools/pack-image.py`, then `ARCH=riscv64 tools/run-tests.py`.
-- Architecture parity: when shared scheduler code changed, `cargo build --release --target x86_64-unknown-none -p kernel` and `TIMEOUT=60 ARCH=x86_64 SMP=OFF NUM_NODES=1 tools/run-hello.py`.
-- linux-compat impact: run `TIMEOUT=180 ARCH=riscv64 tools/run-ltp.py`.
-
-Do not claim MCS avoidance is complete until diagnostics are cleaned up and the relevant focused validations pass.
+- Shared ABI edits: `tools/audit-syscall-abi.py` if that script covers the
+  changed constants.

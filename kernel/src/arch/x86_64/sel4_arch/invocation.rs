@@ -1,9 +1,9 @@
 //! x86 seL4 architecture invocation labels.
 //!
-//! IDs follow the non-MCS common-label range, then the generated
-//! `sel4_arch` / `arch` order used by libsel4 when SMP is off (no
-//! `TCBSetAffinity`): PDPT, PageDirectory, PageTable, Page, ASID,
-//! IoPort, then IRQControl GetIOAPIC/MSI.
+//! IDs follow the common-label range, then the generated `sel4_arch` /
+//! `arch` order used by libsel4 when SMP is off (no `TCBSetAffinity`):
+//! PDPT, PageDirectory, PageTable, Page, ASID, IoPort, then IRQControl
+//! GetIOAPIC/MSI.
 
 // This module is written entirely in terms of the safe abstractions in
 // `ktypes`; keep it that way.

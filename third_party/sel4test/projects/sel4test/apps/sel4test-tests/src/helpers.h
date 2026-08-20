@@ -21,7 +21,7 @@
 
 #define OUR_PRIO (env->priority)
 #define REL4_HAS_PRIORITY_SCHEDULING 0
-#define REL4_HAS_TIMER_PREEMPTION 0
+#define REL4_HAS_TIMER_PREEMPTION 1
 /* args provided by the user */
 #define HELPER_THREAD_MAX_ARGS 4
 /* metadata helpers adds */

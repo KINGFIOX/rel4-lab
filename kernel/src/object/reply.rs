@@ -1,9 +1,8 @@
-//! Non-MCS reply caps: a master cap in `tcbReply` and a derived caller cap.
+//! Reply caps: a master cap in `tcbReply` and a derived caller cap.
 //!
-//! Upstream seL4 without `CONFIG_KERNEL_MCS` does not retype a Reply object.
-//! `cap_reply_cap` points at a TCB. The master lives in the sender's
-//! `tcbReply` slot; `setupCallerCap` inserts a derived cap into the
-//! receiver's `tcbCaller` slot.
+//! A reply cap points at a TCB. The master lives in the sender's `tcbReply`
+//! slot; `setup_caller_cap` inserts a derived cap into the receiver's
+//! `tcbCaller` slot.
 
 #![allow(dead_code)]
 // This module is written entirely in terms of the safe abstractions in

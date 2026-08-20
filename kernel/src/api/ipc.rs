@@ -2,7 +2,7 @@
 //! Reply / ReplyRecv state-machine glue that bridges `syscall::do_*`
 //! to `object::endpoint`.
 //!
-//! Design follows non-MCS seL4 IPC:
+//! Design follows seL4 IPC:
 //!
 //! * `seL4_Send` (blocking) and `seL4_Call` walk the EP. If a receiver
 //!   is already waiting → rendezvous, transfer message, wake the
