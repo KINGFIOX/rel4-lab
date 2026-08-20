@@ -15,6 +15,7 @@ use crate::arch::riscv64::machine::paging::{
     make_satp, pt_index,
 };
 use crate::kernel::smp::{BklCell, BklObjectGuard};
+use crate::ktypes::addr::{Kva, Paddr};
 
 const USER_ROOT_ENTRIES: usize = 1 << (PT_INDEX_BITS - 1);
 pub const USER_TOP: usize = USER_ROOT_ENTRIES << (RISCV_PG_SHIFT + PT_INDEX_BITS * 2);
@@ -33,18 +34,18 @@ fn lock_vspace(_root: *const PageTable) -> VspaceLockGuard {
 /// `make_boot_root_pt` installs the PSpace mappings must use
 /// `kpptr_to_paddr` / `paddr_to_kpptr` instead.
 #[inline]
-pub const fn pptr_to_paddr(vaddr: usize) -> usize {
-    vaddr - PPTR_BASE + PADDR_BASE
+pub const fn pptr_to_paddr(kva: Kva) -> Paddr {
+    Paddr::new(kva.raw() - PPTR_BASE + PADDR_BASE)
 }
 
 #[inline]
-pub const fn paddr_to_pptr(paddr: usize) -> usize {
-    paddr - PADDR_BASE + PPTR_BASE
+pub const fn paddr_to_pptr(pa: Paddr) -> Kva {
+    Kva::new(pa.raw() - PADDR_BASE + PPTR_BASE)
 }
 
 #[inline]
-pub const fn paddr_to_mmio(paddr: usize) -> usize {
-    paddr_to_pptr(paddr)
+pub const fn paddr_to_mmio(pa: Paddr) -> Kva {
+    paddr_to_pptr(pa)
 }
 
 /// Convert a kernel-ELF VA (anything in the kernel image: text, rodata,
@@ -52,13 +53,13 @@ pub const fn paddr_to_mmio(paddr: usize) -> usize {
 /// KERNEL_ELF_BASE + image_size)`. The kernel ELF window is set up by the
 /// elfloader before our `_start` runs.
 #[inline]
-pub const fn kpptr_to_paddr(vaddr: usize) -> usize {
-    vaddr - KERNEL_ELF_BASE + PHYS_BASE_RAW
+pub const fn kpptr_to_paddr(kva: Kva) -> Paddr {
+    Paddr::new(kva.raw() - KERNEL_ELF_BASE + PHYS_BASE_RAW)
 }
 
 #[inline]
-pub const fn paddr_to_kpptr(paddr: usize) -> usize {
-    paddr - PHYS_BASE_RAW + KERNEL_ELF_BASE
+pub const fn paddr_to_kpptr(pa: Paddr) -> Kva {
+    Kva::new(pa.raw() - PHYS_BASE_RAW + KERNEL_ELF_BASE)
 }
 
 // ---- Boot-time PT page pool ----------------------------------------------
@@ -106,6 +107,8 @@ pub fn alloc_pt_page() -> *mut PageTable {
         let idx = pool.next;
         assert!(idx < BOOT_PT_POOL_PAGES, "boot PT pool exhausted");
         pool.next += 1;
+        // SAFETY: operates on kernel-owned page tables from the boot pool,
+        // which live for the whole run.
         unsafe {
             let p = pool.base_mut().add(idx);
             (*p).entries = [Pte::NULL; 512];
@@ -159,9 +162,16 @@ const fn page_bits_for_size_class(size_class: u64) -> Option<usize> {
 
 #[inline]
 fn kva_to_page_table_paddr(kva: usize) -> Option<usize> {
-    if kva >= PPTR_BASE && kva < PPTR_TOP {
+    page_table_paddr(Kva::new(kva)).map(Paddr::raw)
+}
+
+/// Physical address of a page table, picking the translation for whichever
+/// kernel window its address lives in.
+#[inline]
+fn page_table_paddr(kva: Kva) -> Option<Paddr> {
+    if kva.raw() >= PPTR_BASE && kva.raw() < PPTR_TOP {
         Some(pptr_to_paddr(kva))
-    } else if kva >= KERNEL_ELF_BASE {
+    } else if kva.raw() >= KERNEL_ELF_BASE {
         Some(kpptr_to_paddr(kva))
     } else {
         None
@@ -170,7 +180,7 @@ fn kva_to_page_table_paddr(kva: usize) -> Option<usize> {
 
 #[inline]
 fn paddr_to_user_pt_kva(paddr: usize) -> *mut PageTable {
-    paddr_to_pptr(paddr) as *mut PageTable
+    paddr_to_pptr(Paddr::new(paddr)).as_ptr()
 }
 
 #[inline]
@@ -209,6 +219,12 @@ fn user_range_aligned(vaddr: usize, bits: usize) -> bool {
         }
 }
 
+/// Walk to the leaf slot for `vaddr`.
+///
+/// # Safety
+/// `root` must be a live user root page table, and the intermediate tables it
+/// points at must be live too, which holds while the VSpace's `PageTable` caps
+/// exist.
 unsafe fn lookup_pt_slot_user(
     root: *mut PageTable,
     vaddr: usize,
@@ -220,6 +236,8 @@ unsafe fn lookup_pt_slot_user(
     let mut pt = root;
     let mut bits_left = RISCV_PG_SHIFT + PT_INDEX_BITS * 2;
     for level in (1..=2).rev() {
+        // SAFETY: the page tables reached here are the ones this function's
+        // caller vouched for.
         let slot = unsafe { &mut (*pt).entries[pt_index(vaddr, level)] as *mut Pte };
         let entry = unsafe { *slot };
         if !entry.is_valid() || entry.is_leaf() {
@@ -229,6 +247,8 @@ unsafe fn lookup_pt_slot_user(
         bits_left -= PT_INDEX_BITS;
     }
 
+    // SAFETY: as above: entries of the page tables this function's caller
+    // vouched for.
     let slot = unsafe { &mut (*pt).entries[pt_index(vaddr, 0)] as *mut Pte };
     Ok(PtSlotLookup { slot, bits_left })
 }
@@ -238,6 +258,10 @@ unsafe fn lookup_pt_slot_user(
 /// * size class 0: 4 KiB leaf at level 0
 /// * size class 1: 2 MiB leaf at level 1
 /// * size class 2: 1 GiB leaf at level 2
+/// Work out the PTE a frame mapping would install, without installing it.
+///
+/// # Safety
+/// `root` must be a live user root page table.
 pub unsafe fn prepare_user_frame_map(
     root: *mut PageTable,
     vaddr: usize,
@@ -245,9 +269,15 @@ pub unsafe fn prepare_user_frame_map(
     size_class: u64,
     flags: u64,
 ) -> Result<PreparedUserFrameMap, UserMapError> {
+    // SAFETY: the page tables reached here are the ones this function's
+    // caller vouched for.
     unsafe { prepare_user_frame_map_at(root, vaddr, paddr, size_class, flags, false) }
 }
 
+/// As `prepare_user_frame_map`, for a mapping that already exists.
+///
+/// # Safety
+/// `root` must be a live user root page table.
 pub unsafe fn prepare_user_frame_remap(
     root: *mut PageTable,
     vaddr: usize,
@@ -255,9 +285,15 @@ pub unsafe fn prepare_user_frame_remap(
     size_class: u64,
     flags: u64,
 ) -> Result<PreparedUserFrameMap, UserMapError> {
+    // SAFETY: the page tables reached here are the ones this function's
+    // caller vouched for.
     unsafe { prepare_user_frame_map_at(root, vaddr, paddr, size_class, flags, true) }
 }
 
+/// Shared body of the frame map and remap paths.
+///
+/// # Safety
+/// `root` must be a live user root page table.
 unsafe fn prepare_user_frame_map_at(
     root: *mut PageTable,
     vaddr: usize,
@@ -273,10 +309,14 @@ unsafe fn prepare_user_frame_map_at(
     flags |= PTE_U | PTE_V | PTE_A | PTE_D;
 
     let _guard = lock_vspace(root);
+    // SAFETY: the page tables reached here are the ones this function's
+    // caller vouched for.
     let lookup = unsafe { lookup_pt_slot_user(root, vaddr)? };
     if lookup.bits_left != bits {
         return Err(UserMapError::FailedLookup(lookup.bits_left));
     }
+    // SAFETY: as above: entries of the page tables this function's caller
+    // vouched for.
     let entry = unsafe { *lookup.slot };
     if entry.is_valid() {
         if !entry.is_leaf() || !replace_existing_leaf {
@@ -291,13 +331,24 @@ unsafe fn prepare_user_frame_map_at(
     })
 }
 
+/// Install a mapping prepared earlier.
+///
+/// # Safety
+/// `prepared` must come from a `prepare_user_frame_map`/`_remap` call whose
+/// page tables are still live and unmodified since.
 pub unsafe fn commit_user_frame_map(prepared: PreparedUserFrameMap) {
+    // SAFETY: the page tables reached here are the ones this function's
+    // caller vouched for.
     unsafe {
         *prepared.slot = prepared.pte;
     }
     flush_vaddr_for_root(prepared.root, prepared.vaddr);
 }
 
+/// Work out where a `PageTable` cap would be linked into a VSpace.
+///
+/// # Safety
+/// `root` and `pt` must both be live page tables.
 pub unsafe fn prepare_user_page_table_map(
     root: *mut PageTable,
     vaddr: usize,
@@ -310,6 +361,8 @@ pub unsafe fn prepare_user_page_table_map(
     let pt_pa = kva_to_page_table_paddr(pt_kva as usize).ok_or(UserMapError::InvalidArgument)?;
 
     let _guard = lock_vspace(root);
+    // SAFETY: the page tables reached here are the ones this function's
+    // caller vouched for.
     let lookup = unsafe { lookup_pt_slot_user(root, vaddr)? };
     let entry = unsafe { *lookup.slot };
     if let Some(bits) = expected_coverage.filter(|bits| *bits != 0) {
@@ -332,13 +385,24 @@ pub unsafe fn prepare_user_page_table_map(
     })
 }
 
+/// Link in a page table prepared earlier.
+///
+/// # Safety
+/// `prepared` must come from `prepare_user_page_table_map` and its tables must
+/// still be live and unmodified since.
 pub unsafe fn commit_user_page_table_map(prepared: PreparedUserPageTableMap) {
+    // SAFETY: the page tables reached here are the ones this function's
+    // caller vouched for.
     unsafe {
         *prepared.slot = prepared.pte;
     }
     flush_vaddr_for_root(prepared.root, prepared.mapped_addr);
 }
 
+/// Unlink a page table from its VSpace.
+///
+/// # Safety
+/// `root` and `pt` must be live page tables.
 pub unsafe fn unmap_user_page_table(
     root: *mut PageTable,
     vaddr: usize,
@@ -351,6 +415,8 @@ pub unsafe fn unmap_user_page_table(
     let _guard = lock_vspace(root);
     let mut pt = root;
     for level in (1..=2).rev() {
+        // SAFETY: the page tables reached here are the ones this function's
+        // caller vouched for.
         let slot = unsafe { &mut (*pt).entries[pt_index(vaddr, level)] as *mut Pte };
         let entry = unsafe { *slot };
         if !entry.is_valid() || entry.is_leaf() {
@@ -358,6 +424,8 @@ pub unsafe fn unmap_user_page_table(
         }
         let next_pt = paddr_to_user_pt_kva(entry.next_pt_paddr() as usize);
         if next_pt == target {
+            // SAFETY: as above: entries of the page tables this function's caller
+            // vouched for.
             unsafe {
                 *slot = Pte::NULL;
             }
@@ -372,6 +440,10 @@ pub unsafe fn unmap_user_page_table(
 /// Remove a user frame mapping at the natural Sv39 level for the cap's
 /// size class. This does not reclaim interior page-table objects: mapped
 /// user `PageTable` caps manage those pages explicitly.
+/// Clear a frame's mapping from its VSpace.
+///
+/// # Safety
+/// `root` must be a live user root page table.
 pub unsafe fn unmap_user_frame(
     root: *mut PageTable,
     vaddr: usize,
@@ -387,10 +459,14 @@ pub unsafe fn unmap_user_frame(
     }
 
     let _guard = lock_vspace(root);
+    // SAFETY: the page tables reached here are the ones this function's
+    // caller vouched for.
     let lookup = unsafe { lookup_pt_slot_user(root, vaddr).ok()? };
     if lookup.bits_left != bits {
         return None;
     }
+    // SAFETY: as above: entries of the page tables this function's caller
+    // vouched for.
     let entry = unsafe { *lookup.slot };
     if !entry.is_valid() || !entry.is_leaf() {
         return None;
@@ -407,18 +483,27 @@ pub unsafe fn unmap_user_frame(
 }
 
 /// Clear the user half of a root page table recursively.
+/// Drop every user mapping in a VSpace, on VSpace teardown.
+///
+/// # Safety
+/// `root` must be a live root page table that is about to be destroyed, with
+/// no other core still translating through it.
 pub unsafe fn reclaim_user_page_tables(root: *mut PageTable) {
     if root.is_null() {
         return;
     }
     let _guard = lock_vspace(root);
     for i in 0..USER_ROOT_ENTRIES {
+        // SAFETY: the page tables reached here are the ones this function's
+        // caller vouched for.
         let entry = unsafe { (*root).entries[i] };
         if !entry.is_valid() {
             continue;
         }
         if !entry.is_leaf() {
             let child = paddr_to_user_pt_kva(entry.next_pt_paddr() as usize);
+            // SAFETY: as above: entries of the page tables this function's caller
+            // vouched for.
             unsafe {
                 reclaim_page_table_locked(child, 1);
             }
@@ -431,14 +516,22 @@ pub unsafe fn reclaim_user_page_tables(root: *mut PageTable) {
     crate::kernel::smp::remote_tlb_flush_all();
 }
 
+/// Recursive helper for `reclaim_user_page_tables`.
+///
+/// # Safety
+/// `pt` must be a live page table at `level` in the VSpace being torn down.
 unsafe fn reclaim_page_table_locked(pt: *mut PageTable, level: usize) {
     for i in 0..512 {
+        // SAFETY: the page tables reached here are the ones this function's
+        // caller vouched for.
         let entry = unsafe { (*pt).entries[i] };
         if !entry.is_valid() {
             continue;
         }
         if !entry.is_leaf() && level > 0 {
             let child = paddr_to_user_pt_kva(entry.next_pt_paddr() as usize);
+            // SAFETY: as above: entries of the page tables this function's caller
+            // vouched for.
             unsafe {
                 reclaim_page_table_locked(child, level - 1);
             }
@@ -450,6 +543,11 @@ unsafe fn reclaim_page_table_locked(pt: *mut PageTable, level: usize) {
 }
 
 /// Install a fresh `satp` value, then flush the TLB.
+/// Install a new `satp`, flushing translations around the change.
+///
+/// # Safety
+/// `satp_val` must name a page table that maps the kernel image and the PSpace
+/// window, since execution continues in it.
 pub unsafe fn switch_satp(satp_val: u64) {
     csr::sfence_vma_all();
     csr::set_satp(satp_val as usize);
@@ -462,17 +560,16 @@ fn switch_to_kernel_root() {
         return;
     };
     if csr::satp() as u64 != kernel_satp {
+        // SAFETY: operates on kernel-owned page tables from the boot pool,
+        // which live for the whole run.
         unsafe { switch_satp(kernel_satp) };
     }
 }
 
-fn try_switch_to_tcb_root(tcb: *const crate::object::tcb::Tcb) -> bool {
+fn try_switch_to_tcb_root(tcb: crate::object::tcb::TcbRef) -> bool {
     use crate::object::cap::CapTag;
 
-    if tcb.is_null() {
-        return false;
-    }
-    let vroot = crate::object::tcb::vspace_cap_snapshot(tcb);
+    let vroot = tcb.vspace_cap();
     if vroot.tag() != Some(CapTag::PageTable) {
         return false;
     }
@@ -489,6 +586,8 @@ fn try_switch_to_tcb_root(tcb: *const crate::object::tcb::Tcb) -> bool {
         return false;
     }
     if csr::satp() as u64 != new_satp {
+        // SAFETY: operates on kernel-owned page tables from the boot pool,
+        // which live for the whole run.
         unsafe { switch_satp(new_satp) };
     }
     true
@@ -498,8 +597,7 @@ fn try_switch_to_tcb_root(tcb: *const crate::object::tcb::Tcb) -> bool {
 /// re-evaluate the current TCB's VSpace and fall back to the kernel root
 /// if its page-table cap no longer resolves through the ASID table.
 pub fn set_current_vspace_root() {
-    let current = crate::object::tcb::current();
-    if !try_switch_to_tcb_root(current) {
+    if !crate::object::tcb::current().is_some_and(try_switch_to_tcb_root) {
         switch_to_kernel_root();
     }
 }
@@ -544,12 +642,16 @@ pub fn copy_kernel_mappings_to(pt: *mut PageTable) {
 
     let kernel_l2_index = pt_index(KERNEL_ELF_BASE, 2);
     let kernel_pa = 0x8000_0000u64;
+    // SAFETY: operates on kernel-owned page tables from the boot pool,
+    // which live for the whole run.
     unsafe {
         (*pt).entries[kernel_l2_index] = Pte::leaf(kernel_pa, kernel_flags);
     }
     let pspace_base_l2 = pt_index(PPTR_BASE, 2);
     for i in 0..8 {
         let pa = (i as u64) * (1u64 << 30);
+        // SAFETY: as above: entries of the page tables this function's caller
+        // vouched for.
         unsafe {
             (*pt).entries[pspace_base_l2 + i] = Pte::leaf(pa, pspace_flags);
         }
@@ -576,6 +678,8 @@ pub fn make_boot_root_pt() -> *mut PageTable {
 
     let kernel_l2_index = pt_index(KERNEL_ELF_BASE, 2);
     let kernel_pa = 0x8000_0000u64;
+    // SAFETY: operates on kernel-owned page tables from the boot pool,
+    // which live for the whole run.
     unsafe {
         (*root).entries[kernel_l2_index] = Pte::leaf(kernel_pa, kernel_flags);
     }
@@ -587,6 +691,8 @@ pub fn make_boot_root_pt() -> *mut PageTable {
     let pspace_base_l2 = pt_index(crate::abi::constants::PPTR_BASE, 2);
     for i in 0..8 {
         let pa = (i as u64) * (1u64 << 30);
+        // SAFETY: operates on kernel-owned page tables from the boot pool,
+        // which live for the whole run.
         unsafe {
             (*root).entries[pspace_base_l2 + i] = Pte::leaf(pa, pspace_flags);
         }
@@ -597,8 +703,8 @@ pub fn make_boot_root_pt() -> *mut PageTable {
 /// Compose a Sv39 `satp` value for the given root PT (kernel-ELF VA) and
 /// ASID, by translating its VA to its physical address.
 pub fn satp_for(root: *mut PageTable, asid: u64) -> u64 {
-    let pa = kpptr_to_paddr(root as usize) as u64;
-    make_satp(asid, pa)
+    let pa = kpptr_to_paddr(Kva::new(root as usize));
+    make_satp(asid, pa.as_u64())
 }
 
 /// Compose a Sv39 `satp` from a root PT KVA, picking the right physical
@@ -612,22 +718,23 @@ pub fn satp_for(root: *mut PageTable, asid: u64) -> u64 {
 /// Returns 0 for KVAs outside both windows so callers can ignore them
 /// instead of programming a bogus `satp`.
 pub fn satp_from_kva(root_kva: u64, asid: u64) -> u64 {
-    use crate::abi::constants::{KERNEL_ELF_BASE, PPTR_BASE, PPTR_TOP};
-    let kva = root_kva as usize;
-    let pa = if kva >= PPTR_BASE && kva < PPTR_TOP {
-        pptr_to_paddr(kva)
-    } else if kva >= KERNEL_ELF_BASE {
-        kpptr_to_paddr(kva)
-    } else {
-        return 0;
-    };
-    make_satp(asid, pa as u64)
+    match page_table_paddr(Kva::from_u64(root_kva)) {
+        Some(pa) => make_satp(asid, pa.as_u64()),
+        None => 0,
+    }
 }
 
 pub fn vspace_root_for(root: *mut PageTable, asid: u64) -> u64 {
     satp_for(root, asid)
 }
 
+/// Install a VSpace root as the running address space.
+///
+/// # Safety
+/// `root` must name a page table that maps the kernel image and the PSpace
+/// window, since execution continues in it.
 pub unsafe fn switch_vspace(root: u64) {
+    // SAFETY: the page tables reached here are the ones this function's
+    // caller vouched for.
     unsafe { switch_satp(root) }
 }

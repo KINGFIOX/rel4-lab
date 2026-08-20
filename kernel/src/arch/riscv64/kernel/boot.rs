@@ -115,6 +115,7 @@ pub extern "C" fn init_kernel(
     crate::arch::riscv64::machine::fpu::disable_access();
 
     // Touch the linker symbols so they don't get stripped.
+    // SAFETY: the boot path runs single-threaded on the boot core.
     let _ = unsafe {
         (
             &__bss_start as *const u8,
@@ -151,6 +152,7 @@ pub extern "C" fn init_secondary_hart(
     crate::kernel::smp::init_current_cpu(cpu_id, core_id);
     crate::arch::riscv64::machine::fpu::init_current_core();
     if let Some(root) = crate::kernel::smp::kernel_vspace_root() {
+        // SAFETY: this hart is running on its own stack with its own scratch area.
         unsafe { crate::arch::riscv64::object::vspace::switch_satp(root) };
     }
     crate::arch::riscv64::kernel::trap::install_trap_vector();
@@ -162,6 +164,7 @@ pub extern "C" fn init_secondary_hart(
 /// Halt the calling hart: enter low-power wait-for-interrupt loop forever.
 pub fn halt() -> ! {
     loop {
+        // SAFETY: waiting until the next interrupt.
         unsafe {
             core::arch::asm!("wfi");
         }

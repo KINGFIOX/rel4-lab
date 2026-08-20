@@ -1,5 +1,9 @@
 //! Local TLB invalidation via `sfence.vma`.
 
+// This module is written entirely in terms of the safe abstractions in
+// `ktypes`; keep it that way.
+#![deny(unsafe_code)]
+
 use super::csr;
 
 pub fn flush_all() {

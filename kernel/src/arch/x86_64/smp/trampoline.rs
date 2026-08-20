@@ -5,6 +5,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::arch::x86_64::machine::lapic;
 use crate::arch::x86_64::object::vspace;
 use crate::kernel::smp::{SECONDARY_BOOT_READY, SECONDARY_BOOT_READY_MAGIC};
+use crate::ktypes::addr::Paddr;
 
 const TRAMPOLINE_PADDR: usize = 0x8000;
 const MAILBOX_PADDR: usize = 0x8f00;
@@ -31,14 +32,15 @@ pub fn save_boot_cr3() {
 }
 
 fn mailbox_ptr() -> *mut u8 {
-    vspace::paddr_to_pptr(MAILBOX_PADDR) as *mut u8
+    vspace::paddr_to_pptr(Paddr::new(MAILBOX_PADDR)).as_ptr()
 }
 
 fn trampoline_ptr() -> *mut u8 {
-    vspace::paddr_to_pptr(TRAMPOLINE_PADDR) as *mut u8
+    vspace::paddr_to_pptr(Paddr::new(TRAMPOLINE_PADDR)).as_ptr()
 }
 
 unsafe fn write_u16(base: *mut u8, off: usize, value: u16) {
+    // SAFETY: forwarded to the caller.
     unsafe { core::ptr::write_unaligned(base.add(off) as *mut u16, value) };
 }
 
@@ -56,6 +58,8 @@ unsafe fn read_u64(base: *const u8, off: usize) -> u64 {
 
 fn install_trampoline() {
     let code = trampoline_bytes();
+    // SAFETY: the trampoline and mailbox pages are reserved low memory that no
+    // Rust object lives in, and only the booting APs read them.
     unsafe {
         let dst = trampoline_ptr();
         core::ptr::write_bytes(dst, 0, 0x1000);
@@ -134,6 +138,8 @@ pub fn start_aps(num_nodes: usize) {
     install_trampoline();
     let mut core = 1usize;
     while core < num_nodes {
+        // SAFETY: as `install_trampoline`: the mailbox is reserved low memory shared
+        // only with the APs being started.
         unsafe {
             write_u64(mailbox_ptr(), MAIL_ALIVE, 0);
             write_u64(mailbox_ptr(), MAIL_CORE, core as u64);
@@ -144,6 +150,8 @@ pub fn start_aps(num_nodes: usize) {
                 crate::kernel::smp::kernel_stack_top_for_core(core) as u64,
             );
         }
+        // SAFETY: as above: the mailbox and trampoline live in reserved low memory
+        // shared only with the APs being started.
         unsafe {
             core::arch::asm!("mfence", options(nostack, nomem, preserves_flags));
         }
@@ -171,6 +179,8 @@ pub fn start_aps(num_nodes: usize) {
 #[unsafe(no_mangle)]
 pub extern "C" fn ap_long_entry() -> ! {
     let boot_mail = MAILBOX_PADDR as *mut u8;
+    // SAFETY: this AP is running on its own stack with its own scratch area, set
+    // up by the trampoline before jumping here.
     let stack = unsafe { read_u64(boot_mail, MAIL_STACK) } as usize;
     unsafe {
         core::arch::asm!(
@@ -192,6 +202,8 @@ pub extern "C" fn ap_long_entry() -> ! {
         write_u64(boot_mail, MAIL_ALIVE, 1);
     }
     if let Some(root) = crate::kernel::smp::kernel_vspace_root() {
+        // SAFETY: as above: the mailbox and trampoline live in reserved low memory
+        // shared only with the APs being started.
         unsafe { vspace::switch_cr3(root) };
     }
     // Match RISC-V secondaries: stay invisible to remote TLB/IPI until the
@@ -202,6 +214,8 @@ pub extern "C" fn ap_long_entry() -> ! {
     // Re-read identity-mapped mailbox state through the kernel window after
     // the CR3 switch. Locals live on a stack slice the BSP can overlap.
     let mail = mailbox_ptr();
+    // SAFETY: as above: the mailbox and trampoline live in reserved low memory
+    // shared only with the APs being started.
     let core_id = unsafe { read_u64(mail, MAIL_CORE) } as usize;
     let cpu_id = unsafe { read_u64(mail, MAIL_CPU) } as usize;
     crate::kernel::smp::init_current_cpu(cpu_id, core_id);

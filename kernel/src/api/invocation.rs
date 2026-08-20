@@ -15,7 +15,6 @@ use log_crate::debug;
 use crate::abi::types::MessageInfo;
 use crate::api::cspace;
 use crate::api::syscall::SyscallError;
-use crate::api::thread::Thread;
 use crate::arch::current::api::{
     SEL4_TCB_FRAME_REGS, SEL4_TCB_GP_REGS, SEL4_USER_CONTEXT_ABI_WORDS, SEL4_USER_CONTEXT_REGS,
     SEL4_USER_CONTEXT_WORDS, UserContext,
@@ -25,12 +24,14 @@ use crate::arch::current::object::vspace;
 use crate::arch::current::sel4_arch::ObjectType;
 use crate::arch::current::sel4_arch::invocation as arch_inv;
 use crate::kernel::smp::{BklCell, debug_assert_kernel_lock_held};
+use crate::ktypes::addr::UserVa;
+use crate::ktypes::objref::{ObjArray, ObjRef};
 use crate::object::cap::{
     Cap, CapTag, FRAME_RIGHTS_KERNEL_ONLY, FRAME_RIGHTS_READ_ONLY, FRAME_RIGHTS_READ_WRITE,
 };
-use crate::object::cnode::{CspaceLockGuard, Cte, with_cnode_at};
+use crate::object::cnode::{Cte, CteRef};
 use crate::object::mdb::MdbNode;
-use crate::object::tcb::{self, Tcb};
+use crate::object::tcb::{self, TcbRef};
 
 const TCB_COPY_SUSPEND_SOURCE: u64 = 1 << 0;
 const TCB_COPY_RESUME_TARGET: u64 = 1 << 1;
@@ -101,7 +102,7 @@ pub fn success_reply_length(tag: Option<CapTag>, label_id: u64) -> u64 {
 
 fn write_reply_mr0(uc: &mut UserContext, value: u64) {
     uc.set_mr(0, value);
-    crate::api::thread::write_current_ipc_buffer_word(1, value);
+    write_current_ipc_buffer_word(1, value);
 }
 
 /// Helper: compute log2 of the in-memory bytes of an object given its
@@ -155,8 +156,8 @@ fn create_object_cap(ty: ObjectType, region_base: u64, user_size: u64, is_device
 ///   mr5 = nodeWindow    (count of consecutive slots to fill)
 ///   extraCaps[0] = root CNode through which mr2/mr3 are resolved
 pub fn handle_untyped(
-    thread: &Thread,
-    src_slot: *mut Cte,
+    thread: TcbRef,
+    src_slot: CteRef,
     src_cap: Cap,
     label_id: u64,
     length: u64,
@@ -191,7 +192,7 @@ pub fn handle_untyped(
         root_cap
     } else {
         let node_slot = resolve_slot(root_cap, node_index, node_depth as u32)?;
-        crate::object::cnode::cap_snapshot(node_slot)
+        node_slot.cap()
     };
     if dest_cnode_cap.tag() != Some(CapTag::CNode) {
         return Err(SyscallError::FailedLookup);
@@ -212,8 +213,15 @@ pub fn handle_untyped(
         uc.set_mr(1, (1u64 << dest_radix) - node_offset);
         return Err(SyscallError::RangeError);
     }
-    let dest_base_kva = dest_cnode_cap.cnode_ptr();
-    let retype_dest_cnode = |dest_cnode: &mut [Cte]| -> Result<(), SyscallError> {
+    let dest_cnode = dest_cnode_cap
+        .as_cnode()
+        .ok_or(SyscallError::FailedLookup)?;
+    let dest_slot = |i: u64| -> Result<CteRef, SyscallError> {
+        dest_cnode
+            .get((node_offset + i) as usize)
+            .ok_or(SyscallError::RangeError)
+    };
+    {
         let untyped_bits = src_cap.untyped_block_size_bits();
         let is_device = src_cap.untyped_is_device();
         let region_base_kva = src_cap.untyped_ptr();
@@ -224,17 +232,14 @@ pub fn handle_untyped(
         // kernel's `decodeUntypedInvocation`. This is what makes a
         // Revoke-on-parent return a fully fresh untyped to libsel4allocman
         // so subsequent allocator pool refills don't drown in NotEnoughMemory.
-        let cspace_guard = crate::object::cnode::lock_cspace();
         // Ensure target slots are empty.
         for i in 0..node_window {
-            let slot = &dest_cnode[(node_offset + i) as usize];
-            if !slot.cap.is_null() {
+            if !dest_slot(i)?.cap().is_null() {
                 return Err(SyscallError::DeleteFirst);
             }
         }
 
-        let has_children =
-            unsafe { crate::object::cnode::mdb_has_children_locked(&cspace_guard, src_slot) };
+        let has_children = src_slot.mdb_has_children();
         let stored_fi = src_cap.untyped_free_index();
         let reset_untyped = !has_children && stored_fi != 0;
         let free_index = if has_children { stored_fi } else { 0 };
@@ -268,13 +273,14 @@ pub fn handle_untyped(
         // new child caps.
         let new_used_bytes = aligned_start_offset + total_obj_bytes;
         let new_free_index = new_used_bytes >> 4;
-        unsafe {
-            (*src_slot).cap.set_untyped_free_index(new_free_index);
-        }
+        src_slot.update_cap(|cap| cap.set_untyped_free_index(new_free_index));
 
         // Zero the memory we're about to repurpose (non-device).
         let alloc_base_kva = region_base_kva.wrapping_add(aligned_start_offset);
         if !is_device {
+            // SAFETY: the range lies inside the untyped this invocation owns,
+            // the checks above proved it is free, and no live object refers to
+            // it yet.
             unsafe {
                 ptr::write_bytes(alloc_base_kva as *mut u8, 0, total_obj_bytes as usize);
             }
@@ -298,40 +304,30 @@ pub fn handle_untyped(
             // are also stamped — though `Untyped_Retype` zeroed the slab
             // already, going through `endpoint::init` keeps the layout
             // contract explicit at the one place objects come to life.
-            match new_object_type {
-                ObjectType::Tcb => unsafe { crate::object::tcb::init(obj_base) },
-                ObjectType::Endpoint => unsafe { crate::object::endpoint::init(obj_base) },
-                ObjectType::Notification => unsafe { crate::object::notification::init(obj_base) },
-                _ => {}
+            // SAFETY: `obj_base` is the aligned base of a slab this
+            // invocation just carved out of the untyped and zeroed, and no cap
+            // to it exists yet, so nothing else refers to that memory.
+            unsafe {
+                match new_object_type {
+                    ObjectType::Tcb => crate::object::tcb::init(obj_base),
+                    ObjectType::Endpoint => crate::object::endpoint::init(obj_base),
+                    ObjectType::Notification => crate::object::notification::init(obj_base),
+                    _ => {}
+                }
             }
-            let dst = &mut dest_cnode[(node_offset + i) as usize];
             // Untyped_Retype uses the C kernel's insertNewCap path, not
             // cteInsert/isCapRevocable: every freshly-created object is a
             // revocable child of the source Untyped and may itself become a
             // CDT parent for later derived caps.
-            unsafe {
-                crate::object::cnode::insert_new_cap_locked(
-                    &cspace_guard,
-                    src_slot,
-                    dst as *mut Cte,
-                    cap,
-                );
-            }
+            src_slot.insert_new_cap(dest_slot(i)?, cap);
         }
 
         Ok(())
-    };
-    unsafe {
-        with_cnode_at(
-            dest_base_kva as *mut u8,
-            dest_radix as usize,
-            retype_dest_cnode,
-        )
     }
 }
 
 fn reset_untyped_cap_for_retype(
-    src_slot: *mut Cte,
+    src_slot: CteRef,
     region_base_kva: u64,
     untyped_bits: u64,
     stored_free_index: u64,
@@ -348,29 +344,29 @@ fn reset_untyped_cap_for_retype(
 
     if is_device || untyped_bits < reset_chunk_bits {
         if !is_device {
+            // SAFETY: the whole region belongs to the untyped being reset, and
+            // its descendants are gone, so no live object refers to it.
             unsafe {
                 ptr::write_bytes(region_base_kva as *mut u8, 0, region_size as usize);
             }
         }
-        unsafe {
-            (*src_slot).cap.set_untyped_free_index(0);
-        }
+        src_slot.update_cap(|cap| cap.set_untyped_free_index(0));
         return Ok(());
     }
 
     let chunk_bytes = 1u64 << reset_chunk_bits;
     let mut offset = align_down(used_bytes - 1, reset_chunk_bits);
     loop {
+        // SAFETY: as above, one preemptible chunk at a time; `offset` walks
+        // backwards through the untyped's own region.
         unsafe {
             ptr::write_bytes(
                 region_base_kva.wrapping_add(offset) as *mut u8,
                 0,
                 chunk_bytes as usize,
             );
-            (*src_slot)
-                .cap
-                .set_untyped_free_index(offset >> min_untyped_bits);
         }
+        src_slot.update_cap(|cap| cap.set_untyped_free_index(offset >> min_untyped_bits));
 
         cnode_preemption_point()?;
 
@@ -393,7 +389,7 @@ fn user_map_error(err: vspace::UserMapError) -> SyscallError {
 fn user_map_error_reply(uc: &mut UserContext, err: vspace::UserMapError) -> SyscallError {
     if let vspace::UserMapError::FailedLookup(bits_left) = err {
         uc.set_mr(2, bits_left as u64);
-        crate::api::thread::write_current_ipc_buffer_word(3, bits_left as u64);
+        write_current_ipc_buffer_word(3, bits_left as u64);
     }
     user_map_error(err)
 }
@@ -402,8 +398,8 @@ fn user_map_error_reply(uc: &mut UserContext, err: vspace::UserMapError) -> Sysc
 ///
 /// Architecture invocation labels come from `arch::current::sel4_arch`.
 pub fn handle_frame(
-    thread: &Thread,
-    slot: *mut Cte,
+    thread: TcbRef,
+    slot: CteRef,
     cap: Cap,
     label_id: u64,
     length: u64,
@@ -466,9 +462,11 @@ pub fn handle_frame(
             // the current thread's mappings. ASID 0 means "no mapping
             // recorded", so fail closed rather than installing an
             // unrouteable PTE.
+            // SAFETY: `root_pt_kva` is the base of the root page table named by a
+            // PageTable cap that the ASID table still resolves to the same VSpace,
+            // so it addresses a live table for the duration of this mapping.
             unsafe {
-                let _cspace_guard = crate::object::cnode::lock_cspace();
-                let current_cap = (*slot).cap;
+                let current_cap = slot.cap();
                 if !same_object_as(current_cap, cap) {
                     return Err(SyscallError::InvalidCapability);
                 }
@@ -504,20 +502,21 @@ pub fn handle_frame(
                     )
                     .map_err(|err| user_map_error_reply(uc, err))?
                 };
-                (*slot).cap.set_frame_mapped_addr(vaddr);
-                (*slot).cap.set_frame_mapped_asid(asid);
+                slot.update_cap(|cap| cap.set_frame_mapped_addr(vaddr));
+                slot.update_cap(|cap| cap.set_frame_mapped_asid(asid));
                 vspace::commit_user_frame_map(prepared_map);
             }
             Ok(())
         }
         _ if is_page_unmap => {
+            // SAFETY: the frame cap records which VSpace it was mapped into, and the
+            // ASID lookup above proved that root page table is still live.
             unsafe {
-                let _cspace_guard = crate::object::cnode::lock_cspace();
-                if !same_object_as((*slot).cap, cap) {
+                if !same_object_as(slot.cap(), cap) {
                     return Err(SyscallError::InvalidCapability);
                 }
-                let frame_va = (*slot).cap.frame_mapped_addr();
-                let asid = (*slot).cap.frame_mapped_asid();
+                let frame_va = slot.cap().frame_mapped_addr();
+                let asid = slot.cap().frame_mapped_asid();
                 if asid == 0 {
                     return Ok(());
                 }
@@ -526,8 +525,8 @@ pub fn handle_frame(
                     // Best effort: clear the cap metadata but don't touch any
                     // page table. This is what the C kernel does for caps whose
                     // ASID has been freed under it.
-                    (*slot).cap.set_frame_mapped_addr(0);
-                    (*slot).cap.set_frame_mapped_asid(0);
+                    slot.update_cap(|cap| cap.set_frame_mapped_addr(0));
+                    slot.update_cap(|cap| cap.set_frame_mapped_asid(0));
                     return Ok(());
                 }
                 let _ = vspace::unmap_user_frame(
@@ -536,8 +535,8 @@ pub fn handle_frame(
                     cap.frame_size(),
                     kva_to_pa(cap.frame_base_ptr()) as usize,
                 );
-                (*slot).cap.set_frame_mapped_addr(0);
-                (*slot).cap.set_frame_mapped_asid(0);
+                slot.update_cap(|cap| cap.set_frame_mapped_addr(0));
+                slot.update_cap(|cap| cap.set_frame_mapped_asid(0));
             }
             Ok(())
         }
@@ -556,8 +555,8 @@ pub fn handle_frame(
 
 /// RISC-V PageTable_Map / PageTable_Unmap.
 pub fn handle_page_table(
-    thread: &Thread,
-    slot: *mut Cte,
+    thread: TcbRef,
+    slot: CteRef,
     cap: Cap,
     label_id: u64,
     length: u64,
@@ -597,9 +596,11 @@ pub fn handle_page_table(
                 return Err(SyscallError::InvalidCapability);
             }
 
+            // SAFETY: as the frame map path — the root page table comes from a cap
+            // the ASID table still resolves, and the new table from a cap this
+            // invocation re-checked against its slot.
             unsafe {
-                let _cspace_guard = crate::object::cnode::lock_cspace();
-                let current_cap = (*slot).cap;
+                let current_cap = slot.cap();
                 if !same_object_as(current_cap, cap) {
                     return Err(SyscallError::InvalidCapability);
                 }
@@ -614,19 +615,20 @@ pub fn handle_page_table(
                 )
                 .map_err(|err| user_map_error_reply(uc, err))?;
                 let mapped_addr = prepared_map.mapped_addr();
-                (*slot).cap.set_page_table_mapping(asid, mapped_addr as u64);
+                slot.update_cap(|cap| cap.set_page_table_mapping(asid, mapped_addr as u64));
                 vspace::commit_user_page_table_map(prepared_map);
             }
             Ok(())
         }
         _ if is_unmap => {
+            // SAFETY: the page-table cap records the VSpace it is mapped into, whose
+            // root the ASID table still resolves to a live table.
             unsafe {
-                let cspace_guard = crate::object::cnode::lock_cspace();
-                let current_cap = (*slot).cap;
+                let current_cap = slot.cap();
                 if !same_object_as(current_cap, cap) {
                     return Err(SyscallError::InvalidCapability);
                 }
-                if !is_final_capability(&cspace_guard, slot) {
+                if !is_final_capability(slot) {
                     return Err(SyscallError::RevokeFirst);
                 }
                 if current_cap.page_table_is_mapped() {
@@ -645,7 +647,7 @@ pub fn handle_page_table(
                     }
                     ptr::write_bytes(pt as *mut u8, 0, PAGE_SIZE);
                 }
-                (*slot).cap.clear_page_table_is_mapped();
+                slot.cap().clear_page_table_is_mapped();
             }
             Ok(())
         }
@@ -657,7 +659,7 @@ pub fn handle_page_table(
 }
 
 pub fn handle_asid_control(
-    thread: &Thread,
+    thread: TcbRef,
     _cap: Cap,
     label_id: u64,
     length: u64,
@@ -692,17 +694,15 @@ pub fn handle_asid_control(
     }
     let dest_index = uc.mr(0);
     let dest_depth = uc.mr(1) as u32 & 0xff;
-    unsafe {
-        let cspace_guard = crate::object::cnode::lock_cspace();
-        if crate::object::cnode::mdb_has_children_locked(&cspace_guard, untyped_slot) {
-            return Err(SyscallError::RevokeFirst);
-        }
+    if untyped_slot.mdb_has_children() {
+        return Err(SyscallError::RevokeFirst);
     }
 
     let dest = resolve_slot(root_cap, dest_index, dest_depth)?;
+    // SAFETY: the pool frame lies in the untyped this invocation owns, which
+    // has no live descendants, so nothing else refers to that memory.
     unsafe {
-        let cspace_guard = crate::object::cnode::lock_cspace();
-        if !(*dest).cap.is_null() {
+        if !dest.cap().is_null() {
             return Err(SyscallError::DeleteFirst);
         }
         let pool_ptr = untyped_cap.untyped_ptr();
@@ -710,16 +710,16 @@ pub fn handle_asid_control(
         // clear the pool frame, insert the ASIDPool cap, then publish the
         // ASID high-level table entry. RISC-V Arch_isCapRevocable is false
         // for ASIDPool, so this uses cteInsert rather than insertNewCap.
-        let s = &mut *untyped_slot;
-        s.cap
-            .set_untyped_free_index(1u64 << (crate::abi::constants::SEL4_ASID_POOL_BITS - 4));
+        untyped_slot.update_cap(|cap| {
+            cap.set_untyped_free_index(1u64 << (crate::abi::constants::SEL4_ASID_POOL_BITS - 4))
+        });
         ptr::write_bytes(
             pool_ptr as *mut u8,
             0,
             1usize << crate::abi::constants::SEL4_ASID_POOL_BITS,
         );
         let new_cap = Cap::new_asid_pool(base as u64, pool_ptr);
-        crate::object::cnode::cte_insert_locked(&cspace_guard, new_cap, untyped_slot, dest);
+        untyped_slot.cte_insert(new_cap, dest);
         if !crate::object::asid::publish_pool(base, pool_ptr) {
             panic!("ASID pool base changed before publication");
         }
@@ -728,7 +728,7 @@ pub fn handle_asid_control(
 }
 
 pub fn handle_asid_pool(
-    thread: &Thread,
+    thread: TcbRef,
     cap: Cap,
     label_id: u64,
     _length: u64,
@@ -747,25 +747,20 @@ pub fn handle_asid_pool(
     }
 
     let root_pt_kva = vspace_cap.page_table_base_ptr();
-    unsafe {
-        let _guard = crate::object::cnode::lock_cspace();
-        // Re-read the destination before allocating an ASID so a stale
-        // lookup cannot publish into a reused or already-assigned slot.
-        let current_vspace_cap = (*vspace_slot).cap;
-        if current_vspace_cap.tag() != Some(CapTag::PageTable)
-            || current_vspace_cap.page_table_base_ptr() != root_pt_kva
-        {
-            return Err(SyscallError::InvalidCapability);
-        }
-        if current_vspace_cap.page_table_is_mapped()
-            || current_vspace_cap.page_table_mapped_asid() != 0
-        {
-            return Err(SyscallError::InvalidCapability);
-        }
-        let asid = match crate::object::asid::next_free_from_pool(
-            cap.asid_pool_base(),
-            cap.asid_pool_ptr(),
-        ) {
+    // Re-read the destination before allocating an ASID so a stale
+    // lookup cannot publish into a reused or already-assigned slot.
+    let current_vspace_cap = vspace_slot.cap();
+    if current_vspace_cap.tag() != Some(CapTag::PageTable)
+        || current_vspace_cap.page_table_base_ptr() != root_pt_kva
+    {
+        return Err(SyscallError::InvalidCapability);
+    }
+    if current_vspace_cap.page_table_is_mapped() || current_vspace_cap.page_table_mapped_asid() != 0
+    {
+        return Err(SyscallError::InvalidCapability);
+    }
+    let asid =
+        match crate::object::asid::next_free_from_pool(cap.asid_pool_base(), cap.asid_pool_ptr()) {
             Ok(asid) => asid,
             Err(crate::object::asid::AsidPoolAssignError::MissingPool) => {
                 return Err(SyscallError::FailedLookup);
@@ -777,25 +772,24 @@ pub fn handle_asid_pool(
                 return Err(SyscallError::DeleteFirst);
             }
         };
-        // Match `performASIDPoolInvocation`: make the vspace cap mapped,
-        // initialise global kernel mappings, then publish the ASID pool entry.
-        (*vspace_slot).cap.set_page_table_mapping(asid, 0);
-        vspace::copy_kernel_mappings_to(root_pt_kva as *mut PageTable);
-        if !crate::object::asid::publish_pool_assignment(
-            cap.asid_pool_base(),
-            cap.asid_pool_ptr(),
-            asid,
-            root_pt_kva,
-        ) {
-            panic!("ASID pool assignment changed before publication");
-        }
+    // Match `performASIDPoolInvocation`: make the vspace cap mapped,
+    // initialise global kernel mappings, then publish the ASID pool entry.
+    vspace_slot.update_cap(|cap| cap.set_page_table_mapping(asid, 0));
+    vspace::copy_kernel_mappings_to(root_pt_kva as *mut PageTable);
+    if !crate::object::asid::publish_pool_assignment(
+        cap.asid_pool_base(),
+        cap.asid_pool_ptr(),
+        asid,
+        root_pt_kva,
+    ) {
+        panic!("ASID pool assignment changed before publication");
     }
     Ok(())
 }
 
 pub fn handle_irq_control(
-    thread: &Thread,
-    src_slot: *mut Cte,
+    thread: TcbRef,
+    src_slot: CteRef,
     _cap: Cap,
     label_id: u64,
     length: u64,
@@ -849,8 +843,8 @@ pub fn handle_irq_control(
 }
 
 fn issue_irq_handler(
-    thread: &Thread,
-    src_slot: *mut Cte,
+    thread: TcbRef,
+    src_slot: CteRef,
     irq: u64,
     index: u64,
     depth: u64,
@@ -861,7 +855,7 @@ fn issue_irq_handler(
         uc.set_mr(1, crate::object::irq::MAX_IRQ as u64);
         return Err(SyscallError::RangeError);
     }
-    if unsafe { crate::object::irq::is_active(irq) } {
+    if crate::object::irq::is_active(irq) {
         return Err(SyscallError::RevokeFirst);
     }
 
@@ -870,36 +864,25 @@ fn issue_irq_handler(
         cspace::lookup_cap(thread, root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
     let dest = resolve_slot(root_cap, index, depth as u32)?;
 
-    unsafe {
-        let _cspace_guard = crate::object::cnode::lock_cspace();
-        if !(*dest).cap.is_null() {
-            return Err(SyscallError::DeleteFirst);
-        }
+    if !dest.cap().is_null() {
+        return Err(SyscallError::DeleteFirst);
     }
 
-    unsafe {
-        if !crate::object::irq::try_issue_handler(irq) {
-            return Err(SyscallError::RevokeFirst);
-        }
-        let cspace_guard = crate::object::cnode::lock_cspace();
-        if !(*dest).cap.is_null() {
-            crate::object::irq::delete_handler(irq);
-            return Err(SyscallError::DeleteFirst);
-        }
-        crate::object::cnode::cte_insert_locked(
-            &cspace_guard,
-            Cap::new_irq_handler(irq),
-            src_slot,
-            dest,
-        );
+    if !crate::object::irq::try_issue_handler(irq) {
+        return Err(SyscallError::RevokeFirst);
     }
+    if !dest.cap().is_null() {
+        crate::object::irq::delete_handler(irq);
+        return Err(SyscallError::DeleteFirst);
+    }
+    src_slot.cte_insert(Cap::new_irq_handler(irq), dest);
     Ok(())
 }
 
 #[cfg(target_arch = "x86_64")]
 fn issue_ioapic_irq_handler(
-    thread: &Thread,
-    src_slot: *mut Cte,
+    thread: TcbRef,
+    src_slot: CteRef,
     length: u64,
     uc: &mut UserContext,
 ) -> Result<(), SyscallError> {
@@ -946,7 +929,7 @@ fn issue_ioapic_irq_handler(
         uc.set_mr(1, 1);
         return Err(SyscallError::RangeError);
     }
-    if unsafe { crate::object::irq::is_active(irq) } {
+    if crate::object::irq::is_active(irq) {
         return Err(SyscallError::RevokeFirst);
     }
 
@@ -960,8 +943,8 @@ fn issue_ioapic_irq_handler(
 
 #[cfg(target_arch = "x86_64")]
 pub fn handle_io_port_control(
-    thread: &Thread,
-    src_slot: *mut Cte,
+    thread: TcbRef,
+    src_slot: CteRef,
     _cap: Cap,
     label_id: u64,
     length: u64,
@@ -992,11 +975,8 @@ pub fn handle_io_port_control(
     let (root_cap, _) =
         cspace::lookup_cap(thread, root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
     let dest = resolve_slot(root_cap, index, depth as u32)?;
-    unsafe {
-        let _cspace_guard = crate::object::cnode::lock_cspace();
-        if !(*dest).cap.is_null() {
-            return Err(SyscallError::DeleteFirst);
-        }
+    if !dest.cap().is_null() {
+        return Err(SyscallError::DeleteFirst);
     }
 
     debug!(
@@ -1004,25 +984,17 @@ pub fn handle_io_port_control(
         first, last, index, depth
     );
     crate::arch::x86_64::object::ioport::alloc_range(first, last);
-    unsafe {
-        let cspace_guard = crate::object::cnode::lock_cspace();
-        if !(*dest).cap.is_null() {
-            crate::arch::x86_64::object::ioport::free_range(first, last);
-            return Err(SyscallError::DeleteFirst);
-        }
-        crate::object::cnode::cte_insert_locked(
-            &cspace_guard,
-            Cap::new_io_port(u64::from(first), u64::from(last)),
-            src_slot,
-            dest,
-        );
+    if !dest.cap().is_null() {
+        crate::arch::x86_64::object::ioport::free_range(first, last);
+        return Err(SyscallError::DeleteFirst);
     }
+    src_slot.cte_insert(Cap::new_io_port(u64::from(first), u64::from(last)), dest);
     Ok(())
 }
 
 #[cfg(target_arch = "x86_64")]
 pub fn handle_io_port(
-    _thread: &Thread,
+    _thread: TcbRef,
     cap: Cap,
     label_id: u64,
     length: u64,
@@ -1087,7 +1059,7 @@ pub fn handle_io_port(
 }
 
 pub fn handle_irq_handler(
-    thread: &Thread,
+    thread: TcbRef,
     cap: Cap,
     label_id: u64,
     _length: u64,
@@ -1096,7 +1068,7 @@ pub fn handle_irq_handler(
     let irq = cap.irq_handler_irq();
     match label_id {
         id if invocation_label_matches(id, InvocationLabel::IrqAck) => {
-            unsafe { crate::object::irq::ack_irq(irq) };
+            crate::object::irq::ack_irq(irq);
             Ok(())
         }
         id if invocation_label_matches(id, InvocationLabel::IrqSetHandler) => {
@@ -1107,13 +1079,13 @@ pub fn handle_irq_handler(
             if ntfn_cap.tag() != Some(CapTag::Notification) || !ntfn_cap.notification_can_send() {
                 return Err(SyscallError::InvalidCapability);
             }
-            if unsafe { !crate::object::irq::set_notification(irq, ntfn_cap, ntfn_slot) } {
+            if !crate::object::irq::set_notification(irq, ntfn_cap, ntfn_slot) {
                 return Err(SyscallError::InvalidCapability);
             }
             Ok(())
         }
         id if invocation_label_matches(id, InvocationLabel::IrqClearHandler) => {
-            unsafe { crate::object::irq::clear_notification(irq) };
+            crate::object::irq::clear_notification(irq);
             Ok(())
         }
         _ => Err(SyscallError::IllegalOperation),
@@ -1124,7 +1096,7 @@ pub fn handle_irq_handler(
 /// `CONFIG_NUM_DOMAINS = 1` and collapses every valid value into the single
 /// effective scheduling domain.
 pub fn handle_domain(
-    thread: &Thread,
+    thread: TcbRef,
     _cap: Cap,
     label_id: u64,
     length: u64,
@@ -1144,11 +1116,9 @@ pub fn handle_domain(
     }
     let tcb_cap = lookup_extra_cap(thread, 0)?;
     require_tag(tcb_cap, CapTag::Thread)?;
-    let tcb_ptr = crate::object::tcb::from_cap(tcb_cap);
-    if tcb_ptr.is_null() {
+    if crate::object::tcb::from_cap(tcb_cap).is_none() {
         return Err(SyscallError::InvalidCapability);
     }
-    let _ = tcb_ptr;
     Ok(())
 }
 
@@ -1173,8 +1143,8 @@ pub fn handle_domain(
 /// land a real context-switch path the same code will gain real
 /// behaviour without changing the parse/validate logic.
 pub fn handle_thread(
-    thread: &Thread,
-    slot: *mut Cte,
+    thread: TcbRef,
+    slot: CteRef,
     cap: Cap,
     label_id: u64,
     length: u64,
@@ -1184,8 +1154,8 @@ pub fn handle_thread(
 }
 
 pub fn handle_thread_send(
-    thread: &Thread,
-    slot: *mut Cte,
+    thread: TcbRef,
+    slot: CteRef,
     cap: Cap,
     label_id: u64,
     length: u64,
@@ -1198,8 +1168,8 @@ pub fn handle_thread_send(
 }
 
 fn handle_thread_inner(
-    thread: &Thread,
-    slot: *mut Cte,
+    thread: TcbRef,
+    slot: CteRef,
     cap: Cap,
     label_id: u64,
     length: u64,
@@ -1208,11 +1178,10 @@ fn handle_thread_inner(
 ) -> Result<(), SyscallError> {
     use crate::object::tcb;
 
-    let tcb_ptr = tcb::from_cap(cap);
-    if tcb_ptr.is_null() {
+    let Some(target) = tcb::from_cap(cap) else {
         return Err(SyscallError::InvalidCapability);
-    }
-    crate::kernel::smp::remote_tcb_stall(tcb_ptr);
+    };
+    crate::kernel::smp::remote_tcb_stall(target);
 
     match label_id {
         id if id == InvocationLabel::TcbConfigure.raw() => {
@@ -1236,7 +1205,7 @@ fn handle_thread_inner(
                 let (mut vspace_cap, vspace_slot) = lookup_tcb_space_cap_slot(thread, 1)?;
                 let (buffer_cap, buffer_slot) = lookup_ipc_buffer_cap_slot(thread, 2, buffer_uva)?;
 
-                if tcb_space_slot_long_running_delete(tcb_ptr) {
+                if tcb_space_slot_long_running_delete(target) {
                     return Err(SyscallError::IllegalOperation);
                 }
                 if cspace_data != 0 {
@@ -1253,12 +1222,10 @@ fn handle_thread_inner(
                 let vspace_cap = derive_cap_for_copy(vspace_slot, vspace_cap)?;
                 require_tcb_vspace_root(vspace_cap)?;
 
-                install_tcb_cap(slot, tcb_ptr, tcb::TCB_CTABLE_SLOT, cspace_cap, cspace_slot)?;
-                install_tcb_cap(slot, tcb_ptr, tcb::TCB_VTABLE_SLOT, vspace_cap, vspace_slot)?;
-                unsafe {
-                    tcb::set_fault_endpoint_cptr(tcb_ptr, fault_ep);
-                }
-                install_tcb_buffer_cap(slot, tcb_ptr, buffer_uva, buffer_cap, buffer_slot)?;
+                install_tcb_cap(slot, target, tcb::TCB_CTABLE_SLOT, cspace_cap, cspace_slot)?;
+                install_tcb_cap(slot, target, tcb::TCB_VTABLE_SLOT, vspace_cap, vspace_slot)?;
+                target.set_fault_endpoint_cptr(fault_ep);
+                install_tcb_buffer_cap(slot, target, buffer_uva, buffer_cap, buffer_slot)?;
                 return Ok(());
             }
         }
@@ -1278,7 +1245,7 @@ fn handle_thread_inner(
 
                 let (mut cspace_cap, cspace_slot) = lookup_tcb_space_cap_slot(thread, 0)?;
                 let (mut vspace_cap, vspace_slot) = lookup_tcb_space_cap_slot(thread, 1)?;
-                if tcb_space_slot_long_running_delete(tcb_ptr) {
+                if tcb_space_slot_long_running_delete(target) {
                     return Err(SyscallError::IllegalOperation);
                 }
                 if cspace_data != 0 {
@@ -1295,11 +1262,9 @@ fn handle_thread_inner(
                 let vspace_cap = derive_cap_for_copy(vspace_slot, vspace_cap)?;
                 require_tcb_vspace_root(vspace_cap)?;
 
-                unsafe {
-                    tcb::set_fault_endpoint_cptr(tcb_ptr, fault_ep);
-                }
-                install_tcb_cap(slot, tcb_ptr, tcb::TCB_CTABLE_SLOT, cspace_cap, cspace_slot)?;
-                install_tcb_cap(slot, tcb_ptr, tcb::TCB_VTABLE_SLOT, vspace_cap, vspace_slot)?;
+                target.set_fault_endpoint_cptr(fault_ep);
+                install_tcb_cap(slot, target, tcb::TCB_CTABLE_SLOT, cspace_cap, cspace_slot)?;
+                install_tcb_cap(slot, target, tcb::TCB_VTABLE_SLOT, vspace_cap, vspace_slot)?;
                 return Ok(());
             }
         }
@@ -1313,7 +1278,7 @@ fn handle_thread_inner(
             require_extra_caps(uc, 1)?;
             let buffer_uva = uc.mr(0);
             let (buffer_cap, buffer_slot) = lookup_ipc_buffer_cap_slot(thread, 0, buffer_uva)?;
-            install_tcb_buffer_cap(slot, tcb_ptr, buffer_uva, buffer_cap, buffer_slot)?;
+            install_tcb_buffer_cap(slot, target, buffer_uva, buffer_cap, buffer_slot)?;
             Ok(())
         }
 
@@ -1327,14 +1292,12 @@ fn handle_thread_inner(
             let prio = uc.mr(0);
             let auth_cap = lookup_extra_cap(thread, 0)?;
             require_tag(auth_cap, CapTag::Thread)?;
-            let auth_tcb = tcb::from_cap(auth_cap);
-            if auth_tcb.is_null() {
+            if tcb::from_cap(auth_cap).is_none() {
                 return Err(SyscallError::InvalidCapability);
             }
             if prio > 255 {
                 return Err(SyscallError::RangeError);
             }
-            let _ = auth_tcb;
             Ok(())
         }
 
@@ -1346,14 +1309,12 @@ fn handle_thread_inner(
             let mcp = uc.mr(0);
             let auth_cap = lookup_extra_cap(thread, 0)?;
             require_tag(auth_cap, CapTag::Thread)?;
-            let auth_tcb = tcb::from_cap(auth_cap);
-            if auth_tcb.is_null() {
+            if tcb::from_cap(auth_cap).is_none() {
                 return Err(SyscallError::InvalidCapability);
             }
             if mcp > 255 {
                 return Err(SyscallError::RangeError);
             }
-            let _ = auth_tcb;
             Ok(())
         }
 
@@ -1366,8 +1327,7 @@ fn handle_thread_inner(
             let prio = uc.mr(1);
             let auth_cap = lookup_extra_cap(thread, 0)?;
             require_tag(auth_cap, CapTag::Thread)?;
-            let auth_tcb = tcb::from_cap(auth_cap);
-            if auth_tcb.is_null() {
+            if tcb::from_cap(auth_cap).is_none() {
                 return Err(SyscallError::InvalidCapability);
             }
             if mcp > 255 || prio > 255 {
@@ -1377,8 +1337,8 @@ fn handle_thread_inner(
             Ok(())
         }
         id if id == InvocationLabel::TcbSuspend.raw() => {
-            let suspend_current = tcb::current() == tcb_ptr;
-            unsafe { tcb::suspend(tcb_ptr) };
+            let suspend_current = tcb::current() == Some(target);
+            target.suspend();
             if suspend_current {
                 return Err(SyscallError::Preempted);
             }
@@ -1387,8 +1347,10 @@ fn handle_thread_inner(
 
         id if id == InvocationLabel::TcbResume.raw() => {
             let caller = tcb::current();
-            unsafe { tcb::resume(tcb_ptr) };
-            if caller != tcb_ptr {
+            target.resume();
+            if let Some(caller) = caller
+                && caller != target
+            {
                 tcb::continue_current_once(caller);
             }
             Ok(())
@@ -1407,7 +1369,7 @@ fn handle_thread_inner(
             if length - 2 < count {
                 return Err(SyscallError::TruncatedMessage);
             }
-            if tcb::current() == tcb_ptr {
+            if tcb::current() == Some(target) {
                 return Err(SyscallError::IllegalOperation);
             }
             let resume_target = (flag_word & 1) != 0;
@@ -1424,7 +1386,7 @@ fn handle_thread_inner(
                 let mr_count = (length as usize)
                     .min((count as usize).saturating_add(2))
                     .min(34);
-                if crate::api::thread::current_has_ipc_buffer() {
+                if current_has_ipc_buffer() {
                     // mr_i for i=4..mr_count holds frameRegister/gpRegister
                     // value at slot (i-2) of seL4_UserContext.
                     for i in 4..mr_count {
@@ -1432,7 +1394,7 @@ fn handle_thread_inner(
                         if ctx_idx >= SEL4_USER_CONTEXT_ABI_WORDS {
                             break;
                         }
-                        let mr_val = crate::api::thread::current_ipc_buffer_word(1 + i);
+                        let mr_val = current_ipc_buffer_word(1 + i);
                         let target_idx = SEL4_USER_CONTEXT_REGS[ctx_idx];
                         if target_idx < reg_updates.len() {
                             reg_updates[target_idx] = mr_val;
@@ -1461,7 +1423,7 @@ fn handle_thread_inner(
                     reg_count += 1;
                 }
             }
-            unsafe { tcb::write_user_context(tcb_ptr, pc, &regs[..reg_count]) };
+            target.write_user_context(pc, &regs[..reg_count]);
             // `resume_target = 1` means "also start (or restart) this
             // TCB", per `decodeWriteRegisters` in
             // `kernel/src/object/tcb.c`. This is the dominant codepath
@@ -1469,7 +1431,7 @@ fn handle_thread_inner(
             // helper-spawn sequence is Configure + SetPriority +
             // WriteRegisters(resume=1), with no separate `seL4_TCB_Resume`.
             if resume_target {
-                unsafe { crate::object::tcb::resume(tcb_ptr) };
+                target.resume();
             }
             Ok(())
         }
@@ -1492,7 +1454,7 @@ fn handle_thread_inner(
             if count == 0 || count > SEL4_USER_CONTEXT_WORDS {
                 return Err(SyscallError::RangeError);
             }
-            if tcb::current() == tcb_ptr {
+            if tcb::current() == Some(target) {
                 return Err(SyscallError::IllegalOperation);
             }
             let suspend_source = (flag_word & 1) != 0;
@@ -1501,7 +1463,7 @@ fn handle_thread_inner(
             let read_reg = |i: usize| -> u64 {
                 if i < 32 {
                     let idx = SEL4_USER_CONTEXT_REGS[i];
-                    tcb::user_context_word_snapshot(tcb_ptr, i, idx)
+                    target.user_context_word(i, idx)
                 } else {
                     0
                 }
@@ -1525,12 +1487,12 @@ fn handle_thread_inner(
             // MRs 4..n live in the IPC buffer at words[1+i].
             if n > 4 {
                 for i in 4..n {
-                    crate::api::thread::write_current_ipc_buffer_word(1 + i, read_reg(i));
+                    write_current_ipc_buffer_word(1 + i, read_reg(i));
                 }
             }
 
             if suspend_source {
-                unsafe { crate::object::tcb::suspend(tcb_ptr) };
+                target.suspend();
             }
 
             // `write_ok_reply` after we return will set a0=0 and
@@ -1544,7 +1506,7 @@ fn handle_thread_inner(
         }
 
         id if id == InvocationLabel::TcbCopyRegisters.raw() => {
-            invoke_tcb_copy_registers(thread, tcb_ptr, length, uc)
+            invoke_tcb_copy_registers(thread, target, length, uc)
         }
 
         id if id == InvocationLabel::TcbBindNotification.raw() => {
@@ -1556,25 +1518,21 @@ fn handle_thread_inner(
             {
                 return Err(SyscallError::IllegalOperation);
             }
-            if tcb::bound_notification_snapshot(tcb_ptr) != 0 {
+            let Some(ntfn) = ntfn_cap.as_notification() else {
+                return Err(SyscallError::IllegalOperation);
+            };
+            if target.bound_notification().is_some() || !ntfn.can_bind() {
                 return Err(SyscallError::IllegalOperation);
             }
-            let ntfn_ptr =
-                ntfn_cap.notification_ptr() as *mut crate::object::notification::Notification;
-            if unsafe { !crate::object::notification::can_bind_snapshot(ntfn_ptr) } {
-                return Err(SyscallError::IllegalOperation);
-            }
-            unsafe {
-                tcb::bind_notification(tcb_ptr, ntfn_cap.notification_ptr());
-            }
+            target.bind_notification(ntfn);
             Ok(())
         }
 
         id if id == InvocationLabel::TcbUnbindNotification.raw() => {
-            if tcb::bound_notification_snapshot(tcb_ptr) == 0 {
+            if target.bound_notification().is_none() {
                 return Err(SyscallError::IllegalOperation);
             }
-            unsafe { tcb::unbind_notification(tcb_ptr) };
+            target.unbind_notification();
             Ok(())
         }
 
@@ -1582,7 +1540,7 @@ fn handle_thread_inner(
             if length < 1 {
                 return Err(SyscallError::TruncatedMessage);
             }
-            unsafe { tcb::set_tls_base(tcb_ptr, uc.mr(0)) };
+            target.set_tls_base(uc.mr(0));
             Ok(())
         }
 
@@ -1592,7 +1550,7 @@ fn handle_thread_inner(
             }
             let clear = uc.mr(0);
             let set = uc.mr(1);
-            let flags = unsafe { tcb::set_flags(tcb_ptr, clear, set) };
+            let flags = target.set_flags(clear, set);
             if reply {
                 write_reply_mr0(uc, flags);
             }
@@ -1604,8 +1562,8 @@ fn handle_thread_inner(
 }
 
 fn invoke_tcb_copy_registers(
-    thread: &Thread,
-    dest: *mut Tcb,
+    thread: TcbRef,
+    dest: TcbRef,
     length: u64,
     uc: &UserContext,
 ) -> Result<(), SyscallError> {
@@ -1617,24 +1575,21 @@ fn invoke_tcb_copy_registers(
     let flags = uc.mr(0);
     let src_cap = lookup_extra_cap(thread, 0)?;
     require_tag(src_cap, CapTag::Thread)?;
-    let src = tcb::from_cap(src_cap);
-    if src.is_null() {
+    let Some(src) = tcb::from_cap(src_cap) else {
         return Err(SyscallError::InvalidCapability);
-    }
+    };
 
     let transfer_frame = flags & TCB_COPY_TRANSFER_FRAME != 0;
     let transfer_integer = flags & TCB_COPY_TRANSFER_INTEGER != 0;
     let copied = snapshot_tcb_copy_registers(src, transfer_frame, transfer_integer);
 
-    unsafe {
-        if flags & TCB_COPY_SUSPEND_SOURCE != 0 {
-            tcb::suspend(src);
-        }
-        if flags & TCB_COPY_RESUME_TARGET != 0 {
-            tcb::resume(dest);
-        }
-        tcb::write_user_context(dest, copied.pc, &copied.regs[..copied.reg_count]);
+    if flags & TCB_COPY_SUSPEND_SOURCE != 0 {
+        src.suspend();
     }
+    if flags & TCB_COPY_RESUME_TARGET != 0 {
+        dest.resume();
+    }
+    dest.write_user_context(copied.pc, &copied.regs[..copied.reg_count]);
     Ok(())
 }
 
@@ -1645,7 +1600,7 @@ struct TcbCopyRegisters {
 }
 
 fn snapshot_tcb_copy_registers(
-    src: *const Tcb,
+    src: TcbRef,
     transfer_frame: bool,
     transfer_integer: bool,
 ) -> TcbCopyRegisters {
@@ -1656,10 +1611,9 @@ fn snapshot_tcb_copy_registers(
     };
 
     if transfer_frame {
-        copied.pc = Some(tcb::user_context_word_snapshot(src, 0, 0));
+        copied.pc = Some(src.user_context_word(0, 0));
         for &reg in &SEL4_TCB_FRAME_REGS[1..] {
-            copied.regs[copied.reg_count] =
-                (reg, tcb::user_context_word_snapshot(src, usize::MAX, reg));
+            copied.regs[copied.reg_count] = (reg, src.user_context_word(usize::MAX, reg));
             copied.reg_count += 1;
         }
     }
@@ -1669,8 +1623,7 @@ fn snapshot_tcb_copy_registers(
             if reg == 0 {
                 continue;
             }
-            copied.regs[copied.reg_count] =
-                (reg, tcb::user_context_word_snapshot(src, usize::MAX, reg));
+            copied.regs[copied.reg_count] = (reg, src.user_context_word(usize::MAX, reg));
             copied.reg_count += 1;
         }
     }
@@ -1689,18 +1642,20 @@ fn require_tag(cap: Cap, expected: CapTag) -> Result<(), SyscallError> {
     }
 }
 
-fn lookup_ipc_buffer_cap(thread: &Thread, i: usize, buffer_uva: u64) -> Result<Cap, SyscallError> {
+fn lookup_ipc_buffer_cap(thread: TcbRef, i: usize, buffer_uva: u64) -> Result<Cap, SyscallError> {
     lookup_ipc_buffer_cap_slot(thread, i, buffer_uva).map(|(cap, _)| cap)
 }
 
+/// A zero `buffer_uva` means "no IPC buffer", which is a valid request and
+/// leaves no source slot to derive from.
 fn lookup_ipc_buffer_cap_slot(
-    thread: &Thread,
+    thread: TcbRef,
     i: usize,
     buffer_uva: u64,
-) -> Result<(Cap, *mut Cte), SyscallError> {
+) -> Result<(Cap, Option<CteRef>), SyscallError> {
     let (buffer_cap, buffer_slot) = lookup_extra_cap_slot(thread, i)?;
     if buffer_uva == 0 {
-        return Ok((Cap::null(), ptr::null_mut()));
+        return Ok((Cap::null(), None));
     }
     let buffer_cap = derive_cap_for_copy(buffer_slot, buffer_cap)?;
     if buffer_cap.tag() != Some(CapTag::Frame) || buffer_cap.frame_is_device() {
@@ -1709,10 +1664,10 @@ fn lookup_ipc_buffer_cap_slot(
     if buffer_uva & ((1 << SEL4_IPC_BUFFER_SIZE_BITS) - 1) != 0 {
         return Err(SyscallError::AlignmentError);
     }
-    Ok((buffer_cap, buffer_slot))
+    Ok((buffer_cap, Some(buffer_slot)))
 }
 
-fn lookup_tcb_space_cap_slot(thread: &Thread, i: usize) -> Result<(Cap, *mut Cte), SyscallError> {
+fn lookup_tcb_space_cap_slot(thread: TcbRef, i: usize) -> Result<(Cap, CteRef), SyscallError> {
     let cptr = read_extra_cap(thread, i);
     cspace::lookup_cap(thread, cptr).map_err(|_| SyscallError::InvalidCapability)
 }
@@ -1735,17 +1690,6 @@ fn require_tcb_vspace_root(cap: Cap) -> Result<(), SyscallError> {
     }
 }
 
-fn set_tcb_ipc_buffer(
-    tcb: *mut crate::object::tcb::Tcb,
-    buffer_uva: u64,
-    buffer_cap: Cap,
-) -> Result<(), SyscallError> {
-    if tcb.is_null() {
-        return Err(SyscallError::InvalidCapability);
-    }
-    unsafe { tcb::set_ipc_buffer(tcb, buffer_uva, buffer_cap) };
-    Ok(())
-}
 #[inline]
 fn require_endpoint_send_grant(cap: Cap) -> Result<(), SyscallError> {
     if cap.tag() == Some(CapTag::Endpoint)
@@ -1762,24 +1706,24 @@ fn require_endpoint_send_grant(cap: Cap) -> Result<(), SyscallError> {
 /// the pattern used by `handle_frame` / `handle_untyped` — every TCB
 /// invocation that takes a cap reads it through the
 /// `caps_or_badges[i]` field of the calling thread's IPC buffer.
-fn lookup_extra_cap(thread: &Thread, i: usize) -> Result<Cap, SyscallError> {
+fn lookup_extra_cap(thread: TcbRef, i: usize) -> Result<Cap, SyscallError> {
     lookup_extra_cap_slot(thread, i).map(|(cap, _)| cap)
 }
 
-fn lookup_extra_cap_slot(thread: &Thread, i: usize) -> Result<(Cap, *mut Cte), SyscallError> {
+fn lookup_extra_cap_slot(thread: TcbRef, i: usize) -> Result<(Cap, CteRef), SyscallError> {
     let cptr = read_extra_cap(thread, i);
     let (cap, slot) =
         cspace::lookup_cap(thread, cptr).map_err(|_| SyscallError::InvalidCapability)?;
     Ok((cap, slot))
 }
-fn lookup_optional_extra_cap(thread: &Thread, i: usize) -> Result<Option<Cap>, SyscallError> {
+fn lookup_optional_extra_cap(thread: TcbRef, i: usize) -> Result<Option<Cap>, SyscallError> {
     lookup_optional_extra_cap_slot(thread, i).map(|cap| cap.map(|(cap, _)| cap))
 }
 
 fn lookup_optional_extra_cap_slot(
-    thread: &Thread,
+    thread: TcbRef,
     i: usize,
-) -> Result<Option<(Cap, *mut Cte)>, SyscallError> {
+) -> Result<Option<(Cap, CteRef)>, SyscallError> {
     let cptr = read_extra_cap(thread, i);
     let (cap, slot) =
         cspace::lookup_cap(thread, cptr).map_err(|_| SyscallError::InvalidCapability)?;
@@ -1789,28 +1733,18 @@ fn lookup_optional_extra_cap_slot(
     Ok(Some((cap, slot)))
 }
 
-fn tcb_space_slot_long_running_delete(tcb_ptr: *mut Tcb) -> bool {
-    let cspace_guard = crate::object::cnode::lock_cspace();
-    unsafe {
-        slot_cap_long_running_delete_locked(
-            &cspace_guard,
-            tcb::cap_slot(tcb_ptr, tcb::TCB_CTABLE_SLOT),
-        ) || slot_cap_long_running_delete_locked(
-            &cspace_guard,
-            tcb::cap_slot(tcb_ptr, tcb::TCB_VTABLE_SLOT),
-        )
-    }
+fn tcb_space_slot_long_running_delete(tcb: TcbRef) -> bool {
+    [tcb::TCB_CTABLE_SLOT, tcb::TCB_VTABLE_SLOT]
+        .into_iter()
+        .filter_map(|index| tcb.cap_slot(index))
+        .any(slot_cap_long_running_delete)
 }
 
-unsafe fn slot_cap_long_running_delete_locked(
-    cspace_guard: &CspaceLockGuard,
-    slot: *mut Cte,
-) -> bool {
-    if slot.is_null() {
-        return false;
-    }
-    let cap = unsafe { (*slot).cap };
-    if cap.is_null() || unsafe { !is_final_capability(cspace_guard, slot) } {
+/// Deleting a final Thread, Zombie, or CNode cap can take more than one
+/// preemption window, so `TCB_Configure` refuses to overwrite such a slot.
+fn slot_cap_long_running_delete(slot: CteRef) -> bool {
+    let cap = slot.cap();
+    if cap.is_null() || !is_final_capability(slot) {
         return false;
     }
     matches!(
@@ -1820,62 +1754,62 @@ unsafe fn slot_cap_long_running_delete_locked(
 }
 
 fn install_tcb_cap(
-    tcb_slot: *mut Cte,
-    tcb_ptr: *mut Tcb,
+    tcb_slot: CteRef,
+    target: TcbRef,
     index: usize,
     new_cap: Cap,
-    src_slot: *mut Cte,
+    src_slot: CteRef,
 ) -> Result<(), SyscallError> {
-    let dest = unsafe { tcb::cap_slot(tcb_ptr, index) };
-    if dest.is_null() {
+    let Some(dest) = target.cap_slot(index) else {
         return Err(SyscallError::InvalidCapability);
-    }
+    };
 
     cte_delete(dest, true)?;
 
-    insert_tcb_cap_if_live(tcb_slot, tcb_ptr, dest, new_cap, src_slot)
+    insert_tcb_cap_if_live(tcb_slot, target, dest, new_cap, Some(src_slot))
 }
 
 fn install_tcb_buffer_cap(
-    tcb_slot: *mut Cte,
-    tcb_ptr: *mut Tcb,
+    tcb_slot: CteRef,
+    target: TcbRef,
     buffer_uva: u64,
     buffer_cap: Cap,
-    buffer_src_slot: *mut Cte,
+    buffer_src_slot: Option<CteRef>,
 ) -> Result<(), SyscallError> {
-    let dest = unsafe { tcb::cap_slot(tcb_ptr, tcb::TCB_BUFFER_SLOT) };
-    if dest.is_null() {
+    let Some(dest) = target.cap_slot(tcb::TCB_BUFFER_SLOT) else {
         return Err(SyscallError::InvalidCapability);
-    }
+    };
 
     cte_delete(dest, true)?;
     // Match seL4 `invokeTCB_ThreadControlCaps`: publish the new IPC buffer
     // address after deleting the old buffer slot and before inserting the cap.
-    set_tcb_ipc_buffer(tcb_ptr, buffer_uva, buffer_cap)?;
+    target.set_ipc_buffer(UserVa::from_u64(buffer_uva), buffer_cap);
 
-    insert_tcb_cap_if_live(tcb_slot, tcb_ptr, dest, buffer_cap, buffer_src_slot)
+    insert_tcb_cap_if_live(tcb_slot, target, dest, buffer_cap, buffer_src_slot)
 }
 
+/// Insert the new cap only if both the source cap and the TCB cap still name
+/// the objects the invocation was decoded against, matching seL4's re-check
+/// after the intervening delete.
 fn insert_tcb_cap_if_live(
-    tcb_slot: *mut Cte,
-    tcb_ptr: *mut Tcb,
-    dest: *mut Cte,
+    tcb_slot: CteRef,
+    target: TcbRef,
+    dest: CteRef,
     new_cap: Cap,
-    src_slot: *mut Cte,
+    src_slot: Option<CteRef>,
 ) -> Result<(), SyscallError> {
-    if new_cap.is_null() || src_slot.is_null() || tcb_slot.is_null() {
+    let Some(src_slot) = src_slot else {
+        return Ok(());
+    };
+    if new_cap.is_null() {
         return Ok(());
     }
 
-    let thread_cap = Cap::new_thread(tcb_ptr as u64);
-    let cspace_guard = crate::object::cnode::lock_cspace();
-    unsafe {
-        if !same_object_as(new_cap, (*src_slot).cap) || !same_object_as(thread_cap, (*tcb_slot).cap)
-        {
-            return Ok(());
-        }
-        crate::object::cnode::cte_insert_locked(&cspace_guard, new_cap, src_slot, dest);
+    let thread_cap = Cap::new_thread(target.kva());
+    if !same_object_as(new_cap, src_slot.cap()) || !same_object_as(thread_cap, tcb_slot.cap()) {
+        return Ok(());
     }
+    src_slot.cte_insert(new_cap, dest);
     Ok(())
 }
 
@@ -1900,8 +1834,8 @@ fn kva_to_pa(kva: u64) -> u64 {
 /// Both must be CNode caps. For two-arg ops (Revoke/Delete) only the
 /// destination is used.
 pub fn handle_cnode(
-    thread: &Thread,
-    _src_slot: *mut Cte,
+    thread: TcbRef,
+    _src_slot: CteRef,
     dest_root_cap: Cap,
     label_id: u64,
     length: u64,
@@ -1954,25 +1888,21 @@ fn cnode_op_save_caller(
     let depth = uc.mr(1) as u32 & 0xff;
     let dest = resolve_slot(dest_root_cap, index, depth)?;
 
-    unsafe {
-        let cspace_guard = crate::object::cnode::lock_cspace();
-        if !(*dest).cap.is_null() || (*dest).mdb.prev() != 0 || (*dest).mdb.next() != 0 {
-            return Err(SyscallError::DeleteFirst);
-        }
-        let src = tcb::cap_slot(tcb::current(), tcb::TCB_CALLER);
-        if src.is_null() {
-            return Ok(());
-        }
-        let cap = (*src).cap;
-        if cap.is_null() {
-        } else if cap.tag() == Some(CapTag::Reply) {
+    if !dest.is_empty() {
+        return Err(SyscallError::DeleteFirst);
+    }
+    let Some(src) = tcb::current().and_then(|cur| cur.cap_slot(tcb::TCB_CALLER)) else {
+        return Ok(());
+    };
+    let cap = src.cap();
+    match cap.tag() {
+        None | Some(CapTag::Null) => {}
+        Some(CapTag::Reply) => {
             if !cap.reply_is_master() {
                 cnode_move_slot(src, dest, cap);
             }
-        } else {
-            panic!("caller capability must be null or reply");
         }
-        let _ = cspace_guard;
+        _ => panic!("caller capability must be null or reply"),
     }
     Ok(())
 }
@@ -1992,7 +1922,7 @@ fn cnode_op_cancel_badged_sends(
     let index = uc.mr(0);
     let depth = uc.mr(1) as u32 & 0xff;
     let slot = resolve_slot(dest_root_cap, index, depth)?;
-    let cap = crate::object::cnode::cap_snapshot(slot);
+    let cap = slot.cap();
     // Mirror C kernel `hasCancelSendRights`: only Endpoint caps with all
     // four rights are valid targets.
     if cap.tag() != Some(CapTag::Endpoint)
@@ -2007,12 +1937,8 @@ fn cnode_op_cancel_badged_sends(
     if badge == 0 {
         return Ok(());
     }
-    let ep_ptr = cap.endpoint_ptr() as *mut crate::object::endpoint::Endpoint;
-    if ep_ptr.is_null() {
-        return Ok(());
-    }
-    unsafe {
-        crate::object::endpoint::cancel_badged_sends(ep_ptr, badge);
+    if let Some(ep) = cap.as_endpoint() {
+        ep.cancel_badged_sends(badge);
     }
     Ok(())
 }
@@ -2021,7 +1947,7 @@ fn cnode_op_cancel_badged_sends(
 /// `src == dest` it degenerates to a swap of `src` and `pivot`. Mirrors
 /// C kernel `decodeCNodeInvocation`'s Rotate handling.
 fn cnode_op_rotate(
-    thread: &Thread,
+    thread: TcbRef,
     dest_root_cap: Cap,
     length: u64,
     uc: &UserContext,
@@ -2057,32 +1983,29 @@ fn cnode_op_rotate(
     if pivot == src || pivot == dest {
         return Err(SyscallError::IllegalOperation);
     }
-    unsafe {
-        let cspace_guard = crate::object::cnode::lock_cspace();
-        if src != dest {
-            if !(*dest).cap.is_null() {
-                return Err(SyscallError::DeleteFirst);
-            }
+    if src != dest {
+        if !dest.cap().is_null() {
+            return Err(SyscallError::DeleteFirst);
         }
-        if (*src).cap.is_null() {
-            return Err(SyscallError::FailedLookup);
-        }
-        if (*pivot).cap.is_null() {
-            return Err(SyscallError::FailedLookup);
-        }
-        let new_src_cap = update_cap_data(true, src_new_data, (*src).cap);
-        let new_pivot_cap = update_cap_data(true, pivot_new_data, (*pivot).cap);
-        if new_src_cap.is_null() || new_pivot_cap.is_null() {
-            return Err(SyscallError::IllegalOperation);
-        }
-        if src == dest {
-            cnode_swap_slots(&cspace_guard, new_src_cap, src, new_pivot_cap, pivot);
-        } else {
-            // Step 1: move pivot → dest.
-            cnode_move_slot(pivot, dest, new_pivot_cap);
-            // Step 2: move src → pivot.
-            cnode_move_slot(src, pivot, new_src_cap);
-        }
+    }
+    if src.cap().is_null() {
+        return Err(SyscallError::FailedLookup);
+    }
+    if pivot.cap().is_null() {
+        return Err(SyscallError::FailedLookup);
+    }
+    let new_src_cap = update_cap_data(true, src_new_data, src.cap());
+    let new_pivot_cap = update_cap_data(true, pivot_new_data, pivot.cap());
+    if new_src_cap.is_null() || new_pivot_cap.is_null() {
+        return Err(SyscallError::IllegalOperation);
+    }
+    if src == dest {
+        cnode_swap_slots(new_src_cap, src, new_pivot_cap, pivot);
+    } else {
+        // Step 1: move pivot → dest.
+        cnode_move_slot(pivot, dest, new_pivot_cap);
+        // Step 2: move src → pivot.
+        cnode_move_slot(src, pivot, new_src_cap);
     }
     Ok(())
 }
@@ -2090,41 +2013,36 @@ fn cnode_op_rotate(
 /// Mirror seL4 `cteMove`: move a cap+MDB entry from `src` to `dst`,
 /// applying the given (possibly badged) cap, then re-thread MDB neighbours
 /// to the new slot location.
-unsafe fn cnode_move_slot(src: *mut Cte, dst: *mut Cte, new_cap: Cap) {
-    unsafe {
-        if src.is_null() || dst.is_null() {
-            panic!("cteMove expects valid slots");
-        }
-        if src == dst {
-            panic!("cteMove source and destination must differ");
-        }
-        if (*src).cap.is_null() {
-            panic!("cteMove from empty source");
-        }
-        if !(*dst).cap.is_null() {
-            panic!("cteMove to non-empty destination");
-        }
-        if (*dst).mdb.next() != 0 || (*dst).mdb.prev() != 0 {
-            panic!("cteMove destination MDB entry must be empty");
-        }
-        let moved_mdb = (*src).mdb;
-        (*dst).cap = new_cap;
-        (*src).cap = Cap::null();
-        (*dst).mdb = moved_mdb;
-        (*src).mdb = MdbNode::NULL;
-        relink_mdb_neighbors(dst, moved_mdb);
+fn cnode_move_slot(src: CteRef, dst: CteRef, new_cap: Cap) {
+    if src == dst {
+        panic!("cteMove source and destination must differ");
     }
+    if src.cap().is_null() {
+        panic!("cteMove from empty source");
+    }
+    if !dst.cap().is_null() {
+        panic!("cteMove to non-empty destination");
+    }
+    if dst.mdb().next() != 0 || dst.mdb().prev() != 0 {
+        panic!("cteMove destination MDB entry must be empty");
+    }
+    let moved_mdb = src.mdb();
+    dst.set_cap(new_cap);
+    src.set_cap(Cap::null());
+    dst.set_mdb(moved_mdb);
+    src.set_mdb(MdbNode::NULL);
+    relink_mdb_neighbors(dst, moved_mdb);
 }
 
 /// Read message-register `mr_i` for `i ≥ 4` from the IPC buffer (mr0..3
 /// live in `uc.regs[a2..a5]`). Returns 0 if the IPC buffer isn't mapped.
-fn read_mr(_thread: &Thread, uc: &UserContext, i: usize) -> u64 {
+fn read_mr(_thread: TcbRef, uc: &UserContext, i: usize) -> u64 {
     match i {
         0 => uc.mr(0),
         1 => uc.mr(1),
         2 => uc.mr(2),
         3 => uc.mr(3),
-        _ => crate::api::thread::current_ipc_buffer_word(1 + i),
+        _ => current_ipc_buffer_word(1 + i),
     }
 }
 
@@ -2156,11 +2074,10 @@ fn cnode_preemption_point() -> Result<(), SyscallError> {
     Ok(())
 }
 
-fn cte_revoke(root: *mut Cte) -> Result<(), SyscallError> {
+fn cte_revoke(root: CteRef) -> Result<(), SyscallError> {
     debug_assert_kernel_lock_held();
     {
-        let cspace_guard = crate::object::cnode::lock_cspace();
-        if unsafe { !crate::object::cnode::mdb_has_children_locked(&cspace_guard, root) } {
+        if !root.mdb_has_children() {
             return Ok(());
         }
     }
@@ -2191,7 +2108,7 @@ fn cnode_op_delete(dest_root_cap: Cap, length: u64, uc: &UserContext) -> Result<
 }
 
 fn cnode_op_copy_or_mint(
-    thread: &Thread,
+    thread: TcbRef,
     dest_root_cap: Cap,
     length: u64,
     uc: &UserContext,
@@ -2215,16 +2132,13 @@ fn cnode_op_copy_or_mint(
     let (src_root_cap, _) =
         cspace::lookup_cap(thread, src_root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
 
-    unsafe {
-        let _cspace_guard = crate::object::cnode::lock_cspace();
-        if !(*dest).cap.is_null() {
-            return Err(SyscallError::DeleteFirst);
-        }
+    if !dest.cap().is_null() {
+        return Err(SyscallError::DeleteFirst);
     }
 
     let src = resolve_slot(src_root_cap, src_index, src_depth)?;
 
-    let src_cap = crate::object::cnode::cap_snapshot(src);
+    let src_cap = src.cap();
     if src_cap.is_null() {
         // Mirrors C kernel `decodeCNodeInvocation` -> `lookupSourceSlot`:
         // an empty source slot is a "failed lookup", not an
@@ -2245,22 +2159,18 @@ fn cnode_op_copy_or_mint(
     if new_cap.is_null() {
         return Err(SyscallError::IllegalOperation);
     }
-    unsafe {
-        let cspace_guard = crate::object::cnode::lock_cspace();
-        crate::object::cnode::cte_insert_locked(&cspace_guard, new_cap, src, dest);
-    }
+    src.cte_insert(new_cap, dest);
     Ok(())
 }
 
-pub(crate) fn derive_cap_for_copy(slot: *mut Cte, mut cap: Cap) -> Result<Cap, SyscallError> {
+pub(crate) fn derive_cap_for_copy(slot: CteRef, mut cap: Cap) -> Result<Cap, SyscallError> {
     match cap.tag() {
         Some(CapTag::Zombie)
         | Some(CapTag::IrqControl)
         | Some(CapTag::IoPortControl)
         | Some(CapTag::Reply) => Ok(Cap::null()),
         Some(CapTag::Untyped) => {
-            let cspace_guard = crate::object::cnode::lock_cspace();
-            if unsafe { crate::object::cnode::mdb_has_children_locked(&cspace_guard, slot) } {
+            if slot.mdb_has_children() {
                 Err(SyscallError::RevokeFirst)
             } else {
                 Ok(cap)
@@ -2368,7 +2278,7 @@ fn frame_vm_rights_allow_write(vm_rights: u64) -> bool {
 }
 
 fn cnode_op_move_or_mutate(
-    thread: &Thread,
+    thread: TcbRef,
     dest_root_cap: Cap,
     length: u64,
     uc: &UserContext,
@@ -2392,16 +2302,13 @@ fn cnode_op_move_or_mutate(
     let (src_root_cap, _) =
         cspace::lookup_cap(thread, src_root_cptr).map_err(|_| SyscallError::InvalidCapability)?;
 
-    unsafe {
-        let _cspace_guard = crate::object::cnode::lock_cspace();
-        if !(*dest).cap.is_null() {
-            return Err(SyscallError::DeleteFirst);
-        }
+    if !dest.cap().is_null() {
+        return Err(SyscallError::DeleteFirst);
     }
 
     let src = resolve_slot(src_root_cap, src_index, src_depth)?;
 
-    let mut moved = crate::object::cnode::cap_snapshot(src);
+    let mut moved = src.cap();
     if moved.is_null() {
         return Err(SyscallError::FailedLookup);
     }
@@ -2415,15 +2322,12 @@ fn cnode_op_move_or_mutate(
     if moved.is_null() {
         return Err(SyscallError::IllegalOperation);
     }
-    unsafe {
-        let _cspace_guard = crate::object::cnode::lock_cspace();
-        cnode_move_slot(src, dest, moved);
-    }
+    cnode_move_slot(src, dest, moved);
     Ok(())
 }
 
 /// Resolve `(index, depth)` to a `Cte*` via the given CNode-root cap.
-fn resolve_slot(root_cap: Cap, index: u64, depth: u32) -> Result<*mut Cte, SyscallError> {
+fn resolve_slot(root_cap: Cap, index: u64, depth: u32) -> Result<CteRef, SyscallError> {
     if root_cap.tag() != Some(CapTag::CNode) {
         return Err(SyscallError::FailedLookup);
     }
@@ -2440,9 +2344,7 @@ fn resolve_slot(root_cap: Cap, index: u64, depth: u32) -> Result<*mut Cte, Sysca
 
 fn require_extra_caps(uc: &UserContext, required: u64) -> Result<(), SyscallError> {
     let info = MessageInfo(uc.msg_info());
-    if info.extra_caps() < required
-        || (required != 0 && !crate::api::thread::current_has_ipc_buffer())
-    {
+    if info.extra_caps() < required || (required != 0 && !current_has_ipc_buffer()) {
         return Err(SyscallError::TruncatedMessage);
     }
     Ok(())
@@ -2493,11 +2395,11 @@ const fn low_word_mask(bits: u64) -> u64 {
 /// threaded into the surrounding MDB list. Operations that truly need a
 /// leaf (for example deriving an Untyped cap) use their own
 /// `ensureNoChildren` check before reaching this path.
-fn delete_slot(slot: *mut Cte) -> Result<(), SyscallError> {
+fn delete_slot(slot: CteRef) -> Result<(), SyscallError> {
     cte_delete(slot, true)
 }
 
-fn delete_slot_preemptible(slot: *mut Cte) -> Result<(), SyscallError> {
+fn delete_slot_preemptible(slot: CteRef) -> Result<(), SyscallError> {
     debug_assert_kernel_lock_held();
     reset_cnode_work_units();
     delete_slot(slot)
@@ -2507,7 +2409,7 @@ fn delete_slot_preemptible(slot: *mut Cte) -> Result<(), SyscallError> {
 /// walking a Zombie remainder. This is used for kernel-owned internal CTEs
 /// such as IRQ notification bindings, where upstream asserts the cap is
 /// immediately removable.
-pub(crate) fn cte_delete_one(slot: *mut Cte) {
+pub(crate) fn cte_delete_one(slot: CteRef) {
     debug_assert_kernel_lock_held();
     let Some(target) = snapshot_slot_for_delete(slot) else {
         return;
@@ -2528,7 +2430,7 @@ pub(crate) fn cte_delete_one(slot: *mut Cte) {
     empty_finalized_slot(slot, Cap::null());
 }
 
-fn cte_delete(slot: *mut Cte, exposed: bool) -> Result<(), SyscallError> {
+fn cte_delete(slot: CteRef, exposed: bool) -> Result<(), SyscallError> {
     debug_assert_kernel_lock_held();
     let result = finalise_slot(slot, exposed)?;
     if exposed || result.success {
@@ -2572,7 +2474,7 @@ impl FinaliseCapResult {
     }
 }
 
-fn finalise_slot(slot: *mut Cte, immediate: bool) -> Result<FinaliseSlotResult, SyscallError> {
+fn finalise_slot(slot: CteRef, immediate: bool) -> Result<FinaliseSlotResult, SyscallError> {
     loop {
         let Some(target) = snapshot_slot_for_delete(slot) else {
             return Ok(FinaliseSlotResult {
@@ -2592,12 +2494,7 @@ fn finalise_slot(slot: *mut Cte, immediate: bool) -> Result<FinaliseSlotResult, 
                 cleanup_info: result.cleanup_info,
             });
         }
-        {
-            let _cspace_guard = crate::object::cnode::lock_cspace();
-            unsafe {
-                (*target.slot).cap = result.remainder;
-            }
-        }
+        target.slot.set_cap(result.remainder);
         if !immediate && cap_cyclic_zombie(result.remainder, target.slot) {
             return Ok(FinaliseSlotResult {
                 success: false,
@@ -2612,7 +2509,7 @@ fn finalise_slot(slot: *mut Cte, immediate: bool) -> Result<FinaliseSlotResult, 
 
 fn finalise_result_removable(
     result: FinaliseCapResult,
-    slot: *mut Cte,
+    slot: CteRef,
 ) -> Result<bool, SyscallError> {
     if !result.cleanup_info.is_null() && !result.remainder.is_null() {
         debug_assert!(false, "finaliseCap cleanup info requires a null remainder",);
@@ -2621,25 +2518,39 @@ fn finalise_result_removable(
     cap_removable(result.remainder, slot)
 }
 
-fn cap_removable(cap: Cap, slot: *mut Cte) -> Result<bool, SyscallError> {
+fn cap_removable(cap: Cap, slot: CteRef) -> Result<bool, SyscallError> {
     match cap.tag() {
         Some(CapTag::Null) => Ok(true),
         Some(CapTag::Zombie) => {
             let n = cap.zombie_number();
-            let zombie_slot = cap.zombie_ptr() as *mut Cte;
-            Ok(n == 0 || (n == 1 && zombie_slot == slot))
+            Ok(n == 0 || (n == 1 && zombie_first_slot(cap) == Some(slot)))
         }
         None => panic!("finaliseCap returned an invalid cap tag"),
         _ => panic!("finaliseCap should only return Zombie or NullCap"),
     }
 }
 
-fn cap_cyclic_zombie(cap: Cap, slot: *mut Cte) -> bool {
-    cap.tag() == Some(CapTag::Zombie) && cap.zombie_ptr() as *mut Cte == slot
+fn cap_cyclic_zombie(cap: Cap, slot: CteRef) -> bool {
+    cap.tag() == Some(CapTag::Zombie) && zombie_first_slot(cap) == Some(slot)
 }
 
-fn reduce_zombie(slot: *mut Cte, immediate: bool) -> Result<(), SyscallError> {
-    let cap = crate::object::cnode::cap_snapshot(slot);
+/// First slot of the CTE range a zombie cap still has to tear down.
+fn zombie_first_slot(cap: Cap) -> Option<CteRef> {
+    // SAFETY: a zombie cap's pointer field names the CTE range of the object
+    // being destroyed: either a CNode's slots or a TCB's embedded CTEs.
+    unsafe { ObjRef::from_kva(cap.zombie_ptr()) }
+}
+
+/// The `n` slots a zombie cap still has to tear down.
+fn zombie_slots(cap: Cap) -> Option<ObjArray<Cte>> {
+    let first = zombie_first_slot(cap)?;
+    // SAFETY: the zombie's number field records how many consecutive slots of
+    // that range are left.
+    Some(unsafe { ObjArray::new(first, cap.zombie_number() as usize) })
+}
+
+fn reduce_zombie(slot: CteRef, immediate: bool) -> Result<(), SyscallError> {
+    let cap = slot.cap();
     debug_assert_eq!(
         cap.tag(),
         Some(CapTag::Zombie),
@@ -2648,16 +2559,13 @@ fn reduce_zombie(slot: *mut Cte, immediate: bool) -> Result<(), SyscallError> {
     if cap.tag() != Some(CapTag::Zombie) {
         panic!("reduceZombie expected a zombie cap");
     }
-    let ptr = cap.zombie_ptr() as *mut Cte;
+    let Some(zombie) = zombie_slots(cap) else {
+        panic!("zombie cap must point at a CTE range");
+    };
+    let ptr = zombie.base();
     let n = cap.zombie_number();
     let zombie_type = cap.zombie_type();
-    debug_assert!(!ptr.is_null(), "zombie cap must point at a CTE range");
     let removable = cap_removable(cap, slot)?;
-    debug_assert!(!removable, "reduceZombie expected an unremovable zombie",);
-    debug_assert!(n > 0, "reduceZombie expected a non-empty zombie");
-    if ptr.is_null() {
-        panic!("zombie cap must point at a CTE range");
-    }
     if n == 0 {
         panic!("reduceZombie expected a non-empty zombie");
     }
@@ -2666,28 +2574,27 @@ fn reduce_zombie(slot: *mut Cte, immediate: bool) -> Result<(), SyscallError> {
     }
 
     if immediate {
-        let end_slot = unsafe { ptr.add((n - 1) as usize) };
+        let end_slot = zombie
+            .get((n - 1) as usize)
+            .expect("zombie range covers its own slot count");
         cte_delete(end_slot, false)?;
-        match crate::object::cnode::cap_snapshot(slot).tag() {
+        match slot.cap().tag() {
             Some(CapTag::Null) => {}
             Some(CapTag::Zombie) => {
-                let mut current = crate::object::cnode::cap_snapshot(slot);
-                if current.zombie_ptr() as *mut Cte == ptr
+                let mut current = slot.cap();
+                if zombie_first_slot(current) == Some(ptr)
                     && current.zombie_number() == n
                     && current.zombie_type() == zombie_type
                 {
-                    let end_slot_empty = crate::object::cnode::cap_snapshot(end_slot).is_null();
+                    let end_slot_empty = end_slot.cap().is_null();
                     debug_assert!(end_slot_empty, "reduced zombie end slot should be empty");
                     if !end_slot_empty {
                         panic!("reduced zombie end slot should be empty");
                     }
                     current.set_zombie_number(n - 1);
-                    let _cspace_guard = crate::object::cnode::lock_cspace();
-                    unsafe {
-                        (*slot).cap = current;
-                    }
+                    slot.set_cap(current);
                 } else {
-                    let self_referential = current.zombie_ptr() as *mut Cte == slot && ptr != slot;
+                    let self_referential = zombie_first_slot(current) == Some(slot) && ptr != slot;
                     debug_assert!(
                         self_referential,
                         "expected recursive delete to leave a self-referential zombie",
@@ -2709,9 +2616,9 @@ fn reduce_zombie(slot: *mut Cte, immediate: bool) -> Result<(), SyscallError> {
         if ptr == slot {
             panic!("cyclic zombie passed to unexposed reduce");
         }
-        let ptr_cap = crate::object::cnode::cap_snapshot(ptr);
+        let ptr_cap = ptr.cap();
         if ptr_cap.tag() == Some(CapTag::Zombie) {
-            let moving_self_referential = ptr_cap.zombie_ptr() as *mut Cte == ptr;
+            let moving_self_referential = zombie_first_slot(ptr_cap) == Some(ptr);
             debug_assert!(
                 !moving_self_referential,
                 "moving self-referential zombie aside",
@@ -2725,108 +2632,69 @@ fn reduce_zombie(slot: *mut Cte, immediate: bool) -> Result<(), SyscallError> {
     Ok(())
 }
 
-fn cap_swap_for_delete(slot1: *mut Cte, slot2: *mut Cte) {
-    debug_assert!(
-        !slot1.is_null() && !slot2.is_null(),
-        "capSwapForDelete expects valid slots",
-    );
-    if slot1.is_null() || slot2.is_null() {
-        panic!("capSwapForDelete expects valid slots");
-    }
+fn cap_swap_for_delete(slot1: CteRef, slot2: CteRef) {
     if slot1 == slot2 {
         return;
     }
-    let cspace_guard = crate::object::cnode::lock_cspace();
-    unsafe {
-        let cap1 = (*slot1).cap;
-        let cap2 = (*slot2).cap;
-        cnode_swap_slots(&cspace_guard, cap1, slot1, cap2, slot2);
-    }
+    cnode_swap_slots(slot1.cap(), slot1, slot2.cap(), slot2);
 }
 
 /// Mirror seL4 `cteSwap`: exchange both cap values and MDB nodes, then
 /// re-thread neighbouring MDB links to the new CTE locations.
-unsafe fn cnode_swap_slots(
-    _cspace_guard: &CspaceLockGuard,
-    cap1: Cap,
-    slot1: *mut Cte,
-    cap2: Cap,
-    slot2: *mut Cte,
-) {
-    debug_assert!(!slot1.is_null() && !slot2.is_null());
-    debug_assert!(slot1 != slot2);
-    if slot1.is_null() || slot2.is_null() {
-        panic!("cteSwap expects valid slots");
+fn cnode_swap_slots(cap1: Cap, slot1: CteRef, cap2: Cap, slot2: CteRef) {
+    assert!(slot1 != slot2, "cteSwap slots must differ");
+    slot1.set_cap(cap2);
+    slot2.set_cap(cap1);
+
+    let mdb1 = slot1.mdb();
+    relink_mdb_neighbors(slot2, mdb1);
+
+    let mdb2 = slot2.mdb();
+    slot1.set_mdb(mdb2);
+    slot2.set_mdb(mdb1);
+
+    relink_mdb_neighbors(slot1, mdb2);
+}
+
+/// Point the derivation neighbours recorded in `mdb` at `new_slot`, after the
+/// node itself moved there.
+fn relink_mdb_neighbors(new_slot: CteRef, mdb: MdbNode) {
+    if let Some(prev) = mdb_link(mdb.prev()) {
+        prev.set_mdb_next(Some(new_slot));
     }
-    if slot1 == slot2 {
-        panic!("cteSwap slots must differ");
-    }
-    unsafe {
-        (*slot1).cap = cap2;
-        (*slot2).cap = cap1;
-
-        let mdb1 = (*slot1).mdb;
-        relink_mdb_neighbors(slot2, mdb1);
-
-        let mdb2 = (*slot2).mdb;
-        (*slot1).mdb = mdb2;
-        (*slot2).mdb = mdb1;
-
-        relink_mdb_neighbors(slot1, mdb2);
+    if let Some(next) = mdb_link(mdb.next()) {
+        next.set_mdb_prev(Some(new_slot));
     }
 }
 
-unsafe fn relink_mdb_neighbors(new_slot: *mut Cte, mdb: MdbNode) {
-    let prev = mdb.prev();
-    if prev != 0 {
-        let p = prev as *mut Cte;
-        unsafe {
-            (*p).mdb.set_next(new_slot as u64);
-        }
-    }
-    let next = mdb.next();
-    if next != 0 {
-        let n = next as *mut Cte;
-        unsafe {
-            (*n).mdb.set_prev(new_slot as u64);
-        }
-    }
+/// A capability derivation link as a slot handle.
+fn mdb_link(kva: u64) -> Option<CteRef> {
+    // SAFETY: MDB links only ever hold addresses of live CTEs that the
+    // capability layer stored.
+    unsafe { ObjRef::from_kva(kva) }
 }
 
 struct FinalizeTarget {
-    slot: *mut Cte,
+    slot: CteRef,
     cap: Cap,
     is_final: bool,
 }
 
-fn snapshot_slot_for_delete(slot: *mut Cte) -> Option<FinalizeTarget> {
-    let cspace_guard = crate::object::cnode::lock_cspace();
-    unsafe {
-        if slot.is_null() {
-            panic!("cteDelete expected a valid slot");
-        }
-        if (*slot).cap.is_null() {
-            return None;
-        }
-        let cap = (*slot).cap;
-        let is_final = is_final_capability(&cspace_guard, slot);
-        Some(FinalizeTarget {
-            slot,
-            cap,
-            is_final,
-        })
+fn snapshot_slot_for_delete(slot: CteRef) -> Option<FinalizeTarget> {
+    let cap = slot.cap();
+    if cap.is_null() {
+        return None;
     }
+    Some(FinalizeTarget {
+        slot,
+        cap,
+        is_final: is_final_capability(slot),
+    })
 }
 
-fn empty_finalized_slot(slot: *mut Cte, cleanup_info: Cap) {
-    let cspace_guard = crate::object::cnode::lock_cspace();
-    unsafe {
-        if slot.is_null() {
-            panic!("emptySlot expected a valid slot");
-        }
-        if !(*slot).cap.is_null() {
-            empty_slot(&cspace_guard, slot, cleanup_info);
-        }
+fn empty_finalized_slot(slot: CteRef, cleanup_info: Cap) {
+    if !slot.cap().is_null() {
+        empty_slot(slot, cleanup_info);
     }
 }
 
@@ -2834,37 +2702,27 @@ fn empty_finalized_slot(slot: *mut Cte, cleanup_info: Cap) {
 /// list ordering for any descendants, and propagate `firstBadged` to the
 /// successor. This differs subtly from `mdb_unlink`, which is also used
 /// by Move/Mutate while the MDB node is about to be transplanted.
-unsafe fn empty_slot(_cspace_guard: &CspaceLockGuard, slot: *mut Cte, cleanup_info: Cap) {
-    debug_assert!(!slot.is_null());
-    if slot.is_null() {
-        panic!("emptySlot expects a valid slot");
+fn empty_slot(slot: CteRef, cleanup_info: Cap) {
+    let mdb = slot.mdb();
+    let prev = mdb_link(mdb.prev());
+    let next = mdb_link(mdb.next());
+    if let Some(prev) = prev {
+        prev.set_mdb_next(next);
     }
-    unsafe {
-        let mdb = (*slot).mdb;
-        let prev = mdb.prev();
-        let next = mdb.next();
-        if prev != 0 {
-            let p = prev as *mut Cte;
-            (*p).mdb.set_next(next);
+    if let Some(next) = next {
+        next.set_mdb_prev(prev);
+        if mdb.first_badged() {
+            next.with_mut(|cte| cte.mdb.set_first_badged(true));
         }
-        if next != 0 {
-            let n = next as *mut Cte;
-            (*n).mdb.set_prev(prev);
-            if mdb.first_badged() {
-                (*n).mdb.set_first_badged(true);
-            }
-        }
-        (*slot).cap = Cap::null();
-        (*slot).mdb = MdbNode::NULL;
     }
+    slot.set_cap(Cap::null());
+    slot.set_mdb(MdbNode::NULL);
     post_cap_deletion(cleanup_info);
 }
 
 fn post_cap_deletion(cleanup_info: Cap) {
     if cleanup_info.tag() == Some(CapTag::IrqHandler) {
-        unsafe {
-            crate::object::irq::deleted_handler(cleanup_info.irq_handler_irq());
-        }
+        crate::object::irq::deleted_handler(cleanup_info.irq_handler_irq());
     }
 }
 
@@ -2873,23 +2731,17 @@ fn post_cap_deletion(cleanup_info: Cap) {
 /// `kernel/src/object/cnode.c`: walk the MDB neighbours (prev / next) and
 /// see if either points at the same object. A cap is *final* iff no
 /// neighbour shares the object.
-unsafe fn is_final_capability(_cspace_guard: &CspaceLockGuard, slot: *mut Cte) -> bool {
-    if slot.is_null() {
-        panic!("isFinalCapability expects a valid slot");
+fn is_final_capability(slot: CteRef) -> bool {
+    let (cap, mdb) = slot.with(|cte| (cte.cap, cte.mdb));
+    if let Some(prev) = mdb_link(mdb.prev())
+        && same_object_as(prev.cap(), cap)
+    {
+        return false;
     }
-    let mdb = unsafe { (*slot).mdb };
-    let cap = unsafe { (*slot).cap };
-    if mdb.prev() != 0 {
-        let p = mdb.prev() as *mut Cte;
-        if same_object_as(unsafe { (*p).cap }, cap) {
-            return false;
-        }
-    }
-    if mdb.next() != 0 {
-        let n = mdb.next() as *mut Cte;
-        if same_object_as(cap, unsafe { (*n).cap }) {
-            return false;
-        }
+    if let Some(next) = mdb_link(mdb.next())
+        && same_object_as(cap, next.cap())
+    {
+        return false;
     }
     true
 }
@@ -2949,7 +2801,7 @@ fn same_object_as(a: Cap, b: Cap) -> bool {
 ///
 /// Mirrors the work `Arch_finaliseCap` does in `kernel/src/arch/.../object/objecttype.c`.
 fn finalize_cap(
-    _slot: *mut Cte,
+    _slot: CteRef,
     mut cap: Cap,
     is_final: bool,
     exposed: bool,
@@ -2970,6 +2822,8 @@ fn finalize_cap(
                 let pa = kva_to_pa(cap.frame_base_ptr());
                 let root_pt_kva = crate::object::asid::lookup(asid);
                 if root_pt_kva != 0 {
+                    // SAFETY: the page-table and object addresses used below come from caps
+                    // this invocation re-checked against the slot, so they are live.
                     unsafe {
                         let unmapped = vspace::unmap_user_frame(
                             root_pt_kva as *mut PageTable,
@@ -2993,6 +2847,8 @@ fn finalize_cap(
                 if root_pt_kva != 0 && root_pt_kva == pt_kva {
                     crate::object::asid::delete(asid, pt_kva);
                 } else {
+                    // SAFETY: the page-table and object addresses used below come from caps
+                    // this invocation re-checked against the slot, so they are live.
                     unsafe {
                         let _ = vspace::unmap_user_page_table(
                             root_pt_kva as *mut PageTable,
@@ -3025,14 +2881,10 @@ fn finalize_cap(
             // receivers stay queued on the EP because other refs to it
             // are still live.
             if is_final {
-                let p = cap.endpoint_ptr();
-                if p == 0 || !is_pspace_kva(p) {
-                    debug_assert!(false, "final Endpoint cap must point at an endpoint");
+                let Some(ep) = cap.as_endpoint().filter(|ep| is_pspace_kva(ep.kva())) else {
                     panic!("final Endpoint cap must point at an endpoint");
-                }
-                unsafe {
-                    crate::object::endpoint::finalize(p as *mut crate::object::endpoint::Endpoint);
-                }
+                };
+                ep.finalize();
             }
             return Ok(FinaliseCapResult::null());
         }
@@ -3041,15 +2893,10 @@ fn finalize_cap(
             // rationale). Non-final delete leaves the notification
             // object and its waiters intact.
             if is_final {
-                let p = cap.notification_ptr();
-                if p == 0 || !is_pspace_kva(p) {
-                    debug_assert!(false, "final Notification cap must point at a notification",);
+                let Some(ntfn) = cap.as_notification().filter(|n| is_pspace_kva(n.kva())) else {
                     panic!("final Notification cap must point at a notification");
-                }
-                unsafe {
-                    let n = p as *mut crate::object::notification::Notification;
-                    crate::object::notification::finalize(n);
-                }
+                };
+                ntfn.finalize();
             }
             return Ok(FinaliseCapResult::null());
         }
@@ -3084,20 +2931,15 @@ fn finalize_cap(
             // future scheduler scan races the Revoke. The actual
             // storage is recycled by the parent Untyped on Retype.
             if is_final {
-                let p = cap.thread_ptr();
-                if p == 0 || !is_boot_or_pspace_object_kva(p) {
-                    debug_assert!(false, "final Thread cap must point at a TCB");
+                let Some(target) = cap
+                    .as_thread()
+                    .filter(|target| is_boot_or_pspace_object_kva(target.kva()))
+                else {
                     panic!("final Thread cap must point at a TCB");
-                }
-                crate::kernel::smp::remote_tcb_stall(p as *mut Tcb);
-                let cte_base = unsafe { crate::object::tcb::cap_slot_base(p as *mut Tcb) } as u64;
-                if cte_base == 0 {
-                    debug_assert!(false, "final Thread cap must expose TCB CTE slots");
-                    panic!("final Thread cap must expose TCB CTE slots");
-                }
-                unsafe {
-                    crate::object::tcb::finalize(p as *mut crate::object::tcb::Tcb);
-                }
+                };
+                crate::kernel::smp::remote_tcb_stall(target);
+                let cte_base = target.ctes().base().kva();
+                target.finalize();
                 return Ok(FinaliseCapResult::remainder(Cap::new_tcb_zombie(
                     tcb::TCB_ARCH_CNODE_ENTRIES as u64,
                     cte_base,
@@ -3109,9 +2951,7 @@ fn finalize_cap(
         }
         Some(CapTag::IrqHandler) => {
             if is_final {
-                unsafe {
-                    crate::object::irq::deleting_handler(cap.irq_handler_irq());
-                }
+                crate::object::irq::deleting_handler(cap.irq_handler_irq());
                 return Ok(FinaliseCapResult::with_cleanup(Cap::null(), cap));
             }
         }
@@ -3131,7 +2971,7 @@ fn finalize_cap(
 
 /// Walk the CDT descendants of `cte` and delete them through the same
 /// `cteDelete(..., exposed=true)` path as seL4.
-fn revoke_descendants(cte: *mut Cte) -> Result<(), SyscallError> {
+fn revoke_descendants(cte: CteRef) -> Result<(), SyscallError> {
     debug_assert_kernel_lock_held();
     loop {
         if !revoke_one_descendant(cte)? {
@@ -3141,7 +2981,7 @@ fn revoke_descendants(cte: *mut Cte) -> Result<(), SyscallError> {
     }
 }
 
-fn revoke_one_descendant(cte: *mut Cte) -> Result<bool, SyscallError> {
+fn revoke_one_descendant(cte: CteRef) -> Result<bool, SyscallError> {
     let Some(slot) = next_descendant_for_revoke(cte) else {
         return Ok(false);
     };
@@ -3149,31 +2989,22 @@ fn revoke_one_descendant(cte: *mut Cte) -> Result<bool, SyscallError> {
     Ok(true)
 }
 
-fn next_descendant_for_revoke(cte: *mut Cte) -> Option<*mut Cte> {
-    let cspace_guard = crate::object::cnode::lock_cspace();
-    unsafe {
-        if cte.is_null() || !crate::object::cnode::mdb_has_children_locked(&cspace_guard, cte) {
-            return None;
-        }
-
-        // seL4 `cteRevoke` repeatedly deletes the direct MDB successor while
-        // it remains a child of the revoke root. `cteDelete` and zombies then
-        // preserve any deeper descendants for later loop iterations.
-        let child = (*cte).mdb.next() as *mut Cte;
-        if child.is_null() {
-            return None;
-        }
-
-        Some(child)
+fn next_descendant_for_revoke(cte: CteRef) -> Option<CteRef> {
+    if !cte.mdb_has_children() {
+        return None;
     }
+    // seL4 `cteRevoke` repeatedly deletes the direct MDB successor while it
+    // remains a child of the revoke root. `cteDelete` and zombies then
+    // preserve any deeper descendants for later loop iterations.
+    cte.mdb_next()
 }
 
 /// Helper: read mr4 / mr5 from the IPC buffer. The IPC buffer's `msg`
 /// array starts at offset 1 word inside the frame (word 0 is the tag).
-fn read_mrs_4_5(_thread: &Thread) -> (u64, u64) {
+fn read_mrs_4_5(_thread: TcbRef) -> (u64, u64) {
     (
-        crate::api::thread::current_ipc_buffer_word(1 + 4),
-        crate::api::thread::current_ipc_buffer_word(1 + 5),
+        current_ipc_buffer_word(1 + 4),
+        current_ipc_buffer_word(1 + 5),
     )
 }
 
@@ -3183,9 +3014,9 @@ fn read_mrs_4_5(_thread: &Thread) -> (u64, u64) {
 /// The IPC buffer layout has `msg[120]` words after the tag, then
 /// `userData`, then `caps_or_badges[3]`. So caps_or_badges[i] lives at
 /// word offset 1 + 120 + 1 + i = 122 + i.
-fn read_extra_cap(_thread: &Thread, i: usize) -> u64 {
+fn read_extra_cap(_thread: TcbRef, i: usize) -> u64 {
     debug_assert!(i < 3);
-    crate::api::thread::current_ipc_buffer_word(122 + i)
+    current_ipc_buffer_word(122 + i)
 }
 
 #[inline]
@@ -3202,3 +3033,25 @@ fn align_down(v: u64, bits: u64) -> u64 {
 
 #[allow(unused_imports)]
 use cspace as _;
+
+// ---- Current-thread IPC buffer helpers ------------------------------------
+//
+// Invocation replies longer than the message registers spill into the calling
+// thread's IPC buffer. Reads of an absent buffer answer zero and writes are
+// dropped, matching what the C kernel does when a thread has none.
+
+fn current_ipc_buffer() -> Option<crate::object::tcb::IpcBuffer> {
+    tcb::current().and_then(TcbRef::ipc_buffer)
+}
+
+fn current_has_ipc_buffer() -> bool {
+    current_ipc_buffer().is_some()
+}
+
+fn current_ipc_buffer_word(index: usize) -> u64 {
+    current_ipc_buffer().map_or(0, |buffer| buffer.word(index))
+}
+
+fn write_current_ipc_buffer_word(index: usize, value: u64) -> bool {
+    current_ipc_buffer().is_some_and(|buffer| buffer.set_word(index, value))
+}

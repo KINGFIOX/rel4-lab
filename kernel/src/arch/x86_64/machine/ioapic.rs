@@ -4,8 +4,12 @@
 //! `irq = arg + irq_user_min`, hardware IDT vector is `irq + IRQ_INT_OFFSET`.
 
 use crate::arch::x86_64::object::vspace::paddr_to_pptr;
+use crate::kernel::smp::BklCell;
+use crate::ktypes::addr::Paddr;
+use crate::ktypes::mmio::MmioRegion;
 
 const IOAPIC_PADDR: usize = 0xfec0_0000;
+const IOAPIC_BYTES: usize = 0x20;
 const IOREGSEL: usize = 0x00;
 const IOWIN: usize = 0x10;
 const IOAPICVER: u32 = 0x01;
@@ -34,46 +38,55 @@ const EMPTY_ROUTE: IrqRoute = IrqRoute {
     pin: 0,
 };
 
-static mut PIN_COUNT: usize = DEFAULT_PINS;
-static mut IRQ_ROUTES: [IrqRoute; MAX_IRQ + 1] = [EMPTY_ROUTE; MAX_IRQ + 1];
-
-fn mmio() -> *mut u8 {
-    paddr_to_pptr(IOAPIC_PADDR) as *mut u8
+/// How many redirection-table pins this IOAPIC reported, and which pin each
+/// IRQ was routed to. Written while routing IRQs, so it is BKL-protected like
+/// the rest of the kernel's interrupt bookkeeping.
+struct Routing {
+    pin_count: usize,
+    routes: [IrqRoute; MAX_IRQ + 1],
 }
 
-unsafe fn write_sel(reg: u32) {
-    unsafe {
-        core::ptr::write_volatile(mmio().add(IOREGSEL) as *mut u32, reg);
-    }
+static ROUTING: BklCell<Routing> = BklCell::new(Routing {
+    pin_count: DEFAULT_PINS,
+    routes: [EMPTY_ROUTE; MAX_IRQ + 1],
+});
+
+/// The IOAPIC's two-register window.
+fn ioapic() -> MmioRegion {
+    // SAFETY: the platform places the IOAPIC at this fixed physical address,
+    // the kernel window maps it, and no Rust object lives there.
+    unsafe { MmioRegion::new(paddr_to_pptr(Paddr::new(IOAPIC_PADDR)), IOAPIC_BYTES) }
 }
 
-unsafe fn read_win() -> u32 {
-    unsafe { core::ptr::read_volatile(mmio().add(IOWIN) as *const u32) }
+/// Select an indirect register. Every access is a select followed by a window
+/// read or write, so the two must not be interleaved with another core's
+/// access; the BKL provides that.
+fn write_sel(reg: u32) {
+    ioapic().reg::<u32>(IOREGSEL).write(reg);
 }
 
-unsafe fn write_win(value: u32) {
-    unsafe {
-        core::ptr::write_volatile(mmio().add(IOWIN) as *mut u32, value);
-    }
+fn read_win() -> u32 {
+    ioapic().reg::<u32>(IOWIN).read()
 }
 
-unsafe fn read_rte(pin: u32) -> u64 {
-    unsafe {
-        write_sel(IOREDTBL + pin * 2);
-        let low = read_win() as u64;
-        write_sel(IOREDTBL + pin * 2 + 1);
-        let high = read_win() as u64;
-        (high << 32) | low
-    }
+fn write_win(value: u32) {
+    ioapic().reg::<u32>(IOWIN).write(value);
 }
 
-unsafe fn write_rte(pin: u32, value: u64) {
-    unsafe {
-        write_sel(IOREDTBL + pin * 2);
-        write_win(value as u32);
-        write_sel(IOREDTBL + pin * 2 + 1);
-        write_win((value >> 32) as u32);
-    }
+/// Read a redirection-table entry, which spans two indirect registers.
+fn read_rte(pin: u32) -> u64 {
+    write_sel(IOREDTBL + pin * 2);
+    let low = u64::from(read_win());
+    write_sel(IOREDTBL + pin * 2 + 1);
+    let high = u64::from(read_win());
+    (high << 32) | low
+}
+
+fn write_rte(pin: u32, value: u64) {
+    write_sel(IOREDTBL + pin * 2);
+    write_win(value as u32);
+    write_sel(IOREDTBL + pin * 2 + 1);
+    write_win((value >> 32) as u32);
 }
 
 fn dest_field() -> u64 {
@@ -81,26 +94,29 @@ fn dest_field() -> u64 {
 }
 
 pub fn init() {
-    let ver = unsafe {
-        write_sel(IOAPICVER);
-        read_win()
-    };
-    let pins = ((ver >> 16) & 0xff) as usize + 1;
-    let pins = pins.min(DEFAULT_PINS).max(1);
-    unsafe {
-        PIN_COUNT = pins;
-        IRQ_ROUTES = [EMPTY_ROUTE; MAX_IRQ + 1];
-        let dest = dest_field();
-        let mut pin = 0u32;
-        while pin < pins as u32 {
-            write_rte(pin, dest | RTE_MASKED);
-            pin += 1;
-        }
+    write_sel(IOAPICVER);
+    let ver = read_win();
+    let pins = (((ver >> 16) & 0xff) as usize + 1).clamp(1, DEFAULT_PINS);
+    ROUTING.with_mut(|routing| {
+        routing.pin_count = pins;
+        routing.routes = [EMPTY_ROUTE; MAX_IRQ + 1];
+    });
+    let dest = dest_field();
+    for pin in 0..pins as u32 {
+        write_rte(pin, dest | RTE_MASKED);
     }
 }
 
 pub fn pin_count() -> usize {
-    unsafe { PIN_COUNT }
+    ROUTING.with_ref(|routing| routing.pin_count)
+}
+
+/// The pin an IRQ is routed to, if it is routed at all.
+fn route_pin(irq: u64) -> Option<u8> {
+    ROUTING.with_ref(|routing| {
+        let route = routing.routes.get(irq as usize)?;
+        route.mapped.then_some(route.pin)
+    })
 }
 
 pub fn map_pin_to_irq(pin: u64, irq: u64, level: bool, polarity_low: bool, vector: u8) {
@@ -114,28 +130,21 @@ pub fn map_pin_to_irq(pin: u64, irq: u64, level: bool, polarity_low: bool, vecto
     if polarity_low {
         rte |= RTE_POLARITY_LOW;
     }
-    unsafe {
-        write_rte(pin as u32, rte);
-        IRQ_ROUTES[irq as usize] = IrqRoute {
+    write_rte(pin as u32, rte);
+    ROUTING.with_mut(|routing| {
+        routing.routes[irq as usize] = IrqRoute {
             mapped: true,
             pin: pin as u8,
         };
-    }
+    });
 }
 
 pub fn irq_is_mapped(irq: u64) -> bool {
-    if irq > MAX_IRQ as u64 {
-        return false;
-    }
-    unsafe { IRQ_ROUTES[irq as usize].mapped }
+    route_pin(irq).is_some()
 }
 
 pub fn irq_to_vector(irq: u64) -> Option<u8> {
-    if irq_is_mapped(irq) {
-        Some((irq + IRQ_INT_OFFSET) as u8)
-    } else {
-        None
-    }
+    irq_is_mapped(irq).then(|| (irq + IRQ_INT_OFFSET) as u8)
 }
 
 pub fn vector_to_irq(vector: u64) -> Option<u64> {
@@ -147,23 +156,14 @@ pub fn vector_to_irq(vector: u64) -> Option<u64> {
 }
 
 pub fn set_pin_masked(irq: u64, masked: bool) {
-    if irq > MAX_IRQ as u64 {
-        return;
-    }
-    let pin = unsafe {
-        let route = core::ptr::addr_of!(IRQ_ROUTES[irq as usize]).read();
-        route.mapped.then_some(route.pin)
-    };
-    let Some(pin) = pin else {
+    let Some(pin) = route_pin(irq) else {
         return;
     };
-    unsafe {
-        let mut rte = read_rte(u32::from(pin));
-        if masked {
-            rte |= RTE_MASKED;
-        } else {
-            rte &= !RTE_MASKED;
-        }
-        write_rte(u32::from(pin), rte);
+    let mut rte = read_rte(u32::from(pin));
+    if masked {
+        rte |= RTE_MASKED;
+    } else {
+        rte &= !RTE_MASKED;
     }
+    write_rte(u32::from(pin), rte);
 }

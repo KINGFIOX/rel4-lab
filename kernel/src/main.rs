@@ -23,6 +23,8 @@ mod arch;
 #[cfg(any(target_arch = "riscv64", target_arch = "x86_64"))]
 mod kernel;
 #[cfg(any(target_arch = "riscv64", target_arch = "x86_64"))]
+mod ktypes;
+#[cfg(any(target_arch = "riscv64", target_arch = "x86_64"))]
 mod logger;
 #[cfg(any(target_arch = "riscv64", target_arch = "x86_64"))]
 mod machine;

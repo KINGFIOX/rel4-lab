@@ -20,4 +20,3 @@ pub mod notification;
 pub mod reply;
 pub mod tcb;
 pub mod untyped;
-pub mod wait_queue_lock;

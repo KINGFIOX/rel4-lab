@@ -6,6 +6,9 @@
 //!             [mdbFirstBadged:0]
 
 #![allow(dead_code)]
+// This module is written entirely in terms of the safe abstractions in
+// `ktypes`; keep it that way.
+#![deny(unsafe_code)]
 
 const NEXT_MASK: u64 = 0x7F_FFFF_FFFC;
 const SIGN_EXT: u64 = 0xFFFF_FF80_0000_0000;

@@ -11,6 +11,8 @@ pub fn init() {
 }
 
 fn mask_legacy_pic() {
+    // SAFETY: writing the legacy PIC's mask ports, which this platform uses only
+    // to silence it in favour of the IOAPIC.
     unsafe {
         core::arch::asm!(
             "mov $0xff, %al",

@@ -6,14 +6,17 @@
 //! registers back into the saved `UserContext` before returning to user mode.
 
 #![allow(dead_code)]
+// This module is written entirely in terms of the safe abstractions in
+// `ktypes`; keep it that way.
+#![deny(unsafe_code)]
 
 use crate::abi::constants::N_MSG_REGISTERS;
 use crate::abi::types::MessageInfo;
-use crate::api::cspace::lookup_cap;
+use crate::api::cspace::lookup_cap_current;
 use crate::api::invocation;
-use crate::api::thread;
 use crate::arch::current::api::UserContext;
 use crate::object::cap::CapTag;
+use crate::object::tcb::{self, TcbRef};
 
 #[derive(Copy, Clone, Debug)]
 pub enum SyscallError {
@@ -78,69 +81,61 @@ pub fn do_call(uc: &mut UserContext) {
     let raw_info = uc.msg_info();
     let info = MessageInfo(raw_info);
 
+    let Some(t) = tcb::current() else {
+        write_error_reply(uc, SyscallError::InvalidCapability);
+        return;
+    };
     let mut endpoint_call = false;
     let mut success_reply_length = 0;
-    let result = unsafe {
-        thread::with_current(|t| {
-            let lookup_res = lookup_cap(t, cptr);
-            let (cap, slot) = match lookup_res {
-                Ok(v) => v,
-                Err(_) => {
+    let result = (|| {
+        let Ok((cap, slot)) = lookup_cap_current(cptr) else {
+            return Err(SyscallError::InvalidCapability);
+        };
+
+        let tag = cap.tag();
+        let label = info.label();
+        let mut length = info.length();
+        if length > N_MSG_REGISTERS as u64 && !t.has_ipc_buffer() {
+            length = N_MSG_REGISTERS as u64;
+        }
+
+        let result = match tag {
+            Some(CapTag::Untyped) => invocation::handle_untyped(t, slot, cap, label, length, uc),
+            Some(CapTag::CNode) => invocation::handle_cnode(t, slot, cap, label, length, uc),
+            Some(CapTag::Frame) => invocation::handle_frame(t, slot, cap, label, length, uc),
+            Some(CapTag::PageTable) => {
+                invocation::handle_page_table(t, slot, cap, label, length, uc)
+            }
+            Some(CapTag::Thread) => invocation::handle_thread(t, slot, cap, label, length, uc),
+            Some(CapTag::Endpoint) => {
+                if !cap.endpoint_can_send() {
                     return Err(SyscallError::InvalidCapability);
                 }
-            };
-
-            let tag = cap.tag();
-            let label = info.label();
-            let mut length = info.length();
-            if length > N_MSG_REGISTERS as u64 && !thread::current_has_ipc_buffer() {
-                length = N_MSG_REGISTERS as u64;
+                endpoint_call = true;
+                Ok(())
             }
-
-            let result = match tag {
-                Some(CapTag::Untyped) => {
-                    invocation::handle_untyped(t, slot, cap, label, length, uc)
-                }
-                Some(CapTag::CNode) => invocation::handle_cnode(t, slot, cap, label, length, uc),
-                Some(CapTag::Frame) => invocation::handle_frame(t, slot, cap, label, length, uc),
-                Some(CapTag::PageTable) => {
-                    invocation::handle_page_table(t, slot, cap, label, length, uc)
-                }
-                Some(CapTag::Thread) => invocation::handle_thread(t, slot, cap, label, length, uc),
-                Some(CapTag::Endpoint) => {
-                    if !cap.endpoint_can_send() {
-                        return Err(SyscallError::InvalidCapability);
-                    }
-                    endpoint_call = true;
-                    Ok(())
-                }
-                Some(CapTag::Null) => Err(SyscallError::InvalidCapability),
-                Some(CapTag::Domain) => invocation::handle_domain(t, cap, label, length, uc),
-                Some(CapTag::AsidControl) => {
-                    invocation::handle_asid_control(t, cap, label, length, uc)
-                }
-                Some(CapTag::AsidPool) => invocation::handle_asid_pool(t, cap, label, length, uc),
-                Some(CapTag::IrqControl) => {
-                    invocation::handle_irq_control(t, slot, cap, label, length, uc)
-                }
-                Some(CapTag::IrqHandler) => {
-                    invocation::handle_irq_handler(t, cap, label, length, uc)
-                }
-                #[cfg(target_arch = "x86_64")]
-                Some(CapTag::IoPortControl) => {
-                    invocation::handle_io_port_control(t, slot, cap, label, length, uc)
-                }
-                #[cfg(target_arch = "x86_64")]
-                Some(CapTag::IoPort) => invocation::handle_io_port(t, cap, label, length, uc),
-                None => Err(SyscallError::InvalidCapability),
-                _ => Err(SyscallError::IllegalOperation),
-            };
-            if result.is_ok() {
-                success_reply_length = invocation::success_reply_length(tag, label);
+            Some(CapTag::Null) => Err(SyscallError::InvalidCapability),
+            Some(CapTag::Domain) => invocation::handle_domain(t, cap, label, length, uc),
+            Some(CapTag::AsidControl) => invocation::handle_asid_control(t, cap, label, length, uc),
+            Some(CapTag::AsidPool) => invocation::handle_asid_pool(t, cap, label, length, uc),
+            Some(CapTag::IrqControl) => {
+                invocation::handle_irq_control(t, slot, cap, label, length, uc)
             }
-            result
-        })
-    };
+            Some(CapTag::IrqHandler) => invocation::handle_irq_handler(t, cap, label, length, uc),
+            #[cfg(target_arch = "x86_64")]
+            Some(CapTag::IoPortControl) => {
+                invocation::handle_io_port_control(t, slot, cap, label, length, uc)
+            }
+            #[cfg(target_arch = "x86_64")]
+            Some(CapTag::IoPort) => invocation::handle_io_port(t, cap, label, length, uc),
+            None => Err(SyscallError::InvalidCapability),
+            _ => Err(SyscallError::IllegalOperation),
+        };
+        if result.is_ok() {
+            success_reply_length = invocation::success_reply_length(tag, label);
+        }
+        result
+    })();
     if endpoint_call {
         // Endpoint Call is a real IPC send. A successful reply will later
         // arrive through an explicit Reply cap, so we do not write the normal
@@ -157,8 +152,7 @@ pub fn do_call(uc: &mut UserContext) {
 }
 
 fn restart_current_invocation_after_preemption(uc: &mut UserContext) {
-    let current = crate::object::tcb::current();
-    if crate::object::tcb::runnable_snapshot(current) {
+    if tcb::current().is_some_and(TcbRef::is_runnable) {
         crate::arch::current::api::apply_preemption_restart(uc);
     }
 }
@@ -189,40 +183,36 @@ fn write_error_reply(uc: &mut UserContext, e: SyscallError) {
 /// compatibility baseline.
 pub fn do_send(uc: &mut UserContext, nb: bool) {
     let cptr = uc.cap_reg();
-    let raw_info = uc.msg_info();
-    let info = MessageInfo(raw_info);
+    let info = MessageInfo(uc.msg_info());
     let label = info.label();
+    let Some(t) = tcb::current() else {
+        return;
+    };
     let mut length = info.length();
-    if length > N_MSG_REGISTERS as u64 && !thread::current_has_ipc_buffer() {
+    if length > N_MSG_REGISTERS as u64 && !t.has_ipc_buffer() {
         length = N_MSG_REGISTERS as u64;
     }
-    let (cap, slot) = match unsafe { thread::with_current(|t| lookup_cap(t, cptr)) } {
-        Ok(v) => v,
-        Err(_) => return,
+    let Ok((cap, slot)) = lookup_cap_current(cptr) else {
+        return;
     };
 
     match cap.tag() {
         Some(CapTag::Notification) => {
-            if !cap.notification_can_send() {
-                return;
-            }
-            let ntfn_ptr = cap.notification_ptr() as *mut crate::object::notification::Notification;
-            let badge = cap.notification_badge();
-            unsafe {
-                crate::object::notification::signal(ntfn_ptr, badge);
+            if let Some(ntfn) = cap.as_notification()
+                && cap.notification_can_send()
+            {
+                ntfn.signal(cap.notification_badge());
             }
         }
         Some(CapTag::Endpoint) => {
             crate::api::ipc::send(uc, !nb, false);
         }
-        Some(CapTag::Reply) => unsafe {
+        Some(CapTag::Reply) => {
             crate::api::ipc::handle_reply_slot(uc, (cap, slot));
-        },
-        Some(CapTag::Thread) => unsafe {
-            thread::with_current(|t| {
-                let _ = invocation::handle_thread_send(t, slot, cap, label, length, uc);
-            });
-        },
+        }
+        Some(CapTag::Thread) => {
+            let _ = invocation::handle_thread_send(t, slot, cap, label, length, uc);
+        }
         _ => {}
     }
 }
@@ -237,16 +227,15 @@ pub fn do_recv(uc: &mut UserContext, blocking: bool) {
 }
 
 fn do_recv_inner(uc: &mut UserContext, blocking: bool) {
-    unsafe {
-        crate::object::reply::delete_caller_cap(crate::object::tcb::current());
-    }
+    let Some(cur) = tcb::current() else {
+        write_empty(uc);
+        return;
+    };
+    crate::object::reply::delete_caller_cap(cur);
     let cptr = uc.cap_reg();
-    let cap = match unsafe { thread::with_current(|t| lookup_cap(t, cptr)) } {
-        Ok((cap, _slot)) => cap,
-        Err(_) => {
-            write_recv_cap_fault_or_empty(uc, cptr);
-            return;
-        }
+    let Ok((cap, _slot)) = lookup_cap_current(cptr) else {
+        write_recv_cap_fault_or_empty(uc, cptr);
+        return;
     };
 
     match cap.tag() {
@@ -254,23 +243,20 @@ fn do_recv_inner(uc: &mut UserContext, blocking: bool) {
             crate::api::ipc::recv(uc, blocking);
         }
         Some(CapTag::Notification) => {
-            let ntfn_ptr = cap.notification_ptr() as *mut crate::object::notification::Notification;
-            let cur_tcb = crate::object::tcb::current();
-            let bound_tcb = unsafe { crate::object::notification::bound_tcb_snapshot(ntfn_ptr) };
-            if !cap.notification_can_receive() || (!bound_tcb.is_null() && bound_tcb != cur_tcb) {
+            let Some(ntfn) = cap.as_notification() else {
+                write_recv_cap_fault_or_empty(uc, cptr);
+                return;
+            };
+            let bound = ntfn.bound_tcb();
+            if !cap.notification_can_receive() || bound.is_some_and(|bound| bound != cur) {
                 write_recv_cap_fault_or_empty(uc, cptr);
                 return;
             }
-            let outcome = unsafe { crate::object::notification::wait(ntfn_ptr, cur_tcb, blocking) };
-            match outcome {
+            match ntfn.wait(cur, blocking) {
                 crate::object::notification::WaitOutcome::Got(badge) => {
                     uc.set_cap_reg(badge);
                     uc.set_msg_info(0);
-                    thread::zero_current_ipc_buffer_words(1, 4);
-                    uc.set_mr(0, 0);
-                    uc.set_mr(1, 0);
-                    uc.set_mr(2, 0);
-                    uc.set_mr(3, 0);
+                    clear_reply_message_registers(uc, cur);
                 }
                 crate::object::notification::WaitOutcome::Blocked => {
                     // Caller is now BlockedOnNotification; signal() will
@@ -279,6 +265,17 @@ fn do_recv_inner(uc: &mut UserContext, blocking: bool) {
             }
         }
         _ => write_recv_cap_fault_or_empty(uc, cptr),
+    }
+}
+
+/// Clear the four message registers and their IPC-buffer mirrors, so
+/// `seL4_GetMR` cannot observe stale trap-entry state.
+fn clear_reply_message_registers(uc: &mut UserContext, tcb: TcbRef) {
+    for i in 0..N_MSG_REGISTERS {
+        uc.set_mr(i, 0);
+    }
+    if let Some(buffer) = tcb.ipc_buffer() {
+        buffer.zero_words(1, N_MSG_REGISTERS);
     }
 }
 
@@ -291,9 +288,10 @@ fn write_recv_cap_fault_or_empty(uc: &mut UserContext, cptr: u64) {
 fn write_empty(uc: &mut UserContext) {
     uc.set_cap_reg(0);
     uc.set_msg_info(0);
-    uc.set_mr(0, 0);
-    uc.set_mr(1, 0);
-    uc.set_mr(2, 0);
-    uc.set_mr(3, 0);
-    thread::zero_current_ipc_buffer_words(1, 4);
+    for i in 0..N_MSG_REGISTERS {
+        uc.set_mr(i, 0);
+    }
+    if let Some(buffer) = tcb::current().and_then(TcbRef::ipc_buffer) {
+        buffer.zero_words(1, N_MSG_REGISTERS);
+    }
 }

@@ -29,16 +29,21 @@ const TRIGGER_LEVEL: u64 = 1 << 15;
 pub fn init() {
     let mut apic_base = registers::rdmsr(IA32_APIC_BASE);
     apic_base |= APIC_ENABLE;
-    registers::wrmsr(IA32_APIC_BASE, apic_base);
-    registers::wrmsr(IA32_APIC_BASE, apic_base | APIC_X2APIC);
-    registers::wrmsr(MSR_SVR, SVR_APIC_ENABLE | 0xff);
-    registers::wrmsr(MSR_TIMER_DIV, DIVIDE_BY_1);
-    registers::wrmsr(MSR_LVT_TIMER, LVT_PERIODIC | u64::from(TIMER_VECTOR));
-    registers::wrmsr(MSR_TIMER_INIT, TIMER_INIT_COUNT);
+    // SAFETY: these are the local APIC's own MSRs, written with the enable,
+    // x2APIC, spurious-vector, and periodic-timer values this platform uses.
+    unsafe {
+        registers::wrmsr(IA32_APIC_BASE, apic_base);
+        registers::wrmsr(IA32_APIC_BASE, apic_base | APIC_X2APIC);
+        registers::wrmsr(MSR_SVR, SVR_APIC_ENABLE | 0xff);
+        registers::wrmsr(MSR_TIMER_DIV, DIVIDE_BY_1);
+        registers::wrmsr(MSR_LVT_TIMER, LVT_PERIODIC | u64::from(TIMER_VECTOR));
+        registers::wrmsr(MSR_TIMER_INIT, TIMER_INIT_COUNT);
+    }
 }
 
 pub fn eoi() {
-    registers::wrmsr(MSR_EOI, 0);
+    // SAFETY: writing the local APIC's end-of-interrupt register.
+    unsafe { registers::wrmsr(MSR_EOI, 0) };
 }
 
 pub fn timer_irq_pending() -> bool {
@@ -63,5 +68,7 @@ pub fn send_sipi(dest_apic_id: u32, vector: u8) {
 }
 
 fn write_icr(value: u64) {
-    registers::wrmsr(MSR_ICR, value);
+    // SAFETY: writing the local APIC's interrupt command register, whose
+    // effect is to send the IPI the callers above encoded.
+    unsafe { registers::wrmsr(MSR_ICR, value) };
 }

@@ -3,6 +3,10 @@
 //! Numbers match the non-MCS `arch_invocation_label` sequence used by this
 //! project's existing user-space.
 
+// This module is written entirely in terms of the safe abstractions in
+// `ktypes`; keep it that way.
+#![deny(unsafe_code)]
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u64)]
 pub enum ArchInvocation {

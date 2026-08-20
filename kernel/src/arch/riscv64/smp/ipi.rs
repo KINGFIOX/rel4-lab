@@ -111,6 +111,7 @@ pub struct SbiRet {
 unsafe fn ecall6(eid: usize, fid: usize, args: [usize; 6]) -> SbiRet {
     let error_word: usize;
     let value: usize;
+    // SAFETY: forwarded to the caller.
     unsafe {
         asm!(
             "ecall",
@@ -133,6 +134,7 @@ unsafe fn ecall6(eid: usize, fid: usize, args: [usize; 6]) -> SbiRet {
 
 #[inline]
 fn call(eid: usize, fid: usize, arg0: usize, arg1: usize, arg2: usize) -> SbiRet {
+    // SAFETY: an SBI call with the argument count this extension expects.
     unsafe { ecall6(eid, fid, [arg0, arg1, arg2, 0, 0, 0]) }
 }
 
@@ -144,6 +146,7 @@ fn call6(eid: usize, fid: usize, args: [usize; 6]) -> SbiRet {
 #[inline]
 fn wfi_forever() -> ! {
     loop {
+        // SAFETY: waiting until the next interrupt.
         unsafe {
             asm!("wfi", options(nomem, nostack));
         }

@@ -6,101 +6,70 @@
 //! receiver's `tcbCaller` slot.
 
 #![allow(dead_code)]
+// This module is written entirely in terms of the safe abstractions in
+// `ktypes`; keep it that way.
+#![deny(unsafe_code)]
 
 use crate::object::cap::{Cap, CapTag};
-use crate::object::cnode::{self, Cte};
+use crate::object::cnode::CteRef;
 use crate::object::mdb::MdbNode;
-use crate::object::tcb::{self, Tcb};
+use crate::object::tcb::{self, TcbRef};
 
-pub unsafe fn setup_reply_master(tcb: *mut Tcb) {
-    if tcb.is_null() {
+pub fn setup_reply_master(tcb: TcbRef) {
+    let Some(slot) = tcb.cap_slot(tcb::TCB_REPLY) else {
+        return;
+    };
+    if !slot.cap().is_null() {
         return;
     }
-    unsafe {
-        let slot = tcb::cap_slot(tcb, tcb::TCB_REPLY);
-        if slot.is_null() {
-            return;
-        }
-        let _guard = cnode::lock_cspace();
-        if !(*slot).cap.is_null() {
-            return;
-        }
-        (*slot).cap = Cap::new_reply(tcb as u64, true, true);
-        (*slot).mdb = MdbNode::new(0, 0, true, true);
-    }
+    slot.with_mut(|cte| {
+        cte.cap = Cap::new_reply(tcb.kva(), true, true);
+        cte.mdb = MdbNode::new(0, 0, true, true);
+    });
 }
 
-pub unsafe fn setup_caller_cap(sender: *mut Tcb, receiver: *mut Tcb, can_grant: bool) -> bool {
-    if sender.is_null() || receiver.is_null() {
+pub fn setup_caller_cap(sender: TcbRef, receiver: TcbRef, can_grant: bool) -> bool {
+    setup_reply_master(sender);
+    sender.set_blocked_on_reply();
+    let (Some(reply_slot), Some(caller_slot)) = (
+        sender.cap_slot(tcb::TCB_REPLY),
+        receiver.cap_slot(tcb::TCB_CALLER),
+    ) else {
+        return false;
+    };
+    let master = reply_slot.cap();
+    if master.tag() != Some(CapTag::Reply)
+        || !master.reply_is_master()
+        || master.reply_tcb_ptr() != sender.kva()
+    {
         return false;
     }
-    unsafe {
-        setup_reply_master(sender);
-        tcb::set_blocked_on_reply(sender);
-        let reply_slot = tcb::cap_slot(sender, tcb::TCB_REPLY);
-        let caller_slot = tcb::cap_slot(receiver, tcb::TCB_CALLER);
-        if reply_slot.is_null() || caller_slot.is_null() {
-            return false;
-        }
-        let master = cnode::cap_snapshot(reply_slot);
-        if master.tag() != Some(CapTag::Reply)
-            || !master.reply_is_master()
-            || master.reply_tcb_ptr() != sender as u64
-        {
-            return false;
-        }
-        if !(*caller_slot).cap.is_null() {
-            delete_caller_cap(receiver);
-        }
-        let derived = Cap::new_reply(sender as u64, can_grant, false);
-        let cspace_guard = cnode::lock_cspace();
-        cnode::cte_insert_locked(&cspace_guard, derived, reply_slot, caller_slot);
+    if !caller_slot.cap().is_null() {
+        delete_caller_cap(receiver);
     }
+    let derived = Cap::new_reply(sender.kva(), can_grant, false);
+    reply_slot.cte_insert(derived, caller_slot);
     true
 }
 
-pub unsafe fn delete_caller_cap(receiver: *mut Tcb) {
-    if receiver.is_null() {
-        return;
-    }
-    unsafe {
-        let caller_slot = tcb::cap_slot(receiver, tcb::TCB_CALLER);
-        if caller_slot.is_null() {
-            return;
-        }
+pub fn delete_caller_cap(receiver: TcbRef) {
+    if let Some(caller_slot) = receiver.cap_slot(tcb::TCB_CALLER) {
         crate::api::invocation::cte_delete_one(caller_slot);
     }
 }
 
-pub unsafe fn cancel_blocked_on_reply(tcb: *mut Tcb) {
-    if tcb.is_null() {
+pub fn cancel_blocked_on_reply(tcb: TcbRef) {
+    tcb.clear_fault_message();
+    let Some(reply_slot) = tcb.cap_slot(tcb::TCB_REPLY) else {
         return;
-    }
-    unsafe {
-        tcb::clear_fault_message(tcb);
-        let reply_slot = tcb::cap_slot(tcb, tcb::TCB_REPLY);
-        if reply_slot.is_null() {
-            return;
-        }
-        let next = {
-            let _guard = cnode::lock_cspace();
-            (*reply_slot).mdb.next()
-        };
-        if next != 0 {
-            crate::api::invocation::cte_delete_one(next as *mut Cte);
-        }
+    };
+    if let Some(derived) = reply_slot.mdb_next() {
+        crate::api::invocation::cte_delete_one(derived);
     }
 }
 
-pub unsafe fn caller_reply_cap(receiver: *mut Tcb) -> (Cap, *mut Cte) {
-    if receiver.is_null() {
-        return (Cap::null(), core::ptr::null_mut());
-    }
-    unsafe {
-        let slot = tcb::cap_slot(receiver, tcb::TCB_CALLER);
-        if slot.is_null() {
-            return (Cap::null(), core::ptr::null_mut());
-        }
-        (cnode::cap_snapshot(slot), slot)
-    }
+/// The caller cap a receiver holds, if any, together with its slot.
+pub fn caller_reply_cap(receiver: TcbRef) -> Option<(Cap, CteRef)> {
+    let slot = receiver.cap_slot(tcb::TCB_CALLER)?;
+    Some((slot.cap(), slot))
 }

@@ -17,6 +17,7 @@ sel4test slice run on both.
 kernel/src/
 |-- abi/           # BootInfo, syscall numbers, fault labels, constants
 |-- api/           # syscall dispatch, invocations, CSpace lookup, IPC
+|-- ktypes/        # safe primitives: object handles, queues, addresses, MMIO
 |-- object/        # caps, CTE/MDB, TCB, endpoint, notification, reply, ASID, IRQ
 |-- kernel/        # shared boot and SMP / BKL
 |-- machine/       # shared console only
@@ -40,6 +41,42 @@ Shared MI code is allowed to call `UserContext::{cap_reg,msg_info,mr,set_mr}`,
 `switch_vspace`, `machine::tlb::{flush_all,flush_asid,flush_vaddr}`, and
 `kernel::smp::{current_core_id,send_ipi,...}`. RISC-V words such as `satp` and
 `sfence` stay under `arch/riscv64/`.
+
+## Object access
+
+seL4 objects live in memory user-space retyped from an Untyped, they point at
+each other, and their lifetime is governed by capabilities rather than by Rust
+ownership. `ktypes` is the small layer that makes that expressible without
+spreading raw pointers through the kernel:
+
+| Type | Role |
+|------|------|
+| `ObjRef<T>` (`TcbRef`, `EndpointRef`, `NotificationRef`, `CteRef`) | non-null address of a live object; `with`/`with_mut` hand out `&T`/`&mut T` for the duration of a closure and assert the big kernel lock |
+| `ObjArray<T>` | a contiguous run of objects: a CNode's slots, a TCB's embedded CTEs, an IPC buffer's words |
+| `ObjCell<T>` | a kernel-owned object in a `static`: the per-core idle TCBs, the rootserver TCB, the IRQ node |
+| `Links<T>` / `Queue<T>` / `QueueEnds` | the intrusive queue links; only `ktypes::list` reads or writes them, so "a TCB is on at most one queue" has one place to be maintained |
+| `Paddr` / `Kva` / `UserVa` | physical, kernel-window, and user addresses kept apart |
+| `MmioRegion` / `MmioReg<T>` | device registers: unsafe to name, safe to access |
+| `PerCpu<T>` / `BootOnce<T>` | per-core and initialise-once globals, replacing `static mut` |
+
+`Option<ObjRef<T>>` is one word, so object layouts that store links and
+back-pointers as KVAs keep their size and field offsets.
+
+Consequences worth knowing when reading the code:
+
+- Cap decoding is typed: `cap.as_endpoint()`, `as_thread()`, `as_cnode()`
+  return handles, and those decoders are the one place a cap's address field
+  becomes something the kernel will dereference.
+- There is no cached "current thread" struct. Cap lookups and IPC-buffer
+  access go through the current TCB's own CTE slots
+  (`cspace::lookup_cap_current`).
+- IPC buffer access is bounds-checked against `IPC_BUFFER_WORDS`.
+- Modules that need no `unsafe` say so with `#![deny(unsafe_code)]`, including
+  `api/ipc.rs`, `api/syscall.rs`, `api/cspace.rs`, and `object/reply.rs`.
+- The `unsafe` that remains is at the hardware and ABI boundary: assembly,
+  CSR/MSR writes, page-table entry writes, device registers, and the handful of
+  places that turn a cap's address into a handle. Each carries a `SAFETY`
+  comment or a `# Safety` contract.
 
 ## Objects
 

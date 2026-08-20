@@ -17,6 +17,7 @@ pub const EFER_NXE: u64 = 1 << 11;
 
 pub fn read_cr2() -> usize {
     let cr2: usize;
+    // SAFETY: reading CR2 has no side effect.
     unsafe {
         asm!("mov {}, cr2", out(reg) cr2, options(nostack, preserves_flags));
     }
@@ -25,6 +26,7 @@ pub fn read_cr2() -> usize {
 
 pub fn read_cr3() -> usize {
     let cr3: usize;
+    // SAFETY: reading CR3 has no side effect.
     unsafe {
         asm!("mov {}, cr3", out(reg) cr3, options(nostack, preserves_flags));
     }
@@ -32,12 +34,15 @@ pub fn read_cr3() -> usize {
 }
 
 pub fn write_cr3(value: usize) {
+    // SAFETY: callers reach this through `switch_cr3`, which vouches for the
+    // table; reloading CR3 also flushes non-global TLB entries.
     unsafe {
         asm!("mov cr3, {}", in(reg) value, options(nostack, preserves_flags));
     }
 }
 
 pub fn invlpg(vaddr: usize) {
+    // SAFETY: invalidating a TLB entry only discards a cached translation.
     unsafe {
         asm!("invlpg [{}]", in(reg) vaddr, options(nostack, preserves_flags));
     }
@@ -50,6 +55,7 @@ pub fn flush_tlb() {
 pub fn rdmsr(msr: u32) -> u64 {
     let low: u32;
     let high: u32;
+    // SAFETY: reading an MSR the kernel is privileged for has no side effect.
     unsafe {
         asm!(
             "rdmsr",
@@ -62,9 +68,15 @@ pub fn rdmsr(msr: u32) -> u64 {
     ((high as u64) << 32) | (low as u64)
 }
 
-pub fn wrmsr(msr: u32, value: u64) {
+/// Write a model-specific register.
+///
+/// # Safety
+/// `msr` and `value` must be a combination the CPU accepts, and the caller
+/// must accept whatever machine-wide effect it has.
+pub unsafe fn wrmsr(msr: u32, value: u64) {
     let low = value as u32;
     let high = (value >> 32) as u32;
+    // SAFETY: forwarded to the caller.
     unsafe {
         asm!(
             "wrmsr",
@@ -78,13 +90,20 @@ pub fn wrmsr(msr: u32, value: u64) {
 
 pub fn rdgsbase() -> usize {
     let value: usize;
+    // SAFETY: reading the GS base has no side effect.
     unsafe {
         asm!("rdgsbase {}", out(reg) value, options(nostack, preserves_flags));
     }
     value
 }
 
-pub fn wrgsbase(value: usize) {
+/// Set the `GS` base, which is where the kernel keeps its per-core pointer.
+///
+/// # Safety
+/// `value` must be the address of this core's trap scratch area, since trap
+/// entry assembly dereferences it.
+pub unsafe fn wrgsbase(value: usize) {
+    // SAFETY: forwarded to the caller.
     unsafe {
         asm!("wrgsbase {}", in(reg) value, options(nostack, preserves_flags));
     }
@@ -94,34 +113,65 @@ pub fn current_scratch() -> usize {
     rdgsbase()
 }
 
-pub fn set_current_scratch(value: usize) {
-    wrgsbase(value);
-    wrmsr(IA32_KERNEL_GS_BASE, 0);
+/// Publish this core's trap scratch address.
+///
+/// # Safety
+/// `value` must be the address of this core's trap scratch area.
+pub unsafe fn set_current_scratch(value: usize) {
+    // SAFETY: forwarded to the caller. `IA32_KERNEL_GS_BASE` is cleared so
+    // `swapgs` on trap entry finds a zero shadow rather than stale state.
+    unsafe {
+        wrgsbase(value);
+        wrmsr(IA32_KERNEL_GS_BASE, 0);
+    }
 }
 
 pub fn full_memory_barrier() {
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
-pub fn lgdt(gdtr: *const u8) {
+/// Install a global descriptor table.
+///
+/// # Safety
+/// `gdtr` must point at a valid `lgdt` operand describing a well-formed GDT
+/// whose entries match the selectors the kernel goes on to load.
+pub unsafe fn lgdt(gdtr: *const u8) {
+    // SAFETY: forwarded to the caller.
     unsafe {
         asm!("lgdt [{}]", in(reg) gdtr, options(nostack, preserves_flags));
     }
 }
 
-pub fn lidt(idtr: *const u8) {
+/// Install an interrupt descriptor table.
+///
+/// # Safety
+/// `idtr` must point at a valid `lidt` operand describing a fully populated
+/// IDT whose gates name real entry points.
+pub unsafe fn lidt(idtr: *const u8) {
+    // SAFETY: forwarded to the caller.
     unsafe {
         asm!("lidt [{}]", in(reg) idtr, options(nostack, preserves_flags));
     }
 }
 
-pub fn ltr(selector: u16) {
+/// Load the task register.
+///
+/// # Safety
+/// `selector` must name a valid TSS descriptor in the current GDT.
+pub unsafe fn ltr(selector: u16) {
+    // SAFETY: forwarded to the caller.
     unsafe {
         asm!("ltr {0:x}", in(reg) selector, options(nostack, preserves_flags));
     }
 }
 
-pub fn load_ds_es_ss(selector: u16) {
+/// Reload the data segment selectors.
+///
+/// # Safety
+/// `selector` must name a valid data segment in the current GDT; loading a
+/// bad `ss` faults on the next stack access.
+pub unsafe fn load_ds_es_ss(selector: u16) {
+    // SAFETY: forwarded to the caller.
     unsafe {
         asm!(
             "mov {0:x}, %ds",
@@ -136,6 +186,7 @@ pub fn load_ds_es_ss(selector: u16) {
 pub fn rdtsc() -> u64 {
     let low: u32;
     let high: u32;
+    // SAFETY: reading the timestamp counter has no side effect.
     unsafe {
         asm!(
             "rdtsc",

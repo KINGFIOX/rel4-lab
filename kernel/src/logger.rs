@@ -1,3 +1,7 @@
+// This module is written entirely in terms of the safe abstractions in
+// `ktypes`; keep it that way.
+#![deny(unsafe_code)]
+
 use core::fmt::Write;
 
 use log_crate::{LevelFilter, Log, Metadata, Record};

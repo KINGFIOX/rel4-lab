@@ -18,6 +18,8 @@ use crate::arch::riscv64::machine::{csr, irq};
 use crate::arch::riscv64::object::vspace;
 use crate::arch::riscv64::smp::ipi as sbi;
 use crate::object::cap::{Cap, CapTag};
+use crate::object::endpoint::{EndpointRef, EpState};
+use crate::object::tcb::TcbRef;
 
 /// RISC-V D-extension FPU state shape used by the current `riscv64gc` build.
 pub const RISCV_NUM_FP_REGS: usize = 32;
@@ -227,6 +229,7 @@ pub unsafe fn restore_user_context_with_kernel_lock(
 ) -> ! {
     program_next_timer();
     kernel_lock.defer_unlock_for_user_restore();
+    // SAFETY: forwarded to the caller.
     unsafe { restore_user_context_locked(ctx) }
 }
 
@@ -388,6 +391,8 @@ pub extern "C" fn handle_trap_rust(uc: *mut UserContext) -> *mut UserContext {
     if uc.is_null() {
         panic!("trap entry passed a null user context");
     }
+    // SAFETY: trap entry assembly passes the address of the current thread's
+    // saved context, which is live for the whole handler.
     let uc = unsafe { &mut *uc };
     let cause = csr::scause();
     let stval = csr::stval();
@@ -487,26 +492,14 @@ fn fault_message(
     }
 }
 
-unsafe fn write_fault_ipc_message(
-    receiver: *mut crate::object::tcb::Tcb,
-    badge: u64,
-    label: u64,
-    len: u64,
-    mrs: &[u64],
-) {
-    if receiver.is_null() {
-        return;
-    }
+fn write_fault_ipc_message(receiver: TcbRef, badge: u64, label: u64, len: u64, mrs: &[u64]) {
     let info_word = MessageInfo::new(label, 0, 0, len).0;
-    unsafe {
-        crate::object::tcb::write_fault_ipc_message_regs(receiver, badge, info_word, mrs, len);
-    }
+    receiver.write_fault_ipc_message_regs(badge, info_word, mrs, len);
 
     let copied_len = len.min(mrs.len() as u64);
     if copied_len > FAULT_MR_REG_COUNT {
-        unsafe {
-            crate::object::tcb::write_ipc_buffer_words(
-                receiver,
+        if let Some(buffer) = receiver.ipc_buffer() {
+            buffer.set_words(
                 1 + FAULT_MR_REG_COUNT as usize,
                 &mrs[FAULT_MR_REG_COUNT as usize..copied_len as usize],
             );
@@ -514,42 +507,33 @@ unsafe fn write_fault_ipc_message(
     }
 }
 
-unsafe fn finish_fault_ipc_receive(
-    receiver: *mut crate::object::tcb::Tcb,
-    fault_tcb: *mut crate::object::tcb::Tcb,
+fn finish_fault_ipc_receive(
+    receiver: TcbRef,
+    fault_tcb: TcbRef,
     handler_cap: crate::object::cap::Cap,
     _reply_rights: bool,
 ) {
-    use crate::object::tcb;
-
-    if receiver.is_null() || fault_tcb.is_null() {
-        return;
-    }
-    unsafe {
-        let receiver_can_grant = tcb::start_receiver_rendezvous(receiver);
-        if handler_cap.endpoint_can_grant() || handler_cap.endpoint_can_grant_reply() {
-            tcb::dequeue(fault_tcb);
-            if !crate::object::reply::setup_caller_cap(fault_tcb, receiver, receiver_can_grant) {
-                tcb::set_inactive(fault_tcb);
-                tcb::clear_waiting_on(fault_tcb);
-            }
-        } else {
-            tcb::set_inactive(fault_tcb);
-            tcb::clear_waiting_on(fault_tcb);
+    let receiver_can_grant = receiver.start_receiver_rendezvous();
+    if handler_cap.endpoint_can_grant() || handler_cap.endpoint_can_grant_reply() {
+        fault_tcb.dequeue();
+        if !crate::object::reply::setup_caller_cap(fault_tcb, receiver, receiver_can_grant) {
+            fault_tcb.set_inactive();
+            fault_tcb.clear_waiting_on();
         }
-        tcb::finish_receiver_rendezvous(receiver);
-        tcb::enqueue(receiver);
+    } else {
+        fault_tcb.set_inactive();
+        fault_tcb.clear_waiting_on();
     }
+    receiver.finish_receiver_rendezvous();
+    receiver.enqueue();
 }
 
 fn send_fault_ipc(uc: &mut UserContext, code: usize, stval: u64) -> bool {
-    use crate::object::endpoint;
     use crate::object::tcb;
 
-    let cur = tcb::current();
-    if cur.is_null() {
+    let Some(cur) = tcb::current() else {
         return false;
-    }
+    };
 
     let handler_cap = fault_handler_cap(cur);
     if handler_cap.tag() != Some(CapTag::Endpoint)
@@ -559,38 +543,42 @@ fn send_fault_ipc(uc: &mut UserContext, code: usize, stval: u64) -> bool {
         return false;
     }
 
-    let ep = handler_cap.endpoint_ptr() as *mut endpoint::Endpoint;
-    if ep.is_null() {
+    let Some(ep) = handler_cap.as_endpoint() else {
         return false;
-    }
+    };
 
     let (label, len, mrs) = fault_message(code, stval, uc);
-    unsafe {
-        tcb::record_fault_message(cur, label, len, mrs);
-        let receiver = {
-            let _guard = endpoint::lock_queue(ep);
-            let receiver = endpoint::pop_receiver_locked(ep);
-            if receiver.is_null() {
-                block_fault_sender_locked(
-                    cur,
-                    ep,
-                    handler_cap.endpoint_badge(),
-                    handler_cap.endpoint_can_grant(),
-                    handler_cap.endpoint_can_grant_reply(),
-                    label,
-                    len,
-                    mrs,
-                );
-            }
-            receiver
-        };
-        if receiver.is_null() {
-            return true;
-        }
-        write_fault_ipc_message(receiver, handler_cap.endpoint_badge(), label, len, &mrs);
-        finish_fault_ipc_receive(receiver, cur, handler_cap, true);
-    }
+    deliver_fault_ipc(cur, ep, handler_cap, label, len, mrs);
     true
+}
+
+/// Hand a recorded fault to the handler endpoint: rendezvous with a waiting
+/// receiver, or queue the faulting thread as a fault sender.
+fn deliver_fault_ipc(
+    cur: TcbRef,
+    ep: EndpointRef,
+    handler_cap: Cap,
+    label: u64,
+    len: u64,
+    mrs: crate::object::tcb::FaultMrs,
+) {
+    cur.record_fault_message(label, len, mrs);
+    let Some(receiver) = ep.pop_receiver() else {
+        cur.dequeue();
+        cur.set_blocked_fault_sender(
+            ep,
+            handler_cap.endpoint_badge(),
+            handler_cap.endpoint_can_grant(),
+            handler_cap.endpoint_can_grant_reply(),
+            label,
+            len,
+            mrs,
+        );
+        ep.enqueue_waiter(cur, EpState::Sending);
+        return;
+    };
+    write_fault_ipc_message(receiver, handler_cap.endpoint_badge(), label, len, &mrs);
+    finish_fault_ipc_receive(receiver, cur, handler_cap, true);
 }
 
 pub fn send_cap_fault_ipc(uc: &mut UserContext, addr: u64, in_recv_phase: bool) -> bool {
@@ -620,13 +608,11 @@ fn send_unknown_syscall_fault(uc: &mut UserContext, sysno: isize) -> bool {
 }
 
 fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: crate::object::tcb::FaultMrs) -> bool {
-    use crate::object::endpoint;
     use crate::object::tcb;
 
-    let cur = tcb::current();
-    if cur.is_null() {
+    let Some(cur) = tcb::current() else {
         return false;
-    }
+    };
     let handler_cap = fault_handler_cap(cur);
     if handler_cap.tag() != Some(CapTag::Endpoint)
         || !handler_cap.endpoint_can_send()
@@ -634,92 +620,35 @@ fn send_synthetic_fault_ipc(label: u64, len: u64, mrs: crate::object::tcb::Fault
     {
         return false;
     }
-    let ep = handler_cap.endpoint_ptr() as *mut endpoint::Endpoint;
-    if ep.is_null() {
+    let Some(ep) = handler_cap.as_endpoint() else {
         return false;
-    }
+    };
 
-    unsafe {
-        tcb::record_fault_message(cur, label, len, mrs);
-        let receiver = {
-            let _guard = endpoint::lock_queue(ep);
-            let receiver = endpoint::pop_receiver_locked(ep);
-            if receiver.is_null() {
-                block_fault_sender_locked(
-                    cur,
-                    ep,
-                    handler_cap.endpoint_badge(),
-                    handler_cap.endpoint_can_grant(),
-                    handler_cap.endpoint_can_grant_reply(),
-                    label,
-                    len,
-                    mrs,
-                );
-            }
-            receiver
-        };
-        if receiver.is_null() {
-            return true;
-        }
-        write_fault_ipc_message(receiver, handler_cap.endpoint_badge(), label, len, &mrs);
-        finish_fault_ipc_receive(receiver, cur, handler_cap, true);
-    }
+    deliver_fault_ipc(cur, ep, handler_cap, label, len, mrs);
     true
 }
 
-fn fault_handler_cap(tcb: *const crate::object::tcb::Tcb) -> Cap {
-    let cptr = crate::object::tcb::fault_endpoint_cptr_snapshot(tcb);
-    if cptr != 0 {
-        let root = crate::object::tcb::cspace_cap_snapshot(tcb);
-        if let Ok((cap, _)) = cspace::lookup_cap_in(root, cptr, cspace::WORD_BITS) {
-            return cap;
-        }
+/// The endpoint cap a thread nominated as its fault handler, resolved in its
+/// own CSpace as non-MCS seL4 does.
+fn fault_handler_cap(tcb: TcbRef) -> Cap {
+    let cptr = tcb.fault_endpoint_cptr();
+    if cptr == 0 {
+        return Cap::null();
     }
-    Cap::null()
+    match cspace::lookup_cap_in(tcb.cspace_cap(), cptr, cspace::WORD_BITS) {
+        Ok((cap, _)) => cap,
+        Err(_) => Cap::null(),
+    }
 }
-pub(crate) fn send_timeout_fault_ipc_for(fault_tcb: *mut crate::object::tcb::Tcb) -> bool {
+pub(crate) fn send_timeout_fault_ipc_for(fault_tcb: TcbRef) -> bool {
     let _ = fault_tcb;
     false
 }
 
-unsafe fn block_fault_sender_locked(
-    cur: *mut crate::object::tcb::Tcb,
-    ep: *mut crate::object::endpoint::Endpoint,
-    badge: u64,
-    can_grant: bool,
-    can_grant_reply: bool,
-    label: u64,
-    len: u64,
-    mrs: crate::object::tcb::FaultMrs,
-) {
-    use crate::object::endpoint::{self, EpState};
-    use crate::object::tcb;
-
-    if cur.is_null() || ep.is_null() {
-        return;
-    }
-    unsafe {
-        tcb::dequeue(cur);
-        tcb::set_blocked_fault_sender(
-            cur,
-            ep as u64,
-            badge,
-            can_grant,
-            can_grant_reply,
-            label,
-            len,
-            mrs,
-        );
-        endpoint::enqueue_waiter_locked(ep, cur, EpState::Sending);
-    }
-}
-
 fn handle_timer_interrupt() {
     let now = csr::time() as u64;
-    unsafe {
-        if should_signal_synthetic_timer_irq(now) {
-            crate::object::irq::signal_irq(irq::KERNEL_TIMER_IRQ as u64);
-        }
+    if should_signal_synthetic_timer_irq(now) {
+        crate::object::irq::signal_irq(irq::KERNEL_TIMER_IRQ as u64);
     }
     program_next_timer();
 }
@@ -734,24 +663,26 @@ pub fn idle_scheduler_loop() -> ! {
             let kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
             handle_software_interrupt();
             let _ = service_due_timer_interrupts();
-            let next = crate::object::tcb::schedule();
-            if next.is_null() {
-                if !crate::object::tcb::is_idle_thread(crate::object::tcb::current()) {
-                    crate::object::tcb::switch_to_idle_thread();
+            match crate::object::tcb::schedule() {
+                None => {
+                    switch_to_idle_thread_if_needed();
+                    switch_to_kernel_vspace();
+                    program_next_timer();
+                    None
                 }
-                switch_to_kernel_vspace();
-                program_next_timer();
-                None
-            } else {
-                crate::object::tcb::set_current(next);
-                let ctx = unsafe { crate::object::tcb::prepare_for_user_restore(next) };
-                unsafe { switch_to_tcb_vspace(next) };
-                program_next_timer();
-                Some((ctx, kernel_lock))
+                Some(next) => {
+                    crate::object::tcb::set_current(Some(next));
+                    let ctx = next.prepare_for_user_restore();
+                    switch_to_tcb_vspace(next);
+                    program_next_timer();
+                    Some((ctx, kernel_lock))
+                }
             }
         };
         if let Some((ctx, kernel_lock)) = next_context {
             kernel_lock.defer_unlock_for_user_restore();
+            // SAFETY: the context belongs to the thread just picked, and the kernel lock
+            // is handed to the restore path.
             unsafe { restore_user_context_locked(ctx) };
         }
         unsafe {
@@ -765,6 +696,7 @@ fn switch_to_kernel_vspace() {
         return;
     };
     if csr::satp() as u64 != kernel_satp {
+        // SAFETY: the published kernel root maps the kernel image and PSpace window.
         unsafe { vspace::switch_satp(kernel_satp) };
     }
 }
@@ -773,7 +705,7 @@ fn service_pending_external_interrupt() -> bool {
     let Some(irq) = irq::claim_external_irq() else {
         return false;
     };
-    let delivered = unsafe { crate::object::irq::signal_irq(irq) };
+    let delivered = crate::object::irq::signal_irq(irq);
     if !delivered {
         irq::complete_external_irq(irq);
     }
@@ -789,9 +721,9 @@ fn service_pending_external_interrupt() -> bool {
 ///
 /// No-ops when the cap is missing/invalid or when the new satp matches
 /// the current one — both common for the rootserver path.
-unsafe fn switch_to_tcb_vspace(tcb: *const crate::object::tcb::Tcb) {
+fn switch_to_tcb_vspace(tcb: TcbRef) {
     use crate::object::cap::CapTag;
-    let vroot = crate::object::tcb::vspace_cap_snapshot(tcb);
+    let vroot = tcb.vspace_cap();
     if vroot.tag() != Some(CapTag::PageTable) {
         return;
     }
@@ -813,6 +745,9 @@ unsafe fn switch_to_tcb_vspace(tcb: *const crate::object::tcb::Tcb) {
     }
     let cur_satp = csr::satp() as u64;
     if cur_satp != new_satp {
+        // SAFETY: the checks above proved this root page table is the one the ASID
+        // table resolves for the thread's VSpace, and every VSpace shares the
+        // kernel window.
         unsafe { vspace::switch_satp(new_satp) };
     }
 }
@@ -839,57 +774,58 @@ fn kernel_exit(
     let cur = tcb::current();
 
     loop {
-        unsafe {
-            tcb::enqueue_if_migrated_from_current_core(cur);
-            if tcb::take_continue_current_once(cur) && tcb::is_runnable_on_current_core(cur) {
-                tcb::prepare_for_user_restore(cur);
+        if let Some(cur) = cur {
+            cur.enqueue_if_migrated_from_current_core();
+            if tcb::take_continue_current_once(Some(cur)) && cur.is_runnable_on_current_core() {
+                cur.prepare_for_user_restore();
                 return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
             }
-            if tcb::is_runnable_on_current_core(cur) {
-                tcb::enqueue(cur);
+            if cur.is_runnable_on_current_core() {
+                cur.enqueue();
             }
         }
 
-        let next = tcb::schedule();
-        if !next.is_null() {
-            if next != cur {
-                tcb::set_current(next);
-                let ctx = unsafe { tcb::prepare_for_user_restore(next) };
+        if let Some(next) = tcb::schedule() {
+            if Some(next) != cur {
+                tcb::set_current(Some(next));
+                let ctx = next.prepare_for_user_restore();
                 // Swap satp if `next` lives in a different VSpace.
                 // Test processes (sel4test BASIC tests) each spawn into
                 // their own root PT; without this swap they'd execute
                 // in the driver's VSpace and re-run the driver's
                 // libc constructors (re-running `init_syscall_table`
                 // hits its `boot_set_tid_address` assertion).
-                unsafe { switch_to_tcb_vspace(next) };
+                switch_to_tcb_vspace(next);
                 return finish_kernel_exit(ctx, kernel_lock);
             }
-            if unsafe { tcb::is_runnable_on_current_core(cur) } {
-                unsafe { tcb::prepare_for_user_restore(cur) };
+            if next.is_runnable_on_current_core() {
+                next.prepare_for_user_restore();
                 return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
             }
             continue;
         }
 
-        // schedule() returned null. Safe to fall through *only* if
-        // current is still runnable — otherwise we'd resume a blocked
-        // TCB's user mode and break IPC semantics.
-        let cur_runnable = if !cur.is_null() {
-            unsafe { tcb::is_runnable_on_current_core(cur) }
-        } else {
-            false
-        };
-        if cur_runnable {
-            unsafe { tcb::prepare_for_user_restore(cur) };
+        // schedule() found nothing. Safe to fall through *only* if current is
+        // still runnable — otherwise we'd resume a blocked TCB's user mode and
+        // break IPC semantics.
+        if cur.is_some_and(TcbRef::is_runnable_on_current_core) {
+            let cur = cur.expect("just checked");
+            cur.prepare_for_user_restore();
             return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
         }
 
-        if !tcb::is_idle_thread(cur) {
-            tcb::switch_to_idle_thread();
-        }
+        switch_to_idle_thread_if_needed();
         switch_to_kernel_vspace();
         drop(kernel_lock);
         idle_scheduler_loop();
+    }
+}
+
+/// Park this core on its idle thread unless it is already there.
+fn switch_to_idle_thread_if_needed() {
+    use crate::object::tcb;
+    if !tcb::current().is_some_and(tcb::is_idle_thread) {
+        tcb::switch_to_idle_thread();
     }
 }
 
@@ -899,17 +835,14 @@ fn kernel_exit_after_remote_stall(
     use crate::object::tcb;
 
     loop {
-        let next = tcb::schedule();
-        if !next.is_null() {
-            tcb::set_current(next);
-            let ctx = unsafe { tcb::prepare_for_user_restore(next) };
-            unsafe { switch_to_tcb_vspace(next) };
+        if let Some(next) = tcb::schedule() {
+            tcb::set_current(Some(next));
+            let ctx = next.prepare_for_user_restore();
+            switch_to_tcb_vspace(next);
             return finish_kernel_exit(ctx, kernel_lock);
         }
 
-        if !tcb::is_idle_thread(tcb::current()) {
-            tcb::switch_to_idle_thread();
-        }
+        switch_to_idle_thread_if_needed();
         switch_to_kernel_vspace();
         drop(kernel_lock);
         idle_scheduler_loop();
@@ -932,6 +865,7 @@ fn finish_kernel_exit(
 /// route to a fault endpoint.
 fn park_current_thread() -> ! {
     loop {
+        // SAFETY: halting this core.
         unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
     }
 }
@@ -941,45 +875,29 @@ fn debug_halt(message: &str) -> ! {
     crate::arch::riscv64::kernel::boot::halt()
 }
 
-fn current_ipc_buffer_kva_for_debug() -> u64 {
-    let cur = crate::object::tcb::current();
-    if !cur.is_null() {
-        return crate::object::tcb::ipc_buffer_kva_snapshot(cur);
-    }
-    unsafe { crate::api::thread::with_current(|thread| thread.ipc_buffer_kva as u64) }
-}
-
 fn handle_debug_name_thread(uc: &UserContext) {
     let cptr = uc.regs[UserRegister::A0.index()];
-    let cap = match unsafe {
-        crate::api::thread::with_current(|thread| crate::api::cspace::lookup_cap(thread, cptr))
-    } {
-        Ok((cap, _)) => cap,
-        Err(_) => debug_halt("SysDebugNameThread: cap is not a TCB, halting"),
+    let Ok((cap, _)) = crate::api::cspace::lookup_cap_current(cptr) else {
+        debug_halt("SysDebugNameThread: cap is not a TCB, halting");
     };
-    if cap.tag() != Some(CapTag::Thread) {
+    let Some(target) = crate::object::tcb::from_cap(cap) else {
         debug_halt("SysDebugNameThread: cap is not a TCB, halting");
-    }
-    let target = crate::object::tcb::from_cap(cap);
-    if target.is_null() {
-        debug_halt("SysDebugNameThread: cap is not a TCB, halting");
-    }
+    };
 
-    let ipc_buffer = current_ipc_buffer_kva_for_debug();
-    if ipc_buffer == 0 {
+    let Some(buffer) = crate::object::tcb::current().and_then(TcbRef::ipc_buffer) else {
         debug_halt("SysDebugNameThread: Failed to lookup IPC buffer, halting");
+    };
+
+    // The name follows the message-info word, as a NUL-terminated string
+    // packed into the message registers.
+    let mut name = [0u8; N_TOTAL_MSG_REGISTERS * WORD_BYTES];
+    for (i, word) in name.chunks_mut(WORD_BYTES).enumerate() {
+        word.copy_from_slice(&buffer.word(1 + i).to_le_bytes());
     }
-    let name = unsafe { (ipc_buffer as *const u8).add(WORD_BYTES) };
-    let max_len = N_TOTAL_MSG_REGISTERS * WORD_BYTES;
-    let mut len = 0;
-    while len < max_len {
-        if unsafe { *name.add(len) } == 0 {
-            unsafe { crate::object::tcb::set_debug_name(target, name, len) };
-            return;
-        }
-        len += 1;
+    match name.iter().position(|&byte| byte == 0) {
+        Some(len) => target.set_debug_name(&name[..len]),
+        None => debug_halt("SysDebugNameThread: Name too long, halting"),
     }
-    debug_halt("SysDebugNameThread: Name too long, halting");
 }
 
 /// Called when scause = environment call from U-mode.
@@ -1005,11 +923,7 @@ fn handle_syscall(uc: &mut UserContext) {
             // null cap / unresolvable CPtr. libsel4debug uses this to
             // distinguish "freed slot" from "live cap".
             let cptr = uc.regs[UserRegister::A0.index()];
-            let tag = match unsafe {
-                crate::api::thread::with_current(|thread| {
-                    crate::api::cspace::lookup_cap(thread, cptr)
-                })
-            } {
+            let tag = match crate::api::cspace::lookup_cap_current(cptr) {
                 Ok((cap, _)) => cap.tag_raw(),
                 Err(_) => 0,
             };
@@ -1029,12 +943,11 @@ fn handle_syscall(uc: &mut UserContext) {
             // have seL4's scheduler/capDL dump machinery, so these remain
             // success no-ops rather than widening any mutation semantics.
         }
-        Some(SyscallNumber::Yield) => unsafe {
-            let cur = crate::object::tcb::current();
-            if !cur.is_null() {
-                crate::object::tcb::rotate_to_tail(cur);
+        Some(SyscallNumber::Yield) => {
+            if let Some(cur) = crate::object::tcb::current() {
+                cur.rotate_to_tail();
             }
-        },
+        }
         Some(SyscallNumber::Call) => {
             crate::api::syscall::do_call(uc);
         }

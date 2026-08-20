@@ -138,11 +138,15 @@ pub unsafe extern "C" fn _start() -> ! {
 #[unsafe(link_section = ".boot.text")]
 pub extern "C" fn x86_64_high_entry(multiboot_magic: usize, multiboot_info: usize) -> ! {
     serial_byte(b'C');
+    // SAFETY: the boot path runs single-threaded on the boot core, before any
+    // Rust object exists in the memory it touches.
     unsafe {
         core::arch::asm!("mov rsp, {}", in(reg) &__stack_top as *const u8 as usize, options(nostack));
     }
     clear_bss();
     crate::arch::x86_64::smp::trampoline::save_boot_cr3();
+    // SAFETY: as above: reading the bootloader-provided structures and the
+    // loaded image's headers as bytes.
     let (multiboot_magic, multiboot_info) = unsafe {
         let _ = (multiboot_magic, multiboot_info);
         (
@@ -164,6 +168,7 @@ pub extern "C" fn x86_64_high_entry(multiboot_magic: usize, multiboot_info: usiz
 }
 
 fn serial_byte(byte: u8) {
+    // SAFETY: writing COM1's data port, used for early boot output.
     unsafe {
         core::arch::asm!(
             "out dx, al",
@@ -175,10 +180,13 @@ fn serial_byte(byte: u8) {
 }
 
 fn clear_bss() {
+    // SAFETY: the linker-provided `.bss` range holds no initialised object yet.
     let mut p = unsafe { &__bss_start as *const u8 as *mut u64 };
     let end = unsafe { &__bss_end as *const u8 as usize };
     while (p as usize) < end {
         unsafe { p.write_volatile(0) };
+        // SAFETY: as above: reading the bootloader-provided structures and the
+        // loaded image's headers as bytes.
         p = unsafe { p.add(1) };
     }
 }
@@ -214,9 +222,13 @@ fn parse_multiboot_boot_args(
             "x86_64 bootloader did not provide Multiboot1 handoff (magic={multiboot_magic:#x} info={multiboot_info:#x})"
         );
     }
+    // SAFETY: the bootloader placed this structure at the address it passed in
+    // register state, and it stays mapped for the boot path.
     let mbi = unsafe { &*(multiboot_info as *const MultibootInfoPart1) };
     let flags = unsafe { core::ptr::addr_of!(mbi.flags).read_unaligned() };
     let mod_count = unsafe { core::ptr::addr_of!(mbi.mod_count).read_unaligned() };
+    // SAFETY: as above: reading the bootloader-provided structures and the
+    // loaded image's headers as bytes.
     let mod_list = unsafe { core::ptr::addr_of!(mbi.mod_list).read_unaligned() };
     if flags & MULTIBOOT_INFO_MODS_FLAG == 0 || mod_count == 0 {
         panic!("x86_64 bootloader did not provide a rootserver module");
@@ -244,6 +256,8 @@ fn parse_multiboot_boot_args(
 
 fn elf64_entry(image_paddr: usize) -> usize {
     let hdr = elf64_header(image_paddr);
+    // SAFETY: the rootserver image was loaded by the bootloader at this address
+    // and is read here as bytes.
     unsafe { core::ptr::read_unaligned(hdr.add(24) as *const u64) as usize }
 }
 
@@ -253,6 +267,8 @@ fn elf64_entry(image_paddr: usize) -> usize {
 /// below the 16 MiB FREE_RAM floor used for untypeds.
 fn realize_elf_bss(image_paddr: usize, module_end: usize, pv_offset: usize) -> usize {
     let hdr = elf64_header(image_paddr);
+    // SAFETY: the image's `.bss` range lies inside the module the bootloader
+    // loaded, and no object lives there yet.
     let phoff = unsafe { core::ptr::read_unaligned(hdr.add(32) as *const u64) as usize };
     let phentsize = unsafe { core::ptr::read_unaligned(hdr.add(54) as *const u16) as usize };
     let phnum = unsafe { core::ptr::read_unaligned(hdr.add(56) as *const u16) as usize };
@@ -260,6 +276,8 @@ fn realize_elf_bss(image_paddr: usize, module_end: usize, pv_offset: usize) -> u
     let mut image_end = module_end;
     let mut i = 0usize;
     while i < phnum {
+        // SAFETY: as above: reading the bootloader-provided structures and the
+        // loaded image's headers as bytes.
         let phdr = unsafe { hdr.add(phoff + i * phentsize) };
         let p_type = unsafe { core::ptr::read_unaligned(phdr as *const u32) };
         if p_type == 1 {
@@ -276,6 +294,8 @@ fn realize_elf_bss(image_paddr: usize, module_end: usize, pv_offset: usize) -> u
             // wipe a later PT_LOAD that shares the page (hello's .got after
             // .rodata).
             if p_memsz > p_filesz {
+                // SAFETY: as above: reading the bootloader-provided structures and the
+                // loaded image's headers as bytes.
                 unsafe {
                     core::ptr::write_bytes(file_end as *mut u8, 0, bss_end - file_end);
                 }
@@ -291,11 +311,14 @@ fn realize_elf_bss(image_paddr: usize, module_end: usize, pv_offset: usize) -> u
 
 fn elf64_pv_offset(image_paddr: usize) -> usize {
     let hdr = elf64_header(image_paddr);
+    // SAFETY: as `elf64_entry`: reading the loaded image's headers as bytes.
     let phoff = unsafe { core::ptr::read_unaligned(hdr.add(32) as *const u64) as usize };
     let phentsize = unsafe { core::ptr::read_unaligned(hdr.add(54) as *const u16) as usize };
     let phnum = unsafe { core::ptr::read_unaligned(hdr.add(56) as *const u16) as usize };
     let mut i = 0usize;
     while i < phnum {
+        // SAFETY: as above: reading the bootloader-provided structures and the
+        // loaded image's headers as bytes.
         let phdr = unsafe { hdr.add(phoff + i * phentsize) };
         let p_type = unsafe { core::ptr::read_unaligned(phdr as *const u32) };
         if p_type == 1 {
@@ -310,10 +333,13 @@ fn elf64_pv_offset(image_paddr: usize) -> usize {
 
 fn elf64_header(image_paddr: usize) -> *const u8 {
     let base = image_paddr as *const u8;
+    // SAFETY: as `elf64_entry`: reading the loaded image's headers as bytes.
     let magic = unsafe { core::slice::from_raw_parts(base, 4) };
     if magic != b"\x7fELF" {
         panic!("x86_64 rootserver module is not an ELF image");
     }
+    // SAFETY: as above: reading the bootloader-provided structures and the
+    // loaded image's headers as bytes.
     let class = unsafe { base.add(4).read() };
     if class != 2 {
         panic!("x86_64 rootserver module is not ELF64");
@@ -332,6 +358,7 @@ pub extern "C" fn init_kernel(
     cpu_id: usize,
     core_id: usize,
 ) -> ! {
+    // SAFETY: the boot path runs single-threaded on the boot core.
     let _ = unsafe {
         (
             &__bss_start as *const u8,
@@ -354,6 +381,7 @@ pub extern "C" fn init_kernel(
 
 pub fn halt() -> ! {
     loop {
+        // SAFETY: halting this core.
         unsafe {
             asm!("hlt", options(nomem, nostack));
         }

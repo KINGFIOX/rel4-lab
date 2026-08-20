@@ -17,10 +17,6 @@ into the repository `target/` that the installer copies from.
 | `run-ltp.py` | Builds the ramfs cpio, linux-compat + vfs + uart, packs with `ROOTSERVER_ELF` and a 16-bit root CNode. `ARCH=riscv64` or `ARCH=x86_64`. Success is `ltp-wave1: ok`. |
 | `build-linux-rootfs.py` | Cross-links wave-1 ET_EXEC programs (including LTP `uname01.c`) and writes a newc cpio for the selected `ARCH`. |
 
-Upstream `sel4test-driver` still talks MCS `SchedContext` / `SchedControl`.
-This kernel does not implement those objects, so a default `run-tests.py`
-run is not a correctness signal for the current ABI.
-
 ## Audits
 
 `pack-image.py::audit_rust_kernel` runs these on the kernel it just built:

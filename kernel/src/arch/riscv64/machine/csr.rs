@@ -8,6 +8,8 @@ macro_rules! ro_csr {
         #[allow(dead_code)]
         pub fn $name() -> usize {
             let v: usize;
+            // SAFETY: reading an S-mode CSR the kernel is privileged for has
+            // no effect other than producing its value.
             unsafe { asm!(concat!("csrr {0}, ", $csr), out(reg) v, options(nostack, nomem)) };
             v
         }
@@ -21,6 +23,10 @@ macro_rules! rw_csr {
         #[inline]
         #[allow(dead_code)]
         pub fn $write(v: usize) {
+            // SAFETY: writing an S-mode CSR the kernel owns. Callers are
+            // responsible for the machine-level meaning of `v`; the ones that
+            // reprogram translation or trap handling go through the wrappers
+            // in `object::vspace` and `kernel::trap`.
             unsafe { asm!(concat!("csrw ", $csr, ", {0}"), in(reg) v, options(nostack, nomem)) };
         }
     };
@@ -41,23 +47,27 @@ rw_csr!(scounteren, set_scounteren, "scounteren");
 #[inline]
 #[allow(dead_code)]
 pub fn sfence_vma_all() {
+    // SAFETY: a TLB fence only discards cached translations.
     unsafe { asm!("sfence.vma zero, zero", options(nostack, nomem)) };
 }
 
 #[inline]
 #[allow(dead_code)]
 pub fn sfence_vma_va(vaddr: usize) {
+    // SAFETY: as `sfence_vma_all`, narrowed to one address.
     unsafe { asm!("sfence.vma {0}, zero", in(reg) vaddr, options(nostack, nomem)) };
 }
 
 #[inline]
 #[allow(dead_code)]
 pub fn sfence_vma_asid(asid: usize) {
+    // SAFETY: as `sfence_vma_all`, narrowed to one ASID.
     unsafe { asm!("sfence.vma zero, {0}", in(reg) asid, options(nostack, nomem)) };
 }
 
 #[inline]
 #[allow(dead_code)]
 pub fn fence_i() {
+    // SAFETY: an instruction-cache fence only discards cached instructions.
     unsafe { asm!("fence.i", options(nostack, nomem)) };
 }

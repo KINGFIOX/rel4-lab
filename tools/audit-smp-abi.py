@@ -40,7 +40,7 @@ def audit_common_smp(errors: list[str]) -> None:
         smp_rs,
         r"pub\s+fn\s+remote_tcb_stall\([^)]*\)\s*\{"
         r"(?=.*current_core_of_tcb\(tcb\))"
-        r"(?=.*remote_core_op\(core,\s*REMOTE_OP_STALL_TCB,\s*tcb\s+as\s+usize\))",
+        r"(?=.*remote_core_op\(core,\s*REMOTE_OP_STALL_TCB,\s*tcb\.kva\(\)\s+as\s+usize\))",
         "remote TCB stall dispatch through remote_core_op",
     )
     require_regex(

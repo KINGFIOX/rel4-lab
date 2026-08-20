@@ -1,3 +1,7 @@
+// This module is written entirely in terms of the safe abstractions in
+// `ktypes`; keep it that way.
+#![deny(unsafe_code)]
+
 pub const PLIC_MAX_IRQ: usize = 95;
 pub const KERNEL_TIMER_IRQ: usize = PLIC_MAX_IRQ + 1;
 pub const MAX_IRQ: usize = KERNEL_TIMER_IRQ;

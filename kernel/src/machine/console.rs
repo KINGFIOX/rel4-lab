@@ -8,7 +8,9 @@ use crate::arch::current::plat as platform;
 #[cfg(target_arch = "riscv64")]
 use crate::arch::current::object::vspace::paddr_to_mmio;
 #[cfg(target_arch = "riscv64")]
-use core::ptr::{read_volatile, write_volatile};
+use crate::ktypes::addr::Paddr;
+#[cfg(target_arch = "riscv64")]
+use crate::ktypes::mmio::{MmioReg, MmioRegion, MmioValue};
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::asm;
@@ -51,6 +53,8 @@ pub fn putc(c: u8) {
 #[cfg(target_arch = "x86_64")]
 fn init_com1() {
     let port = platform::PCI_DEBUG_UART_PORT as u16;
+    // SAFETY: these are COM1's own I/O ports, written with the standard
+    // 16550 "interrupts off, FIFOs on, 8N1" setup.
     unsafe {
         outb(port + UartRegister::InterruptEnable.offset(), 0x00);
         outb(port + UartRegister::FifoControl.offset(), 0x07);
@@ -61,6 +65,7 @@ fn init_com1() {
 #[cfg(target_arch = "x86_64")]
 fn com1_try_putc(ch: u8) -> bool {
     let port = platform::PCI_DEBUG_UART_PORT as u16;
+    // SAFETY: reading COM1's line status and writing its data register.
     unsafe {
         for _ in 0..UART_WAIT_SPINS {
             if inb(port + UartRegister::LineStatus.offset()) & LSR_THRE != 0 {
@@ -72,9 +77,15 @@ fn com1_try_putc(ch: u8) -> bool {
     false
 }
 
+/// Write a byte to an I/O port.
+///
+/// # Safety
+/// `port` must be a port the caller is allowed to drive, since the write goes
+/// straight to whatever device answers it.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 unsafe fn outb(port: u16, value: u8) {
+    // SAFETY: forwarded to the caller.
     unsafe {
         asm!(
             "out dx, al",
@@ -85,10 +96,16 @@ unsafe fn outb(port: u16, value: u8) {
     }
 }
 
+/// Read a byte from an I/O port.
+///
+/// # Safety
+/// `port` must be a port the caller is allowed to drive; reads can have side
+/// effects on the device.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 unsafe fn inb(port: u16) -> u8 {
     let value: u8;
+    // SAFETY: forwarded to the caller.
     unsafe {
         asm!(
             "in al, dx",
@@ -161,55 +178,64 @@ fn pci_debug_uart_base_pa() -> usize {
 
 #[cfg(target_arch = "riscv64")]
 fn init_16550(base_pa: usize, clear_fifos: bool) {
-    unsafe {
-        write_volatile(uart_reg(base_pa, UartRegister::InterruptEnable), 0x00);
-        write_volatile(
-            uart_reg(base_pa, UartRegister::FifoControl),
-            if clear_fifos { 0x07 } else { 0x01 },
-        );
-        write_volatile(uart_reg(base_pa, UartRegister::LineControl), 0x03);
-    }
+    uart_reg(base_pa, UartRegister::InterruptEnable).write(0x00);
+    uart_reg(base_pa, UartRegister::FifoControl).write(if clear_fifos { 0x07 } else { 0x01 });
+    uart_reg(base_pa, UartRegister::LineControl).write(0x03);
 }
 
 #[cfg(target_arch = "riscv64")]
 fn uart_try_putc(base_pa: usize, ch: u8) -> bool {
-    unsafe {
-        for _ in 0..UART_WAIT_SPINS {
-            if read_volatile(uart_reg(base_pa, UartRegister::LineStatus)) & LSR_THRE != 0 {
-                write_volatile(uart_reg(base_pa, UartRegister::Data), ch);
-                return true;
-            }
+    for _ in 0..UART_WAIT_SPINS {
+        if uart_reg(base_pa, UartRegister::LineStatus).read() & LSR_THRE != 0 {
+            uart_reg(base_pa, UartRegister::Data).write(ch);
+            return true;
         }
     }
     false
 }
 
+/// Device window for a 16550's eight byte-wide registers.
 #[cfg(target_arch = "riscv64")]
-#[inline]
-fn uart_reg(base_pa: usize, register: UartRegister) -> *mut u8 {
-    paddr_to_mmio(base_pa + register.offset() as usize) as *mut u8
+fn uart_window(base_pa: usize) -> MmioRegion {
+    // SAFETY: the platform's UART sits at this physical address and the
+    // kernel's MMIO window maps it; no Rust object lives there.
+    unsafe { MmioRegion::new(paddr_to_mmio(Paddr::new(base_pa)), 8) }
 }
 
 #[cfg(target_arch = "riscv64")]
 #[inline]
-fn pci_reg<T>(cfg_base_pa: usize, offset: usize) -> *mut T {
-    paddr_to_mmio(cfg_base_pa + offset) as *mut T
+fn uart_reg(base_pa: usize, register: UartRegister) -> MmioReg<u8> {
+    uart_window(base_pa).reg(register.offset() as usize)
+}
+
+/// One device's 4 KiB PCI configuration space.
+#[cfg(target_arch = "riscv64")]
+fn pci_config_window(cfg_base_pa: usize) -> MmioRegion {
+    // SAFETY: `cfg_base_pa` comes from `pci_config_base`, which addresses one
+    // function's 4 KiB slot inside the platform's ECAM region.
+    unsafe { MmioRegion::new(paddr_to_mmio(Paddr::new(cfg_base_pa)), 0x1000) }
+}
+
+#[cfg(target_arch = "riscv64")]
+#[inline]
+fn pci_reg<T: MmioValue>(cfg_base_pa: usize, offset: usize) -> MmioReg<T> {
+    pci_config_window(cfg_base_pa).reg(offset)
 }
 
 #[cfg(target_arch = "riscv64")]
 #[inline]
 fn read16(cfg_base_pa: usize, offset: usize) -> u16 {
-    unsafe { read_volatile(pci_reg(cfg_base_pa, offset)) }
+    pci_reg::<u16>(cfg_base_pa, offset).read()
 }
 
 #[cfg(target_arch = "riscv64")]
 #[inline]
 fn write16(cfg_base_pa: usize, offset: usize, value: u16) {
-    unsafe { write_volatile(pci_reg(cfg_base_pa, offset), value) }
+    pci_reg::<u16>(cfg_base_pa, offset).write(value);
 }
 
 #[cfg(target_arch = "riscv64")]
 #[inline]
 fn write32(cfg_base_pa: usize, offset: usize, value: u32) {
-    unsafe { write_volatile(pci_reg(cfg_base_pa, offset), value) }
+    pci_reg::<u32>(cfg_base_pa, offset).write(value);
 }

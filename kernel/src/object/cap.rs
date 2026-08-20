@@ -7,6 +7,12 @@
 
 #![allow(dead_code)]
 
+use crate::ktypes::objref::{ObjArray, ObjRef};
+use crate::object::cnode::Cte;
+use crate::object::endpoint::EndpointRef;
+use crate::object::notification::NotificationRef;
+use crate::object::tcb::TcbRef;
+
 /// Sign-extension mask for 39-bit kernel pointers stored in caps. Bit 38
 /// is the sign bit; when set, bits 39..64 must be all 1.
 const SIGN_EXT_MASK: u64 = 0xFFFF_FF80_0000_0000;
@@ -653,6 +659,71 @@ impl Cap {
     #[inline]
     pub const fn frame_is_device(self) -> bool {
         ((self.words[0] >> 54) & 0x1) != 0
+    }
+}
+
+/// Typed object handles decoded from a capability.
+///
+/// This is the one place where an address stored in a cap becomes a handle the
+/// kernel will dereference. It is sound because the kernel wrote those
+/// addresses itself: `Untyped_Retype` validated the region, stamped the object
+/// into it, and only then minted the cap. A live cap of a given tag therefore
+/// names a live object of the matching type, and revoking the cap is what ends
+/// the object's life.
+impl Cap {
+    /// The endpoint this cap names, if it is an endpoint cap.
+    #[inline]
+    pub fn as_endpoint(self) -> Option<EndpointRef> {
+        if self.tag() != Some(CapTag::Endpoint) {
+            return None;
+        }
+        // SAFETY: an Endpoint cap's pointer field was written by the kernel
+        // when the object was retyped, and the cap keeps the object alive.
+        unsafe { ObjRef::from_kva(self.endpoint_ptr()) }
+    }
+
+    /// The notification this cap names, if it is a notification cap.
+    #[inline]
+    pub fn as_notification(self) -> Option<NotificationRef> {
+        if self.tag() != Some(CapTag::Notification) {
+            return None;
+        }
+        // SAFETY: as `as_endpoint`.
+        unsafe { ObjRef::from_kva(self.notification_ptr()) }
+    }
+
+    /// The thread this cap names, if it is a thread cap.
+    #[inline]
+    pub fn as_thread(self) -> Option<TcbRef> {
+        if self.tag() != Some(CapTag::Thread) {
+            return None;
+        }
+        // SAFETY: as `as_endpoint`.
+        unsafe { ObjRef::from_kva(self.thread_ptr()) }
+    }
+
+    /// The thread a reply cap replies to, if it is a reply cap.
+    #[inline]
+    pub fn as_reply_thread(self) -> Option<TcbRef> {
+        if self.tag() != Some(CapTag::Reply) {
+            return None;
+        }
+        // SAFETY: a Reply cap's pointer field names the TCB whose `tcbReply`
+        // slot holds the master cap, so the object outlives this cap.
+        unsafe { ObjRef::from_kva(self.reply_tcb_ptr()) }
+    }
+
+    /// The capability table this CNode cap names.
+    #[inline]
+    pub fn as_cnode(self) -> Option<ObjArray<Cte>> {
+        if self.tag() != Some(CapTag::CNode) {
+            return None;
+        }
+        // SAFETY: a CNode cap's pointer field names the contiguous CTE array
+        // the kernel allocated for it, with `2^radix` slots.
+        let base = unsafe { ObjRef::from_kva(self.cnode_ptr()) }?;
+        // SAFETY: the radix field records how many slots that array has.
+        Some(unsafe { ObjArray::new(base, 1usize << self.cnode_radix()) })
     }
 }
 

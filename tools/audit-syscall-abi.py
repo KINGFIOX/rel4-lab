@@ -377,17 +377,16 @@ def audit_kernel_trap(errors: list[str], target_name: str) -> None:
         path,
         r"Some\(SyscallNumber::DebugCapIdentify\)\s*=>\s*\{.*?"
         r"let\s+cptr\s*=\s*uc\.regs\[UserRegister::A0\.index\(\)\];.*?"
-        r"crate::api::cspace::lookup_cap\(thread,\s*cptr\).*?"
+        r"crate::api::cspace::lookup_cap_current\(cptr\).*?"
         r"uc\.regs\[UserRegister::A0\.index\(\)\]\s*=\s*tag;",
         "DebugCapIdentify syscall handler",
     )
     require_regex(
         errors,
         path,
-        r"Some\(SyscallNumber::Yield\)\s*=>\s*unsafe\s*\{\s*"
-        r"let\s+cur\s*=\s*crate::object::tcb::current\(\);\s*"
-        r"if\s+!cur\.is_null\(\)\s*\{\s*"
-        r"crate::object::tcb::rotate_to_tail\(cur\);\s*\}\s*\}",
+        r"Some\(SyscallNumber::Yield\)\s*=>\s*\{\s*"
+        r"if\s+let\s+Some\(cur\)\s*=\s*crate::object::tcb::current\(\)\s*\{\s*"
+        r"cur\.rotate_to_tail\(\);\s*\}\s*\}",
         "Yield syscall handler",
     )
     require_regex(

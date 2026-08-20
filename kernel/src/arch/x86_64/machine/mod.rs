@@ -14,9 +14,14 @@ pub fn current_scratch() -> usize {
     registers::current_scratch()
 }
 
+/// Publish this core's trap scratch address.
+///
+/// # Safety
+/// `scratch` must be the address of this core's trap scratch area.
 #[inline]
-pub fn set_current_scratch(scratch: usize) {
-    registers::set_current_scratch(scratch);
+pub unsafe fn set_current_scratch(scratch: usize) {
+    // SAFETY: forwarded to the caller.
+    unsafe { registers::set_current_scratch(scratch) };
 }
 
 #[inline]

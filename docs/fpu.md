@@ -31,7 +31,8 @@ through `kernel/src/kernel/smp.rs::remote_fpu_owner_release` and does not
 deschedule that TCB.
 
 Save/load cover `f0..f31` and `fcsr`. The `asm!` blocks omit `nomem` so the
-compiler treats the TCB FPU image as memory.
+compiler treats the TCB FPU image as memory, and they run inside a
+`TcbRef::with_context`/`with_context_mut` borrow of the owning TCB.
 
 `TCBSetFlags` (`api/invocation.rs`) can set the seL4 FPU-disabled flag.
 Setting it releases a live owner. Re-enabling the current TCB calls
@@ -51,6 +52,11 @@ saved QEMU log.
 | `tools/audit-kernel-fpu.py` | Release disassembly: FP/SIMD stay in the current-arch FPU module |
 
 `pack-image.py` runs `audit-kernel-fpu.py` for the kernel ELF of the selected arch.
+
+`audit-fpu-lifecycle.py` is not wired into any gate and its patterns still
+describe the pre-`ktypes` function signatures (`*mut Tcb`, `unsafe fn`), so it
+reports failures that are naming, not behaviour. `audit-kernel-fpu.py` is the
+one that runs.
 
 There is no local IPC fastpath, so there is no `nativeThreadUsingFPU`
 fastpath guard to maintain.

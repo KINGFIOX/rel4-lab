@@ -1,8 +1,15 @@
 //! Kernel `in` / `out` for issued IoPort caps.
+//!
+//! Every access here is reached only through an IoPort capability whose range
+//! the kernel checked, so the port belongs to whoever asked for the access.
+//! The instructions themselves touch no memory, which is why these wrappers
+//! are safe to call.
 
 #[inline]
 pub fn in8(port: u16) -> u8 {
     let value: u8;
+    // SAFETY: port I/O touches the device behind `port`, not memory; the
+    // caller holds an IoPort cap covering it.
     unsafe {
         core::arch::asm!(
             "inb %dx, %al",
@@ -17,6 +24,8 @@ pub fn in8(port: u16) -> u8 {
 #[inline]
 pub fn in16(port: u16) -> u16 {
     let value: u16;
+    // SAFETY: port I/O touches the device behind `port`, not memory; the
+    // caller holds an IoPort cap covering it.
     unsafe {
         core::arch::asm!(
             "inw %dx, %ax",
@@ -31,6 +40,8 @@ pub fn in16(port: u16) -> u16 {
 #[inline]
 pub fn in32(port: u16) -> u32 {
     let value: u32;
+    // SAFETY: port I/O touches the device behind `port`, not memory; the
+    // caller holds an IoPort cap covering it.
     unsafe {
         core::arch::asm!(
             "inl %dx, %eax",
@@ -44,6 +55,8 @@ pub fn in32(port: u16) -> u32 {
 
 #[inline]
 pub fn out8(port: u16, value: u8) {
+    // SAFETY: port I/O touches the device behind `port`, not memory; the
+    // caller holds an IoPort cap covering it.
     unsafe {
         core::arch::asm!(
             "outb %al, %dx",
@@ -56,6 +69,8 @@ pub fn out8(port: u16, value: u8) {
 
 #[inline]
 pub fn out16(port: u16, value: u16) {
+    // SAFETY: port I/O touches the device behind `port`, not memory; the
+    // caller holds an IoPort cap covering it.
     unsafe {
         core::arch::asm!(
             "outw %ax, %dx",
@@ -68,6 +83,8 @@ pub fn out16(port: u16, value: u16) {
 
 #[inline]
 pub fn out32(port: u16, value: u32) {
+    // SAFETY: port I/O touches the device behind `port`, not memory; the
+    // caller holds an IoPort cap covering it.
     unsafe {
         core::arch::asm!(
             "outl %eax, %dx",

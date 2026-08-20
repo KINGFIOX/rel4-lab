@@ -22,12 +22,19 @@
 //!              `Signal` ORs new badge into latched value.
 //! * `Waiting` → queue holds blocked receivers. `Signal` pops head,
 //!              delivers badge directly to the woken TCB.
+//!
+//! As with endpoints, the wait queue is the TCB-embedded intrusive list; the
+//! head and tail words below are its ends.
 
 #![allow(dead_code)]
 
-use crate::object::endpoint;
-use crate::object::tcb::{self, Tcb};
-use crate::object::wait_queue_lock::{self, WaitQueueLockGuard};
+use crate::ktypes::list::{self, QueueEnds};
+use crate::ktypes::objref::{ObjRef, OptObjRefExt};
+use crate::object::endpoint::EndpointRef;
+use crate::object::tcb::{BlockedReceive, Tcb, TcbRef};
+
+/// Handle for a notification object.
+pub type NotificationRef = ObjRef<Notification>;
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -36,13 +43,14 @@ pub struct Notification {
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<Notification>() == 32);
-    assert!(core::mem::align_of::<Notification>() >= 8);
+    assert!(size_of::<Notification>() == 32);
+    assert!(align_of::<Notification>() >= 8);
 };
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 #[repr(u64)]
 pub enum NtfnState {
+    #[default]
     Idle = 0,
     Waiting = 1,
     Active = 2,
@@ -95,423 +103,72 @@ impl Notification {
         self.words[2] = b;
     }
 
-    /// PSpace KVA of the bound TCB (or 0 for "no binding").
+    /// The bound TCB, if the notification has one.
     #[inline]
-    fn bound_tcb(&self) -> u64 {
-        self.words[3]
+    fn bound_tcb(&self) -> Option<TcbRef> {
+        // SAFETY: the word only ever holds an address stored from a live
+        // `TcbRef`.
+        unsafe { ObjRef::from_kva(self.words[3]) }
     }
 
     #[inline]
-    pub(crate) fn set_bound_tcb(&mut self, p: u64) {
-        self.words[3] = p;
+    fn set_bound_tcb(&mut self, tcb: Option<TcbRef>) {
+        self.words[3] = tcb.kva_or_zero();
     }
 
-    /// Head of the blocked-receiver queue (or null).
-    #[inline]
-    fn head(&self) -> *mut Tcb {
-        self.words[1] as *mut Tcb
+    /// Collect a latched badge, moving back to `Idle`.
+    fn take_active_badge(&mut self) -> Option<u64> {
+        if self.state() != NtfnState::Active {
+            return None;
+        }
+        let badge = self.badge();
+        self.set_badge(0);
+        self.set_state(NtfnState::Idle);
+        Some(badge)
     }
+}
 
+impl QueueEnds<Tcb> for Notification {
     #[inline]
-    fn set_head(&mut self, h: *mut Tcb) {
-        self.words[1] = h as u64;
+    fn head(&self) -> Option<TcbRef> {
+        // SAFETY: the word only ever holds an address stored from a live
+        // `TcbRef`.
+        unsafe { ObjRef::from_kva(self.words[1]) }
     }
 
     /// Tail is stored as the low 39 bits of the pointer, packed at
     /// bits 25..64 of `words[0]` so it sits next to `state`. Read-back
-    /// sign-extends bit 38 to recover the full kernel ptr.
+    /// sign-extends bit 38 to recover the full kernel pointer.
     #[inline]
-    fn tail(&self) -> *mut Tcb {
+    fn tail(&self) -> Option<TcbRef> {
         let raw = (self.words[0] & TAIL_MASK) >> 25;
         if raw == 0 {
-            core::ptr::null_mut()
-        } else {
-            sign_extend_39(raw) as *mut Tcb
+            return None;
         }
+        // SAFETY: as `head`, with the ABI's 39-bit packing undone.
+        unsafe { ObjRef::from_kva(sign_extend_39(raw)) }
     }
 
     #[inline]
-    fn set_tail(&mut self, t: *mut Tcb) {
-        let v = t as u64;
-        self.words[0] = (self.words[0] & !TAIL_MASK) | ((v << 25) & TAIL_MASK);
+    fn set_head(&mut self, head: Option<TcbRef>) {
+        self.words[1] = head.kva_or_zero();
+    }
+
+    #[inline]
+    fn set_tail(&mut self, tail: Option<TcbRef>) {
+        let packed = (tail.kva_or_zero() << 25) & TAIL_MASK;
+        self.words[0] = (self.words[0] & !TAIL_MASK) | packed;
     }
 }
 
 /// Initialise a freshly-retyped Notification slab. `Untyped_Retype`
 /// already zeroed the memory; nothing else to do.
+///
+/// # Safety
+/// `ntfn_kva` must be the base of a zeroed slab the caller has just retyped
+/// into a Notification object.
 pub unsafe fn init(_ntfn_kva: u64) {
     crate::kernel::smp::debug_assert_kernel_lock_held();
-}
-
-#[inline]
-pub(crate) unsafe fn lock_queue(ntfn: *const Notification) -> WaitQueueLockGuard {
-    wait_queue_lock::lock(ntfn.cast())
-}
-
-pub(crate) unsafe fn bound_tcb_snapshot(ntfn: *const Notification) -> *mut Tcb {
-    if ntfn.is_null() {
-        return core::ptr::null_mut();
-    }
-    let _guard = unsafe { lock_queue(ntfn) };
-    unsafe { (*ntfn).bound_tcb() as *mut Tcb }
-}
-
-pub(crate) unsafe fn can_bind_snapshot(ntfn: *const Notification) -> bool {
-    if ntfn.is_null() {
-        return false;
-    }
-    let _guard = unsafe { lock_queue(ntfn) };
-    unsafe { (*ntfn).head().is_null() && (*ntfn).bound_tcb() == 0 }
-}
-
-pub unsafe fn consume_active(ntfn: *mut Notification, tcb: *mut Tcb) -> Option<u64> {
-    if ntfn.is_null() || tcb.is_null() {
-        return None;
-    }
-    let _guard = unsafe { lock_queue(ntfn) };
-    unsafe { consume_active_locked(ntfn, tcb) }
-}
-
-/// Caller must hold this Notification's queue lock, or an ordered pair lock
-/// that includes it.
-pub(crate) unsafe fn consume_active_locked(ntfn: *mut Notification, tcb: *mut Tcb) -> Option<u64> {
-    if ntfn.is_null() || tcb.is_null() {
-        return None;
-    }
-    unsafe {
-        let n = &mut *ntfn;
-        if n.state() != NtfnState::Active {
-            return None;
-        }
-        let badge = n.badge();
-        n.set_badge(0);
-        n.set_state(NtfnState::Idle);
-        Some(badge)
-    }
-}
-
-/// Append `tcb` to the tail of `ntfn`'s wait queue. Caller is
-/// responsible for marking the TCB blocked + setting `waiting_on`
-/// + dequeueing from the runqueue beforehand.
-pub unsafe fn enqueue_waiter(ntfn: *mut Notification, tcb: *mut Tcb) {
-    if ntfn.is_null() || tcb.is_null() {
-        return;
-    }
-    let _guard = unsafe { lock_queue(ntfn) };
-    unsafe {
-        enqueue_waiter_locked(ntfn, tcb);
-    }
-}
-
-pub(crate) unsafe fn enqueue_waiter_locked(ntfn: *mut Notification, tcb: *mut Tcb) {
-    if ntfn.is_null() || tcb.is_null() {
-        return;
-    }
-    unsafe {
-        let tail = (*ntfn).tail();
-        if tail.is_null() {
-            (*ntfn).set_head(tcb);
-        } else {
-            tcb::set_wait_queue_next(tail, tcb);
-        }
-
-        (*ntfn).set_tail(tcb);
-        tcb::set_wait_queue_links(tcb, tail, core::ptr::null_mut());
-    }
-}
-
-/// Pop the head of `ntfn`'s wait queue, returning it (or null). The
-/// popped TCB still has its old `state`/`waiting_on` — caller must
-/// transition it to Running + re-enqueue into the runqueue.
-pub unsafe fn pop_head(ntfn: *mut Notification) -> *mut Tcb {
-    if ntfn.is_null() {
-        return core::ptr::null_mut();
-    }
-    let _guard = unsafe { lock_queue(ntfn) };
-    unsafe { pop_head_locked(ntfn) }
-}
-
-pub(crate) unsafe fn pop_head_locked(ntfn: *mut Notification) -> *mut Tcb {
-    if ntfn.is_null() {
-        return core::ptr::null_mut();
-    }
-    unsafe {
-        let head = (*ntfn).head();
-        if head.is_null() {
-            return core::ptr::null_mut();
-        }
-        let next = tcb::wait_queue_next_snapshot(head);
-        tcb::clear_wait_queue_links(head);
-        if next.is_null() {
-            (*ntfn).set_head(core::ptr::null_mut());
-            (*ntfn).set_tail(core::ptr::null_mut());
-        } else {
-            tcb::set_wait_queue_prev(next, core::ptr::null_mut());
-            (*ntfn).set_head(next);
-        }
-        head
-    }
-}
-
-/// Remove an arbitrary `tcb` from `ntfn`'s wait queue. Used by
-/// suspend/finalize on a notification-blocked TCB.
-pub unsafe fn remove_waiter(ntfn: *mut Notification, tcb: *mut Tcb) {
-    if ntfn.is_null() || tcb.is_null() {
-        return;
-    }
-    let _guard = unsafe { lock_queue(ntfn) };
-    unsafe {
-        if !contains_waiter_locked(ntfn, tcb) {
-            return;
-        }
-        remove_waiter_locked(ntfn, tcb);
-    }
-}
-
-pub(crate) unsafe fn remove_waiter_locked(ntfn: *mut Notification, tcb: *mut Tcb) {
-    if ntfn.is_null() || tcb.is_null() {
-        return;
-    }
-    unsafe {
-        let (prev, next) = tcb::wait_queue_links_snapshot(tcb);
-        if !prev.is_null() {
-            tcb::set_wait_queue_next(prev, next);
-        } else if (*ntfn).head() == tcb {
-            (*ntfn).set_head(next);
-        }
-        if !next.is_null() {
-            tcb::set_wait_queue_prev(next, prev);
-        } else if (*ntfn).tail() == tcb {
-            (*ntfn).set_tail(prev);
-        }
-        tcb::clear_wait_queue_links(tcb);
-        if (*ntfn).head().is_null() {
-            (*ntfn).set_tail(core::ptr::null_mut());
-            (*ntfn).set_state(NtfnState::Idle);
-        }
-    }
-}
-
-unsafe fn contains_waiter_locked(ntfn: *mut Notification, tcb: *mut Tcb) -> bool {
-    if ntfn.is_null() || tcb.is_null() {
-        return false;
-    }
-    unsafe {
-        let mut cur = (*ntfn).head();
-        while !cur.is_null() {
-            if cur == tcb {
-                return true;
-            }
-            cur = tcb::wait_queue_next_snapshot(cur);
-        }
-    }
-    false
-}
-
-unsafe fn waiter_matches_notification_locked(ntfn: *mut Notification, tcb: *mut Tcb) -> bool {
-    if unsafe { (*ntfn).state() != NtfnState::Waiting || !contains_waiter_locked(ntfn, tcb) } {
-        return false;
-    }
-    tcb::blocked_on_notification_for(tcb, ntfn as u64)
-}
-
-pub unsafe fn reorder_waiter(ntfn: *mut Notification, tcb: *mut Tcb) {
-    if ntfn.is_null() || tcb.is_null() {
-        return;
-    }
-    let _guard = unsafe { lock_queue(ntfn) };
-    unsafe {
-        if !waiter_matches_notification_locked(ntfn, tcb) {
-            return;
-        }
-        remove_waiter_locked(ntfn, tcb);
-        enqueue_waiter_locked(ntfn, tcb);
-        (*ntfn).set_state(NtfnState::Waiting);
-    }
-}
-
-unsafe fn take_all_locked(ntfn: *mut Notification) -> *mut Tcb {
-    unsafe {
-        if (*ntfn).state() != NtfnState::Waiting {
-            return core::ptr::null_mut();
-        }
-        let head = (*ntfn).head();
-        (*ntfn).set_head(core::ptr::null_mut());
-        (*ntfn).set_tail(core::ptr::null_mut());
-        (*ntfn).set_state(NtfnState::Idle);
-        head
-    }
-}
-
-struct DetachedNotification {
-    waiters: *mut Tcb,
-}
-
-unsafe fn unbind_bound_tcb_locked(ntfn: *mut Notification) {
-    unsafe {
-        let bound_tcb = (*ntfn).bound_tcb();
-        if bound_tcb == 0 {
-            return;
-        }
-        (*ntfn).set_bound_tcb(0);
-        if is_kernel_pspace_kva(bound_tcb) {
-            tcb::clear_bound_notification_if(bound_tcb as *mut Tcb, ntfn as u64);
-        }
-    }
-}
-
-unsafe fn detach_final_state_locked(ntfn: *mut Notification) -> DetachedNotification {
-    unsafe {
-        unbind_bound_tcb_locked(ntfn);
-        let waiters = take_all_locked(ntfn);
-        DetachedNotification { waiters }
-    }
-}
-
-unsafe fn prepare_signal_receiver_locked(_ntfn: *mut Notification, tcb: *mut Tcb, badge: u64) {
-    unsafe {
-        tcb::complete_notification_wait(tcb, badge);
-    }
-}
-
-unsafe fn try_signal_bound_endpoint(
-    ntfn: *mut Notification,
-    badge: u64,
-    tcb: *mut Tcb,
-    ep: *mut endpoint::Endpoint,
-) -> Option<(*mut Tcb, u64)> {
-    if ntfn.is_null() || tcb.is_null() || ep.is_null() {
-        return None;
-    }
-    let _guard = wait_queue_lock::lock_pair(ntfn.cast(), ep.cast());
-    unsafe {
-        let n = &mut *ntfn;
-        let combined = match n.state() {
-            NtfnState::Idle => badge,
-            NtfnState::Active => n.badge() | badge,
-            NtfnState::Waiting => return None,
-        };
-        if n.bound_tcb() != tcb as u64 {
-            return None;
-        }
-        if !tcb::waiter_matches_endpoint(tcb, ep as u64, false) {
-            return None;
-        }
-        endpoint::remove_waiter_locked(ep, tcb);
-        n.set_badge(0);
-        n.set_state(NtfnState::Idle);
-        Some((tcb, combined))
-    }
-}
-
-/// `Signal` on a (possibly badged) Notification cap.
-///
-/// Matches `sendSignal()` in `kernel/src/object/notification.c`:
-///
-/// * `Idle`    + bound TCB blocked-on-Receive  → cancel its IPC, wake it,
-///                                              deliver `badge` in a0.
-///             + (no bound TCB, or bound TCB not waiting) → latch badge,
-///                                              flip to `Active`.
-/// * `Waiting` → pop head of wait queue, deliver `badge`, mark Running.
-///              Queue empty afterwards ⇒ state goes Idle.
-/// * `Active`  → OR `badge` into the latched value.
-pub unsafe fn signal(ntfn: *mut Notification, badge: u64) {
-    enum SignalAction {
-        Done,
-        Wake(*mut Tcb),
-        BoundEndpoint {
-            tcb: *mut Tcb,
-            ep: *mut endpoint::Endpoint,
-        },
-    }
-
-    if ntfn.is_null() {
-        return;
-    }
-
-    loop {
-        let action = {
-            let _guard = unsafe { lock_queue(ntfn) };
-            let n = unsafe { &mut *ntfn };
-            match n.state() {
-                NtfnState::Idle | NtfnState::Active => {
-                    let active_badge = if n.state() == NtfnState::Active {
-                        n.badge()
-                    } else {
-                        0
-                    };
-                    let combined = active_badge | badge;
-                    let bound = n.bound_tcb();
-                    if bound != 0 {
-                        let tcb_ptr = bound as *mut Tcb;
-                        if let Some(waiting_on) = tcb::blocked_receive_endpoint_snapshot(tcb_ptr) {
-                            if waiting_on != 0 {
-                                SignalAction::BoundEndpoint {
-                                    tcb: tcb_ptr,
-                                    ep: waiting_on as *mut endpoint::Endpoint,
-                                }
-                            } else {
-                                n.set_badge(0);
-                                n.set_state(NtfnState::Idle);
-                                unsafe {
-                                    prepare_signal_receiver_locked(ntfn, tcb_ptr, combined);
-                                }
-                                SignalAction::Wake(tcb_ptr)
-                            }
-                        } else {
-                            n.set_badge(combined);
-                            n.set_state(NtfnState::Active);
-                            SignalAction::Done
-                        }
-                    } else {
-                        n.set_badge(combined);
-                        n.set_state(NtfnState::Active);
-                        SignalAction::Done
-                    }
-                }
-                NtfnState::Waiting => {
-                    let dest = unsafe { pop_head_locked(ntfn) };
-                    debug_assert!(
-                        !dest.is_null(),
-                        "Waiting Notification must have non-empty queue"
-                    );
-                    if dest.is_null() {
-                        n.set_state(NtfnState::Idle);
-                        SignalAction::Done
-                    } else {
-                        if n.head().is_null() {
-                            n.set_state(NtfnState::Idle);
-                        }
-                        unsafe {
-                            prepare_signal_receiver_locked(ntfn, dest, badge);
-                        }
-                        SignalAction::Wake(dest)
-                    }
-                }
-            }
-        };
-
-        match action {
-            SignalAction::Done => return,
-            SignalAction::Wake(tcb_ptr) => {
-                unsafe {
-                    tcb::enqueue(tcb_ptr);
-                }
-                return;
-            }
-            SignalAction::BoundEndpoint { tcb, ep } => {
-                if let Some((tcb_ptr, badge)) =
-                    unsafe { try_signal_bound_endpoint(ntfn, badge, tcb, ep) }
-                {
-                    unsafe {
-                        tcb::complete_bound_endpoint_notification_wait(tcb_ptr, badge);
-                        tcb::enqueue(tcb_ptr);
-                    }
-                    return;
-                }
-            }
-        }
-    }
 }
 
 /// Result of a `receiveSignal` / `Wait` on a Notification.
@@ -524,59 +181,238 @@ pub enum WaitOutcome {
     Blocked,
 }
 
-/// `Wait` on a Notification.
-///
-/// * `Active`  → collect the latched badge, flip to `Idle`, return Got.
-/// * `Idle/Waiting` + blocking → enqueue caller in wait queue, flip to
-///                               `Waiting`, return Blocked.
-/// * `Idle/Waiting` + non-blocking → caller wants to poll; return Got(0).
-///
-/// The caller writes badge into A0 and clears A1..A5 / MR[0..3]; we
-/// only handle queue & state bookkeeping here.
-pub unsafe fn wait(ntfn: *mut Notification, tcb: *mut Tcb, blocking: bool) -> WaitOutcome {
-    if ntfn.is_null() || tcb.is_null() {
-        return WaitOutcome::Got(0);
+impl NotificationRef {
+    #[inline]
+    pub fn state(self) -> NtfnState {
+        self.with(Notification::state)
     }
-    let _guard = unsafe { lock_queue(ntfn) };
-    let n = unsafe { &mut *ntfn };
-    match n.state() {
-        NtfnState::Active => {
-            let b = unsafe { consume_active_locked(ntfn, tcb) }.unwrap_or(0);
-            WaitOutcome::Got(b)
-        }
-        NtfnState::Idle | NtfnState::Waiting => {
-            if !blocking {
-                return WaitOutcome::Got(0);
-            }
-            unsafe {
-                tcb::dequeue(tcb);
-                tcb::set_blocked_on_notification(tcb, ntfn as u64);
-                enqueue_waiter_locked(ntfn, tcb);
-            }
-            n.set_state(NtfnState::Waiting);
-            WaitOutcome::Blocked
-        }
-    }
-}
 
-/// Cancel-all on Notification destruction: waiting threads move to `Restart`
-/// and re-enter the runqueue, mirroring `cancelAllSignals` in the C kernel.
-/// Active badges are preserved; only Waiting queues are detached.
-pub unsafe fn finalize(ntfn: *mut Notification) {
-    crate::kernel::smp::debug_assert_kernel_lock_held();
-    if ntfn.is_null() {
-        return;
+    #[inline]
+    pub fn bound_tcb(self) -> Option<TcbRef> {
+        self.with(Notification::bound_tcb)
     }
-    let detached = {
-        let _guard = unsafe { lock_queue(ntfn) };
-        unsafe { detach_final_state_locked(ntfn) }
-    };
-    let mut cur = detached.waiters;
-    while !cur.is_null() {
-        unsafe {
-            let next = tcb::restart_notification_waiter(cur);
-            tcb::enqueue(cur);
-            cur = next;
+
+    #[inline]
+    pub fn set_bound_tcb(self, tcb: Option<TcbRef>) {
+        self.with_mut(|n| n.set_bound_tcb(tcb));
+    }
+
+    /// A notification can only be bound while it has no waiters and no
+    /// existing binding.
+    #[inline]
+    pub fn can_bind(self) -> bool {
+        self.with(|n| QueueEnds::head(n).is_none() && n.bound_tcb().is_none())
+    }
+
+    /// Collect a latched badge if one is pending.
+    #[inline]
+    pub fn consume_active(self) -> Option<u64> {
+        self.with_mut(Notification::take_active_badge)
+    }
+
+    /// Append `tcb` to the tail of the wait queue. The caller marks the TCB
+    /// blocked and takes it off the runqueue first.
+    pub fn enqueue_waiter(self, tcb: TcbRef) {
+        self.with_mut(|n| list::push_back(n, tcb));
+    }
+
+    /// Remove and return the first waiter, leaving its thread state alone.
+    pub fn pop_head(self) -> Option<TcbRef> {
+        let popped = self.with_mut(list::pop_front);
+        self.with_mut(|n| {
+            if QueueEnds::head(n).is_none() {
+                n.set_tail(None);
+            }
+        });
+        popped
+    }
+
+    /// Remove an arbitrary waiter. Used by suspend/finalize on a
+    /// notification-blocked TCB.
+    pub fn remove_waiter(self, tcb: TcbRef) {
+        self.with_mut(|n| {
+            if !list::contains(n, tcb) {
+                return;
+            }
+            list::remove(n, tcb);
+            if QueueEnds::head(n).is_none() {
+                n.set_tail(None);
+                n.set_state(NtfnState::Idle);
+            }
+        });
+    }
+
+    pub fn contains_waiter(self, tcb: TcbRef) -> bool {
+        self.with(|n| list::contains(n, tcb))
+    }
+
+    /// Move `tcb` to the tail of the wait queue, if it really is waiting here.
+    pub fn reorder_waiter(self, tcb: TcbRef) {
+        if self.state() != NtfnState::Waiting
+            || !self.contains_waiter(tcb)
+            || !tcb.waits_on_notification(self)
+        {
+            return;
+        }
+        self.remove_waiter(tcb);
+        self.enqueue_waiter(tcb);
+        self.with_mut(|n| n.set_state(NtfnState::Waiting));
+    }
+
+    /// Detach the whole wait queue and go Idle, returning the old head.
+    fn take_all_waiting(self) -> Option<TcbRef> {
+        self.with_mut(|n| {
+            if n.state() != NtfnState::Waiting {
+                return None;
+            }
+            let head = QueueEnds::head(n);
+            n.set_head(None);
+            n.set_tail(None);
+            n.set_state(NtfnState::Idle);
+            head
+        })
+    }
+
+    /// `Signal` on a (possibly badged) Notification cap.
+    ///
+    /// Matches `sendSignal()` in `kernel/src/object/notification.c`:
+    ///
+    /// * `Idle`    + bound TCB blocked-on-Receive  → cancel its IPC, wake it,
+    ///                                              deliver `badge` in a0.
+    ///             + (no bound TCB, or bound TCB not waiting) → latch badge,
+    ///                                              flip to `Active`.
+    /// * `Waiting` → pop head of wait queue, deliver `badge`, mark Running.
+    ///              Queue empty afterwards ⇒ state goes Idle.
+    /// * `Active`  → OR `badge` into the latched value.
+    pub fn signal(self, badge: u64) {
+        match self.state() {
+            NtfnState::Waiting => self.signal_waiting(badge),
+            NtfnState::Idle | NtfnState::Active => self.signal_idle_or_active(badge),
+        }
+    }
+
+    fn signal_waiting(self, badge: u64) {
+        let Some(dest) = self.pop_head() else {
+            debug_assert!(false, "Waiting Notification must have non-empty queue");
+            self.with_mut(|n| n.set_state(NtfnState::Idle));
+            return;
+        };
+        self.with_mut(|n| {
+            if QueueEnds::head(n).is_none() {
+                n.set_state(NtfnState::Idle);
+            }
+        });
+        dest.complete_notification_wait(badge);
+        dest.enqueue();
+    }
+
+    fn signal_idle_or_active(self, badge: u64) {
+        let (combined, bound) = self.with(|n| {
+            let latched = if n.state() == NtfnState::Active {
+                n.badge()
+            } else {
+                0
+            };
+            (latched | badge, n.bound_tcb())
+        });
+
+        // A bound thread that is blocked receiving takes delivery directly,
+        // which for an endpoint receive means cancelling that receive first.
+        match bound.and_then(TcbRef::blocked_receive) {
+            Some(BlockedReceive::OnEndpoint(ep)) => {
+                let bound = bound.expect("blocked_receive implies a bound thread");
+                if self.deliver_to_bound_endpoint_receiver(bound, ep, combined) {
+                    return;
+                }
+                // The receive was cancelled underneath us; fall back to
+                // latching the badge.
+                self.latch(combined);
+            }
+            Some(BlockedReceive::Detached) => {
+                let bound = bound.expect("blocked_receive implies a bound thread");
+                self.with_mut(|n| {
+                    n.set_badge(0);
+                    n.set_state(NtfnState::Idle);
+                });
+                bound.complete_notification_wait(combined);
+                bound.enqueue();
+            }
+            None => self.latch(combined),
+        }
+    }
+
+    fn latch(self, badge: u64) {
+        self.with_mut(|n| {
+            n.set_badge(badge);
+            n.set_state(NtfnState::Active);
+        });
+    }
+
+    /// Take a bound thread off `ep`'s receive queue and hand it `badge`.
+    /// Returns false if the thread turned out not to be waiting there.
+    fn deliver_to_bound_endpoint_receiver(self, tcb: TcbRef, ep: EndpointRef, badge: u64) -> bool {
+        if self.bound_tcb() != Some(tcb) || !tcb.waits_on_endpoint(ep, false) {
+            return false;
+        }
+        ep.remove_waiter(tcb);
+        self.with_mut(|n| {
+            n.set_badge(0);
+            n.set_state(NtfnState::Idle);
+        });
+        tcb.complete_bound_endpoint_notification_wait(badge);
+        tcb.enqueue();
+        true
+    }
+
+    /// `Wait` on a Notification.
+    ///
+    /// * `Active`  → collect the latched badge, flip to `Idle`, return Got.
+    /// * `Idle/Waiting` + blocking → enqueue caller in wait queue, flip to
+    ///                               `Waiting`, return Blocked.
+    /// * `Idle/Waiting` + non-blocking → caller wants to poll; return Got(0).
+    ///
+    /// The caller writes badge into A0 and clears A1..A5 / MR[0..3]; this only
+    /// handles queue and state bookkeeping.
+    pub fn wait(self, tcb: TcbRef, blocking: bool) -> WaitOutcome {
+        if let Some(badge) = self.consume_active() {
+            return WaitOutcome::Got(badge);
+        }
+        if !blocking {
+            return WaitOutcome::Got(0);
+        }
+        tcb.dequeue();
+        tcb.set_blocked_on_notification(self);
+        self.enqueue_waiter(tcb);
+        self.with_mut(|n| n.set_state(NtfnState::Waiting));
+        WaitOutcome::Blocked
+    }
+
+    /// Cancel-all on Notification destruction: waiting threads move to
+    /// `Restart` and re-enter the runqueue, mirroring `cancelAllSignals` in
+    /// the C kernel. Active badges are preserved; only Waiting queues are
+    /// detached.
+    pub fn finalize(self) {
+        crate::kernel::smp::debug_assert_kernel_lock_held();
+        self.unbind_bound_tcb();
+        let mut next = self.take_all_waiting();
+        while let Some(waiter) = next {
+            next = waiter.restart_notification_waiter();
+            waiter.enqueue();
+        }
+    }
+
+    fn unbind_bound_tcb(self) {
+        let bound = self.with_mut(|n| {
+            let bound = n.bound_tcb();
+            n.set_bound_tcb(None);
+            bound
+        });
+        // The bound thread lives in user-retyped memory, so only follow the
+        // link if it still points into the kernel window.
+        if let Some(bound) = bound
+            && is_kernel_pspace_kva(bound.kva())
+        {
+            bound.clear_bound_notification_if(self);
         }
     }
 }

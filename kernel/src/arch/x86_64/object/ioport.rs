@@ -1,5 +1,9 @@
 //! Issued x86 I/O port ranges. Mirrors seL4 `x86KSAllocatedIOPorts`.
 
+// This module is written entirely in terms of the safe abstractions in
+// `ktypes`; keep it that way.
+#![deny(unsafe_code)]
+
 use crate::kernel::smp::BklCell;
 
 const PORT_WORDS: usize = 65536 / 64;

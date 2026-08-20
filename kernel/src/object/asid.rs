@@ -80,10 +80,17 @@ pub const fn pool_index(asid: u16) -> usize {
     (asid as usize) & (ASID_POOL_ENTRY_COUNT - 1)
 }
 
+/// Publish a VSpace root in an ASID pool frame, which user-space reads back
+/// through its ASIDPool cap.
+///
+/// # Safety
+/// `pool_kva` must be zero or the base of a live ASID pool frame.
 unsafe fn set_pool_entry(pool_kva: u64, index: usize, root_pt_kva: u64) {
     if pool_kva == 0 || index >= ASID_POOL_ENTRY_COUNT {
         return;
     }
+    // SAFETY: the caller vouches for the frame, and the bound check above
+    // keeps the offset inside it.
     unsafe {
         *((pool_kva as *mut u64).add(index)) = root_pt_kva;
     }
@@ -177,6 +184,7 @@ pub fn publish_pool_assignment(base: u16, pool_kva: u64, asid: u16, root_pt_kva:
             return false;
         }
         *slot = root_pt_kva;
+        // SAFETY: `pool_kva` came from a live ASIDPool cap.
         unsafe { set_pool_entry(pool_kva, pool_index(asid), root_pt_kva) };
         true
     })
@@ -219,6 +227,7 @@ pub fn delete(asid: u16, root_pt_kva: u64) {
         crate::kernel::smp::tlb_flush_asid_all_cpus(asid as usize);
         *slot = 0;
         if pool < ASID_POOL_COUNT && state.pool_active[pool] {
+            // SAFETY: the pool is recorded as active, so its frame is live.
             unsafe { set_pool_entry(state.pool_ptr[pool], pool_index(asid), 0) };
         }
         true

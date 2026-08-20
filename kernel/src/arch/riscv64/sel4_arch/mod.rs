@@ -153,6 +153,7 @@ pub fn configure_idle_context(context: &mut UserContext, kernel_sp: u64) {
 #[unsafe(no_mangle)]
 pub extern "C" fn idle_thread() -> ! {
     loop {
+        // SAFETY: waiting until the next interrupt.
         unsafe {
             core::arch::asm!("wfi", options(nomem, nostack));
         }

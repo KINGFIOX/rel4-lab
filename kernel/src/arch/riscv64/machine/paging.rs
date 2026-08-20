@@ -5,6 +5,9 @@
 //! permission bits (V, R, W, X, U, G, A, D).
 
 #![allow(dead_code)]
+// This module is written entirely in terms of the safe abstractions in
+// `ktypes`; keep it that way.
+#![deny(unsafe_code)]
 
 use crate::abi::constants::{PT_INDEX_BITS, SEL4_PAGE_TABLE_ENTRIES};
 

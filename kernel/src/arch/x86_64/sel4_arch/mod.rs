@@ -327,6 +327,7 @@ pub fn configure_idle_context(context: &mut UserContext, _kernel_sp: u64) {
 #[unsafe(no_mangle)]
 pub extern "C" fn idle_thread() -> ! {
     loop {
+        // SAFETY: halting until the next interrupt.
         unsafe {
             core::arch::asm!("hlt", options(nomem, nostack));
         }

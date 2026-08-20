@@ -11,6 +11,9 @@
 //! `api::invocation`.
 
 #![allow(dead_code)]
+// This module is written entirely in terms of the safe abstractions in
+// `ktypes`; keep it that way.
+#![deny(unsafe_code)]
 
 use crate::abi::constants::{SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS};
 use crate::object::cap::Cap;

@@ -8,13 +8,12 @@
 
 use core::cell::UnsafeCell;
 use core::hint;
-use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::abi::constants::MAX_NUM_NODES;
-use crate::api::thread::Thread;
-use crate::arch::current::kernel::{TrapScratch, TrapScratchCell, init_trap_scratch};
-use crate::object::tcb::Tcb;
+use crate::arch::current::kernel::{TrapScratchCell, init_trap_scratch};
+use crate::ktypes::objref::{ObjRef, OptObjRefExt};
+use crate::object::tcb::TcbRef;
 
 pub const MAX_BOOT_CPUS: usize = 8;
 pub const KERNEL_STACK_BYTES: usize = 64 * 1024;
@@ -23,29 +22,12 @@ unsafe extern "C" {
     static __stack_top: u8;
 }
 
-struct ThreadCell(UnsafeCell<Thread>);
-
-unsafe impl Sync for ThreadCell {}
-
-impl ThreadCell {
-    const fn new() -> Self {
-        Self(UnsafeCell::new(Thread::null()))
-    }
-
-    fn with_mut<R>(&self, op: impl FnOnce(&mut Thread) -> R) -> R {
-        debug_assert_kernel_lock_held();
-        let thread = unsafe { &mut *self.0.get() };
-        op(thread)
-    }
-}
-
 struct CpuState {
     cpu_id: AtomicUsize,
     core_id: AtomicUsize,
     online: AtomicBool,
     trap_scratch: TrapScratchCell,
     current_tcb: AtomicUsize,
-    thread: ThreadCell,
     next_timer_deadline: AtomicU64,
 }
 
@@ -57,7 +39,6 @@ impl CpuState {
             online: AtomicBool::new(false),
             trap_scratch: TrapScratchCell::new(),
             current_tcb: AtomicUsize::new(0),
-            thread: ThreadCell::new(),
             next_timer_deadline: AtomicU64::new(0),
         }
     }
@@ -195,6 +176,8 @@ pub struct BklCell<T> {
     value: UnsafeCell<T>,
 }
 
+// SAFETY: the value is only reachable through the scoped accessors below,
+// which require the big kernel lock, so no two cores touch it at once.
 unsafe impl<T: Send> Sync for BklCell<T> {}
 
 impl<T> BklCell<T> {
@@ -207,12 +190,15 @@ impl<T> BklCell<T> {
     #[inline]
     pub fn with_ref<R>(&self, op: impl FnOnce(&T) -> R) -> R {
         debug_assert_kernel_lock_held();
+        // SAFETY: the big kernel lock serialises access, and the borrow ends
+        // with `op`.
         unsafe { op(&*self.value.get()) }
     }
 
     #[inline]
     pub fn with_mut<R>(&self, op: impl FnOnce(&mut T) -> R) -> R {
         debug_assert_kernel_lock_held();
+        // SAFETY: as `with_ref`; the exclusive borrow lasts only for `op`.
         unsafe { op(&mut *self.value.get()) }
     }
 }
@@ -226,17 +212,18 @@ pub extern "C" fn kernel_unlock_for_user_restore() {
 
 #[inline]
 pub fn kernel_stack_top_for_core(core_id: usize) -> usize {
+    // SAFETY: `__stack_top` is a linker-provided symbol; only its address is
+    // taken, never its contents.
     let stack_top = unsafe { &__stack_top as *const u8 as usize };
     stack_top - core_id * KERNEL_STACK_BYTES
 }
 
 #[inline]
 pub fn current_core_id() -> usize {
-    let scratch = crate::arch::current::machine::current_scratch() as *const TrapScratch;
-    if scratch.is_null() {
+    let Some(scratch) = crate::arch::current::kernel::current_trap_scratch() else {
         return 0;
-    }
-    let core_id = unsafe { (*scratch).core_id };
+    };
+    let core_id = scratch.core_id;
     if core_id < MAX_NUM_NODES { core_id } else { 0 }
 }
 
@@ -253,6 +240,8 @@ pub fn init_current_cpu(cpu_id: usize, core_id: usize) {
     cpu.cpu_id.store(cpu_id, Ordering::Release);
     cpu.core_id.store(core_id, Ordering::Release);
 
+    // SAFETY: this core is initialising its own scratch area, before it takes
+    // any trap, so nothing else refers to it yet.
     unsafe {
         init_trap_scratch(
             cpu.trap_scratch.get(),
@@ -298,11 +287,8 @@ pub fn wake_core(core_id: usize) {
     );
 }
 
-pub fn current_core_of_tcb(tcb: *const Tcb) -> Option<usize> {
-    if tcb.is_null() {
-        return None;
-    }
-    let target = tcb as usize;
+pub fn current_core_of_tcb(tcb: TcbRef) -> Option<usize> {
+    let target = tcb.kva() as usize;
     let mut core = 0;
     while core < MAX_NUM_NODES && core < MAX_BOOT_CPUS {
         let cpu = &CPUS[core];
@@ -314,13 +300,13 @@ pub fn current_core_of_tcb(tcb: *const Tcb) -> Option<usize> {
     None
 }
 
-pub fn wake_current_core_of_tcb(tcb: *const Tcb) {
+pub fn wake_current_core_of_tcb(tcb: TcbRef) {
     if let Some(core) = current_core_of_tcb(tcb) {
         wake_core(core);
     }
 }
 
-pub fn remote_tcb_stall(tcb: *const Tcb) {
+pub fn remote_tcb_stall(tcb: TcbRef) {
     debug_assert_kernel_lock_held();
     if crate::object::tcb::is_idle_thread(tcb) {
         return;
@@ -331,15 +317,15 @@ pub fn remote_tcb_stall(tcb: *const Tcb) {
     if core == current_core_id() {
         return;
     }
-    remote_core_op(core, REMOTE_OP_STALL_TCB, tcb as usize);
+    remote_core_op(core, REMOTE_OP_STALL_TCB, tcb.kva() as usize);
 }
 
-pub fn remote_fpu_owner_release(core: usize, tcb: *const Tcb) {
+pub fn remote_fpu_owner_release(core: usize, tcb: TcbRef) {
     debug_assert_kernel_lock_held();
-    if tcb.is_null() || core >= MAX_NUM_NODES || core == current_core_id() {
+    if core >= MAX_NUM_NODES || core == current_core_id() {
         return;
     }
-    remote_core_op(core, REMOTE_OP_RELEASE_FPU_OWNER, tcb as usize);
+    remote_core_op(core, REMOTE_OP_RELEASE_FPU_OWNER, tcb.kva() as usize);
 }
 
 fn remote_core_op(core: usize, op: usize, target_value: usize) {
@@ -426,8 +412,10 @@ pub(crate) fn service_pending_remote_core_op() -> RemoteCoreOpResult {
     // descheduling the target TCB.
     match op {
         REMOTE_OP_RELEASE_FPU_OWNER => {
-            if target != 0 {
-                crate::arch::current::machine::fpu::release_on_current_core(target as *mut Tcb);
+            // SAFETY: the requesting core published the address of a live TCB
+            // it holds a handle to, and it waits for this op to complete.
+            if let Some(tcb) = unsafe { ObjRef::from_kva(target as u64) } {
+                crate::arch::current::machine::fpu::release_on_current_core(tcb);
             }
             complete_remote_core_op(bit);
             return RemoteCoreOpResult::Serviced;
@@ -448,6 +436,8 @@ pub(crate) fn service_pending_remote_core_op() -> RemoteCoreOpResult {
     let stalled_current = target != 0 && cpu.current_tcb.load(Ordering::Acquire) == target;
     if stalled_current {
         crate::object::tcb::switch_to_idle_thread();
+        // SAFETY: this core's own scratch area, cleared while servicing a
+        // remote stall so trap exit does not resume the descheduled thread.
         unsafe {
             (*cpu.trap_scratch.get()).user_context = 0;
         }
@@ -517,24 +507,20 @@ pub fn tlb_flush_asid_all_cpus(asid: usize) {
 }
 
 #[inline]
-pub fn current_tcb() -> *mut Tcb {
-    current_cpu().current_tcb.load(Ordering::Acquire) as *mut Tcb
+pub fn current_tcb() -> Option<TcbRef> {
+    // SAFETY: the word only ever holds an address stored from a live
+    // `TcbRef` by `set_current_tcb`.
+    unsafe { ObjRef::from_kva(current_cpu().current_tcb.load(Ordering::Acquire) as u64) }
 }
 
 #[inline]
-pub fn set_current_tcb(tcb: *mut Tcb) -> *mut Tcb {
+pub fn set_current_tcb(tcb: Option<TcbRef>) -> Option<TcbRef> {
     debug_assert_kernel_lock_held();
-    current_cpu()
+    let previous = current_cpu()
         .current_tcb
-        .swap(tcb as usize, Ordering::AcqRel) as *mut Tcb
-}
-
-pub unsafe fn set_current_thread(thread: Thread) {
-    current_cpu().thread.with_mut(|current| *current = thread);
-}
-
-pub unsafe fn with_current_thread<R>(op: impl FnOnce(&mut Thread) -> R) -> R {
-    current_cpu().thread.with_mut(op)
+        .swap(tcb.kva_or_zero() as usize, Ordering::AcqRel);
+    // SAFETY: as `current_tcb`.
+    unsafe { ObjRef::from_kva(previous as u64) }
 }
 
 #[inline]
@@ -551,8 +537,5 @@ pub fn set_next_timer_deadline(deadline: u64) {
 
 pub fn clear_current_state() {
     debug_assert_kernel_lock_held();
-    let cpu = current_cpu();
-    cpu.current_tcb
-        .store(null_mut::<Tcb>() as usize, Ordering::Release);
-    cpu.thread.with_mut(|thread| *thread = Thread::null());
+    current_cpu().current_tcb.store(0, Ordering::Release);
 }

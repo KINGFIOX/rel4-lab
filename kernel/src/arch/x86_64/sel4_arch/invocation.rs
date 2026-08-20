@@ -5,6 +5,10 @@
 //! `TCBSetAffinity`): PDPT, PageDirectory, PageTable, Page, ASID,
 //! IoPort, then IRQControl GetIOAPIC/MSI.
 
+// This module is written entirely in terms of the safe abstractions in
+// `ktypes`; keep it that way.
+#![deny(unsafe_code)]
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u64)]
 pub enum ArchInvocation {

@@ -1,7 +1,6 @@
 //! High-level kernel boot path: set up the rootserver VSpace, initial CSpace,
 //! TCB caps, `seL4_BootInfo`, and then return to the root task.
 
-use core::cell::UnsafeCell;
 use core::ptr;
 
 use log_crate::{info, warn};
@@ -11,7 +10,6 @@ use crate::abi::constants::{
     KERNEL_ELF_BASE, MAX_NUM_BOOTINFO_UNTYPED_CAPS, MAX_NUM_NODES, PT_INDEX_BITS,
     ROOT_CNODE_SIZE_BITS, SEL4_MAX_UNTYPED_BITS, SEL4_MIN_UNTYPED_BITS, SEL4_SLOT_BITS,
 };
-use crate::arch::current::api::UserContext;
 use crate::arch::current::kernel::BOOT_PROFILE;
 use crate::arch::current::kernel::trap::{
     init_timer, install_trap_vector, restore_user_context_with_kernel_lock,
@@ -26,9 +24,11 @@ use crate::arch::current::object::vspace::{
 use crate::arch::current::plat::{DEVICE_UNTYPED_REGIONS, FREE_RAM_REGIONS};
 use crate::arch::current::sel4_arch;
 use crate::kernel::bootmem;
+use crate::ktypes::addr::{Kva, Paddr, UserVa};
+use crate::ktypes::objref::ObjCell;
 use crate::object::cap::{Cap, FRAME_RIGHTS_READ_WRITE, FRAME_SIZE_4K};
-use crate::object::cnode::{Cte, cnode_bytes, install_initial_cap, with_cnode_at};
-use crate::object::tcb::{self, Tcb};
+use crate::object::cnode::{CNode, cnode_at, cnode_bytes, install_initial_cap};
+use crate::object::tcb::{self, Tcb, TcbRef, ThreadState};
 use crate::object::untyped::{FreeRange, UntypedChunks, make_untyped_cap};
 
 /// Where we place the user IPC buffer in the user's virtual address space.
@@ -69,36 +69,16 @@ pub struct BootArgs {
     pub core_id: usize,
 }
 
-/// Static storage for the rootserver thread's TCB. Keep this as transparent
-/// storage rather than wrapping the TCB in a lock; the cap pointer must address
-/// the TCB object itself, while `context_ptr()` returns the embedded
-/// `UserContext` for the trap restore path.
-#[repr(transparent)]
-struct RootTcbCell(UnsafeCell<Tcb>);
-
-unsafe impl Sync for RootTcbCell {}
-
-impl RootTcbCell {
-    const fn new() -> Self {
-        Self(UnsafeCell::new(Tcb::zero()))
-    }
-
-    fn kva(&self) -> u64 {
-        self.0.get() as u64
-    }
-
-    fn with_mut<R>(&self, op: impl FnOnce(&mut Tcb) -> R) -> R {
-        let tcb = unsafe { &mut *self.0.get() };
-        op(tcb)
-    }
-
-    fn context_ptr(&self) -> *mut UserContext {
-        unsafe { &raw mut (*self.0.get()).context }
-    }
-}
-
+/// Static storage for the rootserver thread's TCB. The rootserver is the one
+/// thread the kernel creates itself rather than having user-space retype it,
+/// but it is reached the same way as any other: through a handle.
 #[unsafe(no_mangle)]
-static ROOTSERVER_TCB: RootTcbCell = RootTcbCell::new();
+static ROOTSERVER_TCB: ObjCell<Tcb> = ObjCell::new(Tcb::zero());
+
+/// Handle for the rootserver TCB.
+fn rootserver_tcb() -> TcbRef {
+    ROOTSERVER_TCB.get()
+}
 
 #[derive(Copy, Clone)]
 struct BootUserPageTableCap {
@@ -141,6 +121,9 @@ impl BootUserPaging {
             table = self.ensure_table(table, vaddr, parent_level);
             parent_level -= 1;
         }
+        // SAFETY: `table` came from `ensure_table`, which returns either the
+        // root this builder was constructed with or a page freshly allocated
+        // from the boot pool, and nothing else refers to it.
         let slot = unsafe { &mut (*table).entries[pt_index(vaddr, 0)] };
         assert!(
             !slot.is_valid(),
@@ -158,6 +141,8 @@ impl BootUserPaging {
         vaddr: usize,
         parent_level: usize,
     ) -> *mut PageTable {
+        // SAFETY: as `map_4k` — `parent` is a live boot-pool page table and
+        // this builder is the only thing writing it.
         let slot = unsafe { &mut (*parent).entries[pt_index(vaddr, parent_level)] };
         if slot.is_valid() {
             assert!(
@@ -165,11 +150,11 @@ impl BootUserPaging {
                 "boot user mapping collided with a leaf at level {}",
                 parent_level
             );
-            return paddr_to_kpptr(slot.next_pt_paddr() as usize) as *mut PageTable;
+            return paddr_to_kpptr(Paddr::from_u64(slot.next_pt_paddr())).as_ptr();
         }
 
         let child = alloc_pt_page();
-        *slot = Pte::next(kpptr_to_paddr(child as usize) as u64);
+        *slot = Pte::next(kpptr_to_paddr(Kva::new(child as usize)).as_u64());
         let child_level = parent_level - 1;
         self.record_cap(
             child,
@@ -205,11 +190,6 @@ const fn table_coverage_bits(level: usize) -> usize {
 fn align_down(value: usize, bits: usize) -> usize {
     value & !((1usize << bits) - 1)
 }
-
-const _: () = {
-    assert!(core::mem::size_of::<RootTcbCell>() == core::mem::size_of::<Tcb>());
-    assert!(core::mem::align_of::<RootTcbCell>() == core::mem::align_of::<Tcb>());
-};
 
 /// Translate a kernel VA (either the kernel-ELF window or the PSpace
 /// window) back to its physical address. Caps minted from RAM untypeds
@@ -247,6 +227,8 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     let root_pt = make_boot_root_pt();
     let vspace_root = vspace_root_for(root_pt, ROOTSERVER_ASID as u64);
     crate::kernel::smp::publish_kernel_vspace(vspace_root);
+    // SAFETY: `vspace_root` was just composed from the boot root page table,
+    // which maps the kernel image and the PSpace window the kernel runs from.
     unsafe { switch_vspace(vspace_root) };
     crate::machine::console::init();
     crate::arch::current::machine::irq::init();
@@ -266,7 +248,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     info!(
         "  root PT at VA {:#x} PA {:#x}",
         root_pt as usize,
-        kpptr_to_paddr(root_pt as usize),
+        kpptr_to_paddr(Kva::new(root_pt as usize)).raw(),
     );
     info!("  vspace root <- {:#x}", vspace_root);
 
@@ -284,14 +266,16 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
 
     // Allocate + map BootInfo, IPC buffer, user stack.
     let bi_kva = bootmem::alloc_page();
-    let bi_pa = kpptr_to_paddr(bi_kva);
+    let bi_pa = kpptr_to_paddr(Kva::new(bi_kva)).raw();
     boot_user_paging.map_4k(USER_BOOTINFO_VA, bi_pa, user_flags(true, true, false));
 
     #[cfg(target_arch = "x86_64")]
     {
         let extra_bi_kva = bootmem::alloc_page();
-        let extra_bi_pa = kpptr_to_paddr(extra_bi_kva);
+        let extra_bi_pa = kpptr_to_paddr(Kva::new(extra_bi_kva)).raw();
         boot_user_paging.map_4k(USER_EXTRA_BI_VA, extra_bi_pa, user_flags(true, true, false));
+        // SAFETY: the boot pool just handed out this page exclusively, and the
+        // extra-bootinfo header fits well inside it.
         unsafe {
             ptr::write_bytes(extra_bi_kva as *mut u8, 0, PAGE_SIZE);
             let header = extra_bi_kva as *mut u64;
@@ -302,17 +286,19 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     }
 
     let ipc_kva = bootmem::alloc_page();
-    let ipc_pa = kpptr_to_paddr(ipc_kva);
+    let ipc_pa = kpptr_to_paddr(Kva::new(ipc_kva)).raw();
     boot_user_paging.map_4k(USER_IPC_BUFFER_VA, ipc_pa, user_flags(true, true, false));
 
     for i in 0..USER_STACK_PAGES {
         let kva = bootmem::alloc_page();
-        let pa = kpptr_to_paddr(kva);
+        let pa = kpptr_to_paddr(Kva::new(kva)).raw();
         let va = USER_STACK_TOP - (i + 1) * PAGE_SIZE;
         boot_user_paging.map_4k(va, pa, user_flags(true, true, false));
     }
 
     let asid_pool_kva = bootmem::alloc_page();
+    // SAFETY: a freshly allocated boot page, used here as the rootserver's
+    // ASID pool; the index is within one page of entries.
     unsafe {
         let asid_pool = asid_pool_kva as *mut u64;
         *asid_pool.add(crate::object::asid::pool_index(ROOTSERVER_ASID)) = root_pt as u64;
@@ -327,6 +313,10 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     let cnode_base = bootmem::alloc_pages(cnode_pages);
     let cnode_kva = cnode_base as u64;
     let cnode_slots = 1usize << ROOT_CNODE_SIZE_BITS;
+    // SAFETY: the boot pool just handed out enough zeroed, page-aligned pages
+    // to hold this many slots, and nothing else refers to that memory.
+    let root_cnode =
+        unsafe { cnode_at(cnode_kva, ROOT_CNODE_SIZE_BITS) }.expect("root CNode allocation failed");
 
     struct RootCnodeInit {
         next_slot: usize,
@@ -343,14 +333,14 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         untyped_list_local: [UntypedDesc; MAX_NUM_BOOTINFO_UNTYPED_CAPS],
     }
 
-    let init_root_cnode = |cnode: &mut [Cte]| -> RootCnodeInit {
+    let init_root_cnode = |cnode: CNode| -> RootCnodeInit {
         // Install the fixed initial caps that libsel4 expects at known slots.
         // Platform-specific caps that do not exist on this RISC-V profile are
         // left null, matching the root CNode slot numbering.
         install_initial_cap(
             cnode,
             RootCNodeCapSlot::InitThreadTcb.index(),
-            Cap::new_thread(ROOTSERVER_TCB.kva()),
+            Cap::new_thread(rootserver_tcb().kva()),
         );
         install_initial_cap(
             cnode,
@@ -425,32 +415,17 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         init_ipc_buffer_tcb_cap.set_frame_mapped_addr(0);
         init_ipc_buffer_tcb_cap.set_frame_mapped_asid(0);
         {
-            let ctable_src = &mut cnode[RootCNodeCapSlot::InitThreadCNode.index()] as *mut Cte;
-            let vtable_src = &mut cnode[RootCNodeCapSlot::InitThreadVSpace.index()] as *mut Cte;
-            let buffer_src = &mut cnode[RootCNodeCapSlot::InitThreadIpcBuffer.index()] as *mut Cte;
-            let cspace_guard = crate::object::cnode::lock_cspace();
-            ROOTSERVER_TCB.with_mut(|rs| unsafe {
-                let rs_ptr = rs as *mut Tcb;
-                crate::object::cnode::cte_insert_locked(
-                    &cspace_guard,
-                    (*ctable_src).cap,
-                    ctable_src,
-                    tcb::cap_slot(rs_ptr, tcb::TCB_CTABLE_SLOT),
-                );
-                crate::object::cnode::cte_insert_locked(
-                    &cspace_guard,
-                    (*vtable_src).cap,
-                    vtable_src,
-                    tcb::cap_slot(rs_ptr, tcb::TCB_VTABLE_SLOT),
-                );
-                crate::object::cnode::cte_insert_locked(
-                    &cspace_guard,
-                    init_ipc_buffer_tcb_cap,
-                    buffer_src,
-                    tcb::cap_slot(rs_ptr, tcb::TCB_BUFFER_SLOT),
-                );
-                crate::object::reply::setup_reply_master(rs_ptr);
-            });
+            let rootserver = rootserver_tcb();
+            let slot = |index: usize| cnode.get(index).expect("initial cap slot in range");
+            let tcb_slot =
+                |index: usize| rootserver.cap_slot(index).expect("TCB cap slot in range");
+            let ctable_src = slot(RootCNodeCapSlot::InitThreadCNode.index());
+            let vtable_src = slot(RootCNodeCapSlot::InitThreadVSpace.index());
+            let buffer_src = slot(RootCNodeCapSlot::InitThreadIpcBuffer.index());
+            ctable_src.cte_insert(ctable_src.cap(), tcb_slot(tcb::TCB_CTABLE_SLOT));
+            vtable_src.cte_insert(vtable_src.cap(), tcb_slot(tcb::TCB_VTABLE_SLOT));
+            buffer_src.cte_insert(init_ipc_buffer_tcb_cap, tcb_slot(tcb::TCB_BUFFER_SLOT));
+            crate::object::reply::setup_reply_master(rootserver);
         }
         let mut next_slot = RootCNodeCapSlot::NumInitialCaps.index();
 
@@ -585,7 +560,7 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         init_ipc_buffer_tcb_cap,
         bi_untyped_count,
         untyped_list_local,
-    } = unsafe { with_cnode_at(cnode_base as *mut u8, ROOT_CNODE_SIZE_BITS, init_root_cnode) };
+    } = init_root_cnode(root_cnode);
 
     info!(
         "  user image paging: slots {}..{} ({} caps)",
@@ -614,28 +589,16 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         cnode_slots - next_slot,
     );
 
-    // --- Register rootserver thread state for syscall path ---------------
-    let cnode_cap_for_thread = Cap::new_cnode(
-        cnode_kva,
-        ROOT_CNODE_SIZE_BITS as u64,
-        0,
-        64 - ROOT_CNODE_SIZE_BITS as u64,
-    );
-    crate::api::thread::install_rootserver(
-        cnode_base as *mut crate::object::cnode::Cte,
-        ROOT_CNODE_SIZE_BITS as u32,
-        cnode_cap_for_thread,
-        init_ipc_buffer_tcb_cap.frame_base_ptr() as *mut u64,
-        USER_IPC_BUFFER_VA as u64,
-        root_pt as u64,
-    );
-    ROOTSERVER_TCB.with_mut(|rs| {
-        rs.ipc_buffer_uva = USER_IPC_BUFFER_VA as u64;
-        rs.ipc_buffer_kva = init_ipc_buffer_tcb_cap.frame_base_ptr();
-    });
+    // --- Register rootserver thread state for the syscall path ------------
+    //
+    // Cap lookups and IPC-buffer access follow the current TCB's own slots, so
+    // the only thing left to record is where its IPC buffer lives.
+    rootserver_tcb().set_ipc_buffer(UserVa::new(USER_IPC_BUFFER_VA), init_ipc_buffer_tcb_cap);
 
     // --- Populate BootInfo -----------------------------------------------
     let bi = bi_kva as *mut BootInfo;
+    // SAFETY: `bi_kva` is a boot page mapped for the rootserver, exclusively
+    // owned here, and `BootInfo` fits in one page.
     unsafe {
         ptr::write_bytes(bi as *mut u8, 0, core::mem::size_of::<BootInfo>());
         #[cfg(target_arch = "x86_64")]
@@ -680,32 +643,33 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
     );
 
     // --- Switch to user mode ---------------------------------------------
-    let t = ROOTSERVER_TCB.with_mut(|t| {
+    let rootserver = rootserver_tcb();
+    rootserver.with_context_mut(|context| {
         sel4_arch::init_rootserver_context(
-            &mut t.context,
+            context,
             args.user_ventry as u64,
             USER_STACK_TOP as u64,
             USER_BOOTINFO_VA as u64,
         );
-        t.affinity = crate::kernel::smp::current_core_id() as u8;
-        t.state = crate::object::tcb::ThreadState::Running as u8;
-        t as *mut Tcb
     });
-    tcb::set_current(t);
-    crate::arch::current::machine::fpu::lazy_restore(t);
-    // Seed the scheduler's runqueue with the rootserver, so
-    // `schedule()` always has a runnable TCB to return.
-    unsafe {
-        tcb::enqueue(t);
-    }
+    rootserver.set_initial_affinity(crate::kernel::smp::current_core_id() as u8);
+    rootserver.set_state(ThreadState::Running);
+    tcb::set_current(Some(rootserver));
+    crate::arch::current::machine::fpu::lazy_restore(rootserver);
+    // Seed the scheduler's runqueue with the rootserver, so `schedule()`
+    // always has a runnable TCB to return.
+    rootserver.enqueue();
     log_arch_restore_state(root_pt, args.user_ventry, USER_BOOTINFO_VA, USER_STACK_TOP);
     info!("  entering user mode at {:#x}", args.user_ventry);
     info!("  --- transferring control to rootserver ---");
     crate::arch::current::kernel::start_application_processors();
     let kernel_lock = crate::kernel::smp::KernelLockGuard::lock();
     crate::kernel::smp::release_secondary_cpus();
+    // SAFETY: the rootserver's context has been fully initialised above, its
+    // VSpace is installed, and the kernel lock is handed over to the restore
+    // path which releases it as it returns to user mode.
     unsafe {
-        restore_user_context_with_kernel_lock(ROOTSERVER_TCB.context_ptr(), kernel_lock);
+        restore_user_context_with_kernel_lock(rootserver.context_ptr(), kernel_lock);
     }
 }
 
@@ -738,7 +702,7 @@ fn map_range_4k_identity_from_elfloader(
 }
 
 fn install_boot_user_paging_caps(
-    cnode: &mut [Cte],
+    cnode: CNode,
     paging: &BootUserPaging,
     next_slot: &mut usize,
 ) -> (usize, usize) {

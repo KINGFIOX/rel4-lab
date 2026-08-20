@@ -5,11 +5,11 @@
 //! always clears TS so compiler-generated SSE in the kernel cannot #NM.
 
 use core::arch::asm;
-use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::abi::constants::MAX_NUM_NODES;
-use crate::object::tcb::{self, Tcb};
+use crate::ktypes::objref::{ObjRef, OptObjRefExt};
+use crate::object::tcb::TcbRef;
 
 const CR0_TS: usize = 1 << 3;
 
@@ -24,6 +24,7 @@ fn core_index() -> usize {
 
 #[inline]
 fn clts() {
+    // SAFETY: clearing `CR0.TS` only re-enables FPU access for this core.
     unsafe {
         asm!("clts", options(nostack, nomem, preserves_flags));
     }
@@ -31,6 +32,7 @@ fn clts() {
 
 #[inline]
 fn set_ts() {
+    // SAFETY: setting `CR0.TS` only makes the next FPU use trap.
     unsafe {
         asm!(
             "mov {cr0}, cr0",
@@ -43,34 +45,36 @@ fn set_ts() {
     }
 }
 
-unsafe fn save_fpu_state(thread: *mut Tcb) {
-    if thread.is_null() {
-        return;
-    }
-    let dest = unsafe { (*thread).context.fpu.fxsave.as_mut_ptr() };
-    clts();
-    unsafe {
-        asm!(
-            "fxsave64 [{0}]",
-            in(reg) dest,
-            options(nostack, preserves_flags),
-        );
-    }
+fn save_fpu_state(thread: TcbRef) {
+    thread.with_context_mut(|context| {
+        let dest = context.fpu.fxsave.as_mut_ptr();
+        clts();
+        // SAFETY: `dest` is the thread's own 16-byte-aligned FXSAVE area,
+        // borrowed for the duration of the instruction.
+        unsafe {
+            asm!(
+                "fxsave64 [{0}]",
+                in(reg) dest,
+                options(nostack, preserves_flags),
+            );
+        }
+    });
 }
 
-unsafe fn load_fpu_state(thread: *mut Tcb) {
-    if thread.is_null() {
-        return;
-    }
-    let src = unsafe { (*thread).context.fpu.fxsave.as_ptr() };
-    clts();
-    unsafe {
-        asm!(
-            "fxrstor64 [{0}]",
-            in(reg) src,
-            options(nostack, preserves_flags),
-        );
-    }
+fn load_fpu_state(thread: TcbRef) {
+    thread.with_context(|context| {
+        let src = context.fpu.fxsave.as_ptr();
+        clts();
+        // SAFETY: `src` is the thread's own FXSAVE area, holding state this
+        // kernel previously saved there.
+        unsafe {
+            asm!(
+                "fxrstor64 [{0}]",
+                in(reg) src,
+                options(nostack, preserves_flags),
+            );
+        }
+    });
 }
 
 pub fn init_current_core() {
@@ -102,68 +106,66 @@ fn access_enabled() -> bool {
 }
 
 #[inline]
-fn current_owner() -> *mut Tcb {
-    FPU_OWNER[core_index()].load(Ordering::Acquire) as *mut Tcb
+fn current_owner() -> Option<TcbRef> {
+    owner_of_core(core_index())
 }
 
-fn owner_core(thread: *const Tcb) -> Option<usize> {
-    if thread.is_null() {
-        return None;
-    }
-    let target = thread as usize;
-    let mut core = 0;
-    while core < MAX_NUM_NODES {
-        if FPU_OWNER[core].load(Ordering::Acquire) == target {
-            return Some(core);
-        }
-        core += 1;
-    }
-    None
+/// The thread whose FPU state is loaded on `core`, if any.
+#[inline]
+fn owner_of_core(core: usize) -> Option<TcbRef> {
+    // SAFETY: the word only ever holds an address stored from a live `TcbRef`
+    // by `switch_local_owner`.
+    unsafe { ObjRef::from_kva(FPU_OWNER[core].load(Ordering::Acquire) as u64) }
 }
 
-unsafe fn switch_local_owner(new_owner: *mut Tcb) {
+/// Which core, if any, currently holds `thread`'s FPU state.
+fn owner_core(thread: TcbRef) -> Option<usize> {
+    (0..MAX_NUM_NODES).find(|&core| owner_of_core(core) == Some(thread))
+}
+
+fn switch_local_owner(new_owner: Option<TcbRef>) {
     let core = core_index();
-    let old_owner = FPU_OWNER[core].load(Ordering::Acquire) as *mut Tcb;
+    let old_owner = current_owner();
     enable_access();
-    if !old_owner.is_null() {
-        unsafe { save_fpu_state(old_owner) };
+    if let Some(old_owner) = old_owner {
+        save_fpu_state(old_owner);
     }
-    if new_owner.is_null() {
-        disable_access();
-    } else {
-        unsafe { load_fpu_state(new_owner) };
-        unsafe { tcb::set_fpu_context_enabled(new_owner, access_enabled()) };
+    match new_owner {
+        None => disable_access(),
+        Some(new_owner) => {
+            load_fpu_state(new_owner);
+            new_owner.set_fpu_context_enabled(access_enabled());
+        }
     }
-    FPU_OWNER[core].store(new_owner as usize, Ordering::Release);
+    FPU_OWNER[core].store(new_owner.kva_or_zero() as usize, Ordering::Release);
 }
 
-pub fn lazy_restore(thread: *mut Tcb) {
-    if thread.is_null() {
-        return;
-    }
-    if tcb::fpu_disabled_snapshot(thread) {
+pub fn lazy_restore(thread: TcbRef) {
+    if thread.fpu_disabled() {
         disable_access();
-        unsafe { tcb::set_fpu_context_enabled(thread, false) };
+        thread.set_fpu_context_enabled(false);
         return;
     }
 
-    if current_owner() == thread {
+    if current_owner() == Some(thread) {
         enable_access();
-        unsafe { tcb::set_fpu_context_enabled(thread, access_enabled()) };
+        thread.set_fpu_context_enabled(access_enabled());
     } else {
-        unsafe { switch_local_owner(thread) };
+        switch_local_owner(Some(thread));
     }
 }
 
-pub fn handle_device_not_available(thread: *mut Tcb) -> bool {
-    if thread.is_null() || tcb::fpu_disabled_snapshot(thread) {
+/// A `#NM` means the thread touched the FPU while `CR0.TS` was set. Load its
+/// state and let it retry, unless FPU use is disabled for it.
+pub fn handle_device_not_available(thread: Option<TcbRef>) -> bool {
+    let Some(thread) = thread.filter(|thread| !thread.fpu_disabled()) else {
         return false;
-    }
+    };
     lazy_restore(thread);
     true
 }
 
-pub fn release(thread: *mut Tcb) {
+pub fn release(thread: TcbRef) {
     let Some(core) = owner_core(thread) else {
         return;
     };
@@ -174,9 +176,9 @@ pub fn release(thread: *mut Tcb) {
     }
 }
 
-pub fn release_on_current_core(thread: *mut Tcb) {
-    if thread.is_null() || current_owner() != thread {
+pub fn release_on_current_core(thread: TcbRef) {
+    if current_owner() != Some(thread) {
         return;
     }
-    unsafe { switch_local_owner(null_mut()) };
+    switch_local_owner(None);
 }

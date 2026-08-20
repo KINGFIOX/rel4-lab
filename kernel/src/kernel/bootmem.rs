@@ -27,9 +27,13 @@ impl BootPool {
         let bytes = n.checked_mul(PAGE_SIZE).expect("boot pool size overflow");
         let end = self.next.checked_add(bytes).expect("boot pool exhausted");
         assert!(end <= BOOT_POOL_PAGES * PAGE_SIZE, "boot pool exhausted");
+        // SAFETY: the assertion above proved `next + bytes` is within the
+        // pool, so the offset stays in bounds of one allocation.
         let base = unsafe { self.bytes.as_mut_ptr().add(self.next) };
         self.next = end;
         // Zero the range we just claimed.
+        // SAFETY: `base..base + bytes` is the range just reserved from the
+        // pool, and nothing else refers to it yet.
         unsafe { core::ptr::write_bytes(base, 0, bytes) };
         base as usize
     }

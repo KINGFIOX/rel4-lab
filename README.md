@@ -5,11 +5,6 @@ x86_64 QEMU `pc`, plus a user-space Linux compatibility stack built on a
 seL4-like capability ABI. x86 gates are hello-rootserver, a narrow unicore
 sel4test slice, and `ARCH=x86_64 ./tools/run-ltp.py`.
 
-The current rel4 scope intentionally keeps the scheduler simpler than upstream
-seL4 MCS: there are no `SchedContext`/`SchedControl` objects, dispatch is
-unprioritised round-robin, priority values are accepted only as compatibility
-metadata, and all domain values collapse into one effective scheduling domain.
-
 There is no timeslice, quantum, or budget accounting, and no priority-driven
 preemption. Kernel exit does, however, perform an unconditional round-robin
 rotation for every trap cause, so a timer interrupt can involuntarily switch
@@ -131,12 +126,6 @@ Success lines are `hello-rootserver: ok`, `Test suite passed.`, and
 `ltp-wave1: ok`. x86 pack defaults to `SMP=OFF`, `NUM_NODES=1`,
 `Sel4testHaveTimer=ON`, and a narrow POSIX regex covering CNode, IPC, and
 `TIMER0001`.
-
-The unmodified upstream `sel4test-driver` still assumes seL4's MCS
-`SchedContext`/`SchedControl` ABI. After the rel4 no-MCS rollback, successful
-image packing is useful, but upstream sel4test runs are not the default
-correctness signal unless the selected slice avoids the removed scheduler
-surface or the rootserver is adjusted.
 
 ## Run linux-compat / LTP
 
