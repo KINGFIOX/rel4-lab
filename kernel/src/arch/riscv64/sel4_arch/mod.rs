@@ -8,7 +8,7 @@ pub mod object_type;
 pub use crate::arch::riscv64::kernel::trap::{
     ROOTSERVER_SSTATUS, SEL4_TCB_FRAME_REGS, SEL4_TCB_GP_REGS, SEL4_USER_CONTEXT_ABI_WORDS,
     SEL4_USER_CONTEXT_REGS, SEL4_USER_CONTEXT_WORDS, SSTATUS_FS_CLEAN, SSTATUS_FS_MASK,
-    USER_SSTATUS, UserContext, UserRegister,
+    SSTATUS_SPIE, SSTATUS_SPP, USER_SSTATUS, UserContext, UserRegister,
 };
 pub use object_type::ObjectType;
 
@@ -134,6 +134,29 @@ pub fn init_rootserver_context(context: &mut UserContext, entry: u64, stack: u64
     context.set_cap_reg(bootinfo);
     context.set_msg_info(0);
     context.set_stack_reg(stack);
+}
+
+/// Fill an idle TCB as non-MCS seL4 `Arch_configureIdleThread` does: NextIP
+/// is `idle_thread`, S-mode with interrupts enabled on `sret`, SP is the
+/// kernel stack. The trap path does not restore this context today.
+pub fn configure_idle_context(context: &mut UserContext, kernel_sp: u64) {
+    let pc = idle_thread as *const () as usize as u64;
+    context.pc = pc;
+    context.restart_pc = pc;
+    context.sstatus = SSTATUS_SPP | SSTATUS_SPIE;
+    context.set_stack_reg(kernel_sp);
+}
+
+/// seL4 RISC-V `idle_thread`: wait for an interrupt. Stored as the idle
+/// TCB program counter; the current kernel waits in `idle_scheduler_loop`
+/// instead of `sret`ing here.
+#[unsafe(no_mangle)]
+pub extern "C" fn idle_thread() -> ! {
+    loop {
+        unsafe {
+            core::arch::asm!("wfi", options(nomem, nostack));
+        }
+    }
 }
 
 pub fn apply_written_pc(context: &mut UserContext, pc: u64) {

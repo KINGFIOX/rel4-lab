@@ -257,6 +257,8 @@ pub fn bringup_rootserver(args: &BootArgs) -> ! {
         args.cpu_id, args.core_id, args.dtb_pa, args.dtb_size
     );
     info!("microkernel: bringing up rootserver");
+    tcb::create_idle_threads();
+    tcb::switch_to_idle_thread();
     info!(
         "  user image: PA [{:#x}, {:#x}) VA offset={:#x} entry={:#x}",
         args.user_pstart, args.user_pend, args.pv_offset, args.user_ventry,

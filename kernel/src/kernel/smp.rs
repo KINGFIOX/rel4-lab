@@ -322,6 +322,9 @@ pub fn wake_current_core_of_tcb(tcb: *const Tcb) {
 
 pub fn remote_tcb_stall(tcb: *const Tcb) {
     debug_assert_kernel_lock_held();
+    if crate::object::tcb::is_idle_thread(tcb) {
+        return;
+    }
     let Some(core) = current_core_of_tcb(tcb) else {
         return;
     };
@@ -444,8 +447,7 @@ pub(crate) fn service_pending_remote_core_op() -> RemoteCoreOpResult {
     let cpu = current_cpu();
     let stalled_current = target != 0 && cpu.current_tcb.load(Ordering::Acquire) == target;
     if stalled_current {
-        cpu.current_tcb
-            .store(null_mut::<Tcb>() as usize, Ordering::Release);
+        crate::object::tcb::switch_to_idle_thread();
         unsafe {
             (*cpu.trap_scratch.get()).user_context = 0;
         }

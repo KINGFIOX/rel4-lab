@@ -34,7 +34,11 @@ const RSP: usize = 16;
 const FAULT_IP: usize = 17;
 const R11: usize = 18;
 const RCX: usize = 19;
+const CS: usize = 20;
+const SS: usize = 21;
 const FS_BASE: usize = 22;
+const KERNEL_CS: u64 = 0x08;
+const KERNEL_DS: u64 = 0x10;
 
 /// User-visible TCB register ABI indices for Read/WriteRegisters.
 /// Order matches seL4 `frameRegisters[]` then `gpRegisters[]` /
@@ -300,6 +304,33 @@ pub fn init_rootserver_context(context: &mut UserContext, entry: u64, stack: u64
     context.set_cap_reg(bootinfo);
     context.set_msg_info(0);
     context.set_stack_reg(stack);
+}
+
+/// Fill an idle TCB as non-MCS seL4 `Arch_configureIdleThread` does: kernel
+/// CS/SS, `FLAGS_USER_DEFAULT`, NextIP `idle_thread`, RSP 0. The trap path
+/// does not restore this context today.
+pub fn configure_idle_context(context: &mut UserContext, _kernel_sp: u64) {
+    let pc = idle_thread as *const () as usize as u64;
+    context.pc = pc;
+    context.restart_pc = pc;
+    context.regs[NEXT_IP] = pc;
+    context.regs[FAULT_IP] = pc;
+    context.regs[FLAGS] = 0x202;
+    context.regs[CS] = KERNEL_CS;
+    context.regs[SS] = KERNEL_DS;
+    context.regs[RSP] = 0;
+}
+
+/// seL4 x86 `idle_thread`: halt until an interrupt. Stored as the idle TCB
+/// program counter; the current kernel waits in `idle_scheduler_loop`
+/// instead of `iret`ing here.
+#[unsafe(no_mangle)]
+pub extern "C" fn idle_thread() -> ! {
+    loop {
+        unsafe {
+            core::arch::asm!("hlt", options(nomem, nostack));
+        }
+    }
 }
 
 pub fn set_fpu_context_enabled(_context: &mut UserContext, _enabled: bool) {}

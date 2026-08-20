@@ -7,16 +7,21 @@
 //!
 //! The scheduler is deliberately small: runnable TCBs live in one FIFO
 //! round-robin queue per core, and affinity selects the queue a TCB can run on.
-//! A temporary big kernel lock still serialises most shared kernel state while
-//! the SMP path matures.
+//! Each core also has a static idle TCB, matching seL4 `ksIdleThread`. Idle is
+//! never enqueued; an empty runqueue switches `current` to that core's idle
+//! TCB and waits in kernel mode. A temporary big kernel lock still serialises
+//! most shared kernel state while the SMP path matures.
 //!
 //! Layout-load: every field must fit comfortably inside the 2 KiB slab
 //! the C kernel allocates, so the future C/Rust ABI swap stays valid.
 
 #![allow(dead_code)]
 
+use core::cell::UnsafeCell;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+use log_crate::info;
 
 use crate::abi::constants::MAX_NUM_NODES;
 use crate::arch::current::api::UserContext;
@@ -34,11 +39,16 @@ pub fn current() -> *mut Tcb {
 /// Replace the local core's current TCB. Returns the previous pointer. Also
 /// refreshes the legacy `api::thread` syscall view so cap lookups and IPC
 /// accesses in the syscall slow path follow whichever TCB the scheduler last
-/// picked.
+/// picked. Switching to idle (or null) clears that view so a previous
+/// user CSpace cannot leak into the idle core.
 #[inline]
 pub fn set_current(tcb: *mut Tcb) -> *mut Tcb {
     let prev = crate::kernel::smp::set_current_tcb(tcb);
-    unsafe { crate::api::thread::refresh_from_tcb(tcb) };
+    if tcb.is_null() || is_idle_thread(tcb) {
+        unsafe { crate::api::thread::set_current(crate::api::thread::Thread::null()) };
+    } else {
+        unsafe { crate::api::thread::refresh_from_tcb(tcb) };
+    }
     prev
 }
 
@@ -58,6 +68,85 @@ pub(crate) fn take_continue_current_once(tcb: *mut Tcb) -> bool {
     CONTINUE_CURRENT_ONCE[core]
         .compare_exchange(tcb as usize, 0, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
+}
+
+#[repr(transparent)]
+struct IdleTcbCell(UnsafeCell<Tcb>);
+
+unsafe impl Sync for IdleTcbCell {}
+
+impl IdleTcbCell {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(Tcb::zero()))
+    }
+
+    fn as_ptr(&self) -> *mut Tcb {
+        self.0.get()
+    }
+}
+
+/// Per-core idle TCBs. Matches seL4 `ksIdleThreadTCB[CONFIG_MAX_NUM_NODES]`.
+static IDLE_TCBS: [IdleTcbCell; MAX_NUM_NODES] = [const { IdleTcbCell::new() }; MAX_NUM_NODES];
+
+/// Idle TCB for `core`, or null if `core` is out of range.
+#[inline]
+pub fn idle_thread_of(core: usize) -> *mut Tcb {
+    if core >= MAX_NUM_NODES {
+        return null_mut();
+    }
+    IDLE_TCBS[core].as_ptr()
+}
+
+/// True if `tcb` is one of the static per-core idle threads.
+#[inline]
+pub fn is_idle_thread(tcb: *const Tcb) -> bool {
+    if tcb.is_null() {
+        return false;
+    }
+    let mut core = 0;
+    while core < MAX_NUM_NODES {
+        if idle_thread_of(core) as *const Tcb == tcb {
+            return true;
+        }
+        core += 1;
+    }
+    false
+}
+
+/// Make this core's idle TCB current. Idle is never placed on a runqueue and
+/// must not be restored through `sret`/`sysret`; the trap path waits in
+/// kernel mode instead.
+pub fn switch_to_idle_thread() -> *mut Tcb {
+    let idle = idle_thread_of(crate::kernel::smp::current_core_id());
+    debug_assert!(!idle.is_null());
+    set_current(idle);
+    idle
+}
+
+/// Initialise every core's idle TCB. Called once on the boot core before
+/// application processors start and before the rootserver runs.
+pub fn create_idle_threads() {
+    let mut core = 0;
+    while core < MAX_NUM_NODES {
+        configure_idle_thread(idle_thread_of(core), core);
+        core += 1;
+    }
+    info!("microkernel: created {} idle thread(s)", MAX_NUM_NODES);
+}
+
+fn configure_idle_thread(tcb: *mut Tcb, core: usize) {
+    debug_assert!(!tcb.is_null());
+    let kernel_sp = crate::kernel::smp::kernel_stack_top_for_core(core) as u64;
+    // Exclusive boot-time write: SMP has not started and no other core
+    // can observe these TCBs yet.
+    unsafe {
+        (*tcb).state = ThreadState::Idle as u8;
+        (*tcb).affinity = core as u8;
+        (*tcb).flags = TCB_FLAG_FPU_DISABLED;
+        let name = b"idle_thread";
+        (&mut (*tcb).name)[..name.len()].copy_from_slice(name);
+        sel4_arch::configure_idle_context(&mut (*tcb).context, kernel_sp);
+    }
 }
 
 // ---- Ready-queue runqueues ------------------------------------------------
@@ -1326,7 +1415,7 @@ unsafe fn enqueue_tail_locked(q: &mut Queue, tcb: *mut Tcb) -> bool {
 /// Add `tcb` to the tail of its core's round-robin queue. No-op if already
 /// linked (i.e. `queue_next` or `queue_prev` non-zero, or queue head is `tcb`).
 pub unsafe fn enqueue(tcb: *mut Tcb) {
-    if tcb.is_null() {
+    if tcb.is_null() || is_idle_thread(tcb) {
         return;
     }
     let snapshot = runqueue_snapshot(tcb);
@@ -1382,7 +1471,7 @@ unsafe fn unlink_from_ready_queue(q: &mut Queue, tcb: *mut Tcb) -> bool {
 
 /// Move `tcb` to the tail of its core round-robin queue.
 pub unsafe fn rotate_to_tail(tcb: *mut Tcb) {
-    if tcb.is_null() {
+    if tcb.is_null() || is_idle_thread(tcb) {
         return;
     }
     let snapshot = runqueue_snapshot(tcb);
@@ -1457,7 +1546,7 @@ unsafe fn sched_snapshot(tcb: *const Tcb) -> (u8, u8) {
 /// another core, publish it on that target core's runqueue before this core
 /// schedules something else.
 pub unsafe fn enqueue_if_migrated_from_current_core(tcb: *mut Tcb) {
-    if tcb.is_null() {
+    if tcb.is_null() || is_idle_thread(tcb) {
         return;
     }
     let (state, affinity) = unsafe { sched_snapshot(tcb) };
@@ -1661,7 +1750,7 @@ unsafe fn unlink_from_wait_object(tcb: *mut Tcb) {
 /// and update the per-core ready queue accordingly. The actual CPU swap
 /// happens at the next `kernel_exit()` boundary (top of `restore_user_context`).
 pub unsafe fn suspend(tcb: *mut Tcb) {
-    if tcb.is_null() {
+    if tcb.is_null() || is_idle_thread(tcb) {
         return;
     }
     unsafe {
@@ -1681,7 +1770,7 @@ pub unsafe fn suspend(tcb: *mut Tcb) {
 }
 
 pub unsafe fn resume(tcb: *mut Tcb) {
-    if tcb.is_null() {
+    if tcb.is_null() || is_idle_thread(tcb) {
         return;
     }
     let state = unsafe {
@@ -1709,7 +1798,7 @@ pub unsafe fn resume(tcb: *mut Tcb) {
 }
 
 pub unsafe fn set_affinity(tcb: *mut Tcb, affinity: u8) {
-    if tcb.is_null() {
+    if tcb.is_null() || is_idle_thread(tcb) {
         return;
     }
     unsafe {

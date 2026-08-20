@@ -203,6 +203,7 @@ pub const SEL4_USER_CONTEXT_REGS: [usize; SEL4_USER_CONTEXT_WORDS] = [
 ];
 
 pub const SSTATUS_SPIE: u64 = 1 << 5;
+pub const SSTATUS_SPP: u64 = 1 << 8;
 pub const SSTATUS_FS_MASK: u64 = 0b11 << 13;
 pub const SSTATUS_FS_CLEAN: u64 = 0b10 << 13;
 pub const SSTATUS_SUM: u64 = 1 << 18;
@@ -735,7 +736,9 @@ pub fn idle_scheduler_loop() -> ! {
             let _ = service_due_timer_interrupts();
             let next = crate::object::tcb::schedule();
             if next.is_null() {
-                crate::kernel::smp::clear_current_state();
+                if !crate::object::tcb::is_idle_thread(crate::object::tcb::current()) {
+                    crate::object::tcb::switch_to_idle_thread();
+                }
                 switch_to_kernel_vspace();
                 program_next_timer();
                 None
@@ -824,11 +827,9 @@ unsafe fn switch_to_tcb_vspace(tcb: *const crate::object::tcb::Tcb) {
 ///    runnable (state != Running) — every thread is blocked. We
 ///    cannot sret back into the blocked TCB (its caller saw the
 ///    syscall complete and would resume past it as if it returned
-///    a no-op reply). Spin in S-mode WFI until something becomes
-///    runnable. With no interrupts wired yet this is functionally
-///    a deadlock guard: the test runner's `TIMEOUT` will catch a
-///    real deadlock instead of silently corrupting a blocked TCB's
-///    user-mode state.
+///    a no-op reply). Switch `current` to this core's idle TCB and
+///    wait in S-mode WFI until something becomes runnable. Idle
+///    context is not restored through `sret`.
 #[inline]
 fn kernel_exit(
     uc: &mut UserContext,
@@ -883,7 +884,9 @@ fn kernel_exit(
             return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
         }
 
-        crate::kernel::smp::clear_current_state();
+        if !tcb::is_idle_thread(cur) {
+            tcb::switch_to_idle_thread();
+        }
         switch_to_kernel_vspace();
         drop(kernel_lock);
         idle_scheduler_loop();
@@ -904,7 +907,9 @@ fn kernel_exit_after_remote_stall(
             return finish_kernel_exit(ctx, kernel_lock);
         }
 
-        crate::kernel::smp::clear_current_state();
+        if !tcb::is_idle_thread(tcb::current()) {
+            tcb::switch_to_idle_thread();
+        }
         switch_to_kernel_vspace();
         drop(kernel_lock);
         idle_scheduler_loop();

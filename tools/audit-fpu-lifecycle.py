@@ -1435,24 +1435,26 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         name="idle handoff leaves live FPU owner for next switch or explicit release",
-        path="kernel/src/kernel/smp.rs",
+        path="kernel/src/object/tcb.rs",
         patterns=(
-            r"pub\s+fn\s+clear_current_state\(\)\s*\{\s*"
-            r"debug_assert_kernel_lock_held\(\);\s*"
-            r"let\s+hart\s+=\s+current_hart\(\);",
+            r"pub\s+fn\s+switch_to_idle_thread",
+            r"set_current\(idle\)",
+            r"fn\s+configure_idle_thread",
+            r"TCB_FLAG_FPU_DISABLED",
         ),
+        ordered=True,
         forbidden_patterns=(
-            r"pub\s+fn\s+clear_current_state\(\)\s*\{(?:(?!\n\}).)*fpu::",
+            r"pub\s+fn\s+switch_to_idle_thread\(\)[^{]*\{(?:(?!\n\}).)*fpu::",
         ),
     ),
     Check(
-        name="local idle scheduler path clears current TCB without FPU release",
+        name="local idle scheduler path switches to idle TCB without FPU release",
         path="kernel/src/arch/riscv64/kernel/trap.rs",
         patterns=(
             r"pub\s+fn\s+idle_scheduler_loop\(\)\s*->\s*!",
             r"let\s+next\s+=\s+crate::object::tcb::schedule\(\)",
             r"if\s+next\.is_null\(\)",
-            r"crate::kernel::smp::clear_current_state\(\)",
+            r"switch_to_idle_thread\(\)",
             r"switch_to_kernel_vspace\(\)",
             r"None",
         ),

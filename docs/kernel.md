@@ -49,8 +49,6 @@ Shared MI code is allowed to call `UserContext::{cap_reg,msg_info,mr,set_mr}`,
 `CNode`, `AsidControl`, `Thread`, `AsidPool`, `IrqControl`, `IrqHandler`,
 `Zombie`, `Domain`.
 
-There is no `SchedContext` or `SchedControl` tag.
-
 `Untyped_Retype` object IDs are arch-local:
 
 - RISC-V (`arch/riscv64/sel4_arch/object_type.rs`): Untyped, TCB, Endpoint,
@@ -132,8 +130,15 @@ Every trap returns through `kernel_exit` in the arch `trap.rs`
 2. Otherwise enqueue the current TCB if it is still runnable.
 3. Dequeue the runqueue head. On a different TCB, switch VSpace and restore
    that context.
-4. If the queue is empty and current is not runnable, drop the kernel lock
-   and idle (`WFI`) until something is woken.
+4. If the queue is empty and current is not runnable, switch `current` to
+   that core's idle TCB, install the kernel VSpace, drop the kernel lock,
+   and wait (`WFI` / `HLT`) until something is woken.
+
+Each core has a static idle TCB created at boot (`create_idle_threads`),
+matching seL4 `ksIdleThread`. Idle is never enqueued. The idle TCB context
+is filled as upstream does (`idle_thread` PC, kernel privilege, FPU
+disabled) but is not restored through `sret`/`sysret`; the wait loop stays
+in kernel mode.
 
 Timer interrupts therefore switch threads whenever another runnable TCB is
 queued on the same core. Non-blocking syscalls take the same path. This is

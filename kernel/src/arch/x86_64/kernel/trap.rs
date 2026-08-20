@@ -566,7 +566,9 @@ pub fn idle_scheduler_loop() -> ! {
             let _ = service_due_timer_interrupts();
             let next = crate::object::tcb::schedule();
             if next.is_null() {
-                crate::kernel::smp::clear_current_state();
+                if !crate::object::tcb::is_idle_thread(crate::object::tcb::current()) {
+                    crate::object::tcb::switch_to_idle_thread();
+                }
                 switch_to_kernel_vspace();
                 None
             } else {
@@ -666,7 +668,9 @@ fn kernel_exit(
             return finish_kernel_exit(uc as *mut UserContext, kernel_lock);
         }
 
-        crate::kernel::smp::clear_current_state();
+        if !tcb::is_idle_thread(cur) {
+            tcb::switch_to_idle_thread();
+        }
         switch_to_kernel_vspace();
         drop(kernel_lock);
         idle_scheduler_loop();
@@ -687,7 +691,9 @@ fn kernel_exit_after_remote_stall(
             return finish_kernel_exit(ctx, kernel_lock);
         }
 
-        crate::kernel::smp::clear_current_state();
+        if !tcb::is_idle_thread(tcb::current()) {
+            tcb::switch_to_idle_thread();
+        }
         switch_to_kernel_vspace();
         drop(kernel_lock);
         idle_scheduler_loop();
